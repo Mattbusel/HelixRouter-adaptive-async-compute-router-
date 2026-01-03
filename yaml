@@ -1,0 +1,13 @@
+
+---
+
+## Quick next upgrades (easy wins)
+If you want stars, these are the “polish multipliers”:
+1. Add `--jobs`, `--parallelism`, `--seed` flags via `clap`
+2. Add `tracing` spans per job with `job.id` and chosen strategy
+3. Add a simple ASCII chart at the end (counts per strategy as bars)
+4. Add `criterion` benchmark: naive always-spawn vs HelixRouter
+
+---
+
+
