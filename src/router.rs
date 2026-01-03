@@ -3,44 +3,18 @@ use crate::types::{Job, JobKind, Output, Strategy};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
 };
 
-use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
-const LAT_SAMPLE_CAP: usize = 2048;
-
-#[derive(Clone)]
-pub struct Router {
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    cfg: RouterConfig,
-
-    // cpu lane
-    cpu_tx: mpsc::Sender<CpuWork>,
-    cpu_slots: Semaphore,
-
-    // per-kind batch buffers + per-kind flush armed flags
-    batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>>,
-    batch_flush_armed: HashMap<JobKind, AtomicBool>,
-
-    // counters
-    routed: HashMap<Strategy, AtomicU64>,
-    dropped: AtomicU64,
-    completed: AtomicU64,
-
-    // latency by strategy
-    latency: HashMap<Strategy, LatencyTracker>,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub inline_threshold: u64,
     pub spawn_threshold: u64,
@@ -48,467 +22,486 @@ pub struct RouterConfig {
     pub cpu_queue_cap: usize,
     pub cpu_parallelism: usize,
 
-    /// if busy permits >= threshold, we start preferring Batch/Drop
     pub backpressure_busy_threshold: usize,
 
     pub batch_max_size: usize,
     pub batch_max_delay_ms: u64,
 }
 
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            inline_threshold: 8_000,
+            spawn_threshold: 60_000,
+            cpu_queue_cap: 512,
+            cpu_parallelism: 8,
+            backpressure_busy_threshold: 7,
+            batch_max_size: 8,
+            batch_max_delay_ms: 10,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Router {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    cfg: RwLock<RouterConfig>,
+
+    cpu_tx: mpsc::Sender<CpuWork>,
+    cpu_slots: Arc<Semaphore>,
+
+    batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>>,
+
+    routed: Mutex<HashMap<Strategy, u64>>,
+    dropped: AtomicU64,
+    completed: AtomicU64,
+
+    latency: Mutex<HashMap<Strategy, LatencyAgg>>,
+}
+
+struct CpuWork {
+    job: Job,
+    reply: oneshot::Sender<Vec<Output>>,
+    enqueued_at: Instant,
+}
+
+struct BatchEntry {
+    job: Job,
+    reply: oneshot::Sender<Vec<Output>>,
+    enqueued_at: Instant,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LatencyAgg {
+    count: u64,
+    sum_ms: f64,
+    p95_ms: u64,
+    samples_ms: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RouterStats {
     pub routed: HashMap<Strategy, u64>,
     pub dropped: u64,
     pub completed: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LatencySummary {
+    pub strategy: Strategy,
     pub count: u64,
     pub avg_ms: f64,
     pub p95_ms: u64,
 }
 
-struct CpuWork {
-    job: Job,
-    reply: oneshot::Sender<Vec<Output>>,
-}
-
-struct BatchEntry {
-    job: Job,
-    reply: oneshot::Sender<Vec<Output>>,
-}
-
-struct LatencyTracker {
-    count: AtomicU64,
-    sum_ms: AtomicU64,
-    samples_ms: Mutex<VecDeque<u64>>,
-}
-
-impl LatencyTracker {
-    fn new() -> Self {
-        Self {
-            count: AtomicU64::new(0),
-            sum_ms: AtomicU64::new(0),
-            samples_ms: Mutex::new(VecDeque::with_capacity(LAT_SAMPLE_CAP)),
-        }
-    }
-
-    async fn record(&self, ms: u64) {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.sum_ms.fetch_add(ms, Ordering::Relaxed);
-
-        let mut g = self.samples_ms.lock().await;
-        if g.len() >= LAT_SAMPLE_CAP {
-            g.pop_front();
-        }
-        g.push_back(ms);
-    }
-
-    async fn snapshot(&self) -> LatencySummary {
-        let count = self.count.load(Ordering::Relaxed);
-        let sum_ms = self.sum_ms.load(Ordering::Relaxed);
-
-        let mut v: Vec<u64> = {
-            let g = self.samples_ms.lock().await;
-            g.iter().copied().collect()
-        };
-        v.sort_unstable();
-
-        let p95_ms = if v.is_empty() {
-            0
-        } else {
-            let idx = ((v.len() as f64) * 0.95).ceil() as usize;
-            v[idx.min(v.len() - 1)]
-        };
-
-        let avg_ms = if count == 0 { 0.0 } else { sum_ms as f64 / count as f64 };
-
-        LatencySummary { count, avg_ms, p95_ms }
-    }
-}
-
 impl Router {
     pub fn new(cfg: RouterConfig) -> Self {
-        let (cpu_tx, cpu_rx) = mpsc::channel(cfg.cpu_queue_cap);
+        let (cpu_tx, cpu_rx) = mpsc::channel::<CpuWork>(cfg.cpu_queue_cap);
 
-        let mut routed = HashMap::new();
-        for s in [
-            Strategy::Inline,
-            Strategy::Spawn,
-            Strategy::CpuPool,
-            Strategy::Batch,
-            Strategy::Drop,
-        ] {
-            routed.insert(s, AtomicU64::new(0));
-        }
-
-        let mut latency = HashMap::new();
-        for s in routed.keys() {
-            latency.insert(*s, LatencyTracker::new());
-        }
-
-        let mut batches = HashMap::new();
-        let mut batch_flush_armed = HashMap::new();
-        for k in [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk] {
-            batches.insert(k, Mutex::new(VecDeque::new()));
-            batch_flush_armed.insert(k, AtomicBool::new(false));
-        }
+        let mut batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>> = HashMap::new();
+        batches.insert(JobKind::HashMix, Mutex::new(VecDeque::new()));
+        batches.insert(JobKind::PrimeCount, Mutex::new(VecDeque::new()));
+        batches.insert(JobKind::MonteCarloRisk, Mutex::new(VecDeque::new()));
 
         let inner = Arc::new(Inner {
-            cfg: cfg.clone(),
+            cfg: RwLock::new(cfg.clone()),
             cpu_tx,
-            cpu_slots: Semaphore::new(cfg.cpu_parallelism),
+            cpu_slots: Arc::new(Semaphore::new(cfg.cpu_parallelism)),
             batches,
-            batch_flush_armed,
-            routed,
+            routed: Mutex::new(HashMap::new()),
             dropped: AtomicU64::new(0),
             completed: AtomicU64::new(0),
-            latency,
+            latency: Mutex::new(HashMap::new()),
         });
 
-        // CPU dispatcher loop
+        // CPU dispatcher
         let inner2 = inner.clone();
-        tokio::spawn(async move { cpu_dispatch_loop(inner2, cpu_rx).await });
+        tokio::spawn(async move {
+            cpu_dispatch_loop(inner2, cpu_rx).await;
+        });
 
         Self { inner }
     }
 
-    pub async fn submit(&self, job: Job) -> Result<Vec<Output>, &'static str> {
-        let t0 = Instant::now();
-        let strat = self.choose_strategy(&job);
-        self.bump(strat);
-
-        debug!(
-            job_id = job.id,
-            kind = ?job.kind,
-            cost = job.compute_cost,
-            scaling = job.scaling_potential,
-            latency_budget = job.latency_budget_ms,
-            strategy = %strat,
-            cpu_busy = self.busy_estimate(),
-            "route"
-        );
-
-        let res = match strat {
-            Strategy::Inline => Ok(execute_job(job)),
-            Strategy::Spawn => {
-                let (tx, rx) = oneshot::channel();
-                tokio::spawn(async move {
-                    let _ = tx.send(execute_job(job));
-                });
-                rx.await.map_err(|_| "spawn canceled")
-            }
-            Strategy::CpuPool => {
-                let (tx, rx) = oneshot::channel();
-                self.inner
-                    .cpu_tx
-                    .send(CpuWork { job, reply: tx })
-                    .await
-                    .map_err(|_| "cpu queue closed")?;
-                rx.await.map_err(|_| "cpu canceled")
-            }
-            Strategy::Batch => self.submit_batch(job).await,
-            Strategy::Drop => Err("dropped"),
-        };
-
-        if let Ok(_) = res {
-            self.inner.completed.fetch_add(1, Ordering::Relaxed);
-            if let Some(t) = self.inner.latency.get(&strat) {
-                t.record(t0.elapsed().as_millis() as u64).await;
-            }
-        }
-
-        res
+    pub async fn config(&self) -> RouterConfig {
+        self.inner.cfg.read().await.clone()
     }
 
-    async fn submit_batch(&self, job: Job) -> Result<Vec<Output>, &'static str> {
-        let kind = job.kind;
-        let (tx, rx) = oneshot::channel();
-
-        // push into buffer
-        let buf = self.inner.batches.get(&kind).unwrap();
-        let mut g = buf.lock().await;
-        g.push_back(BatchEntry { job, reply: tx });
-
-        // if we reached max size, flush immediately
-        if g.len() >= self.inner.cfg.batch_max_size {
-            let drained: Vec<_> = g.drain(..).collect();
-            drop(g);
-
-            // disarm any pending timer flush
-            if let Some(flag) = self.inner.batch_flush_armed.get(&kind) {
-                flag.store(false, Ordering::Relaxed);
-            }
-
-            flush_batch_inner(self.inner.clone(), kind, drained).await;
-            return rx.await.map_err(|_| "batch canceled");
-        }
-
-        // otherwise arm a max-delay flush if not already armed
-        let should_arm = self
-            .inner
-            .batch_flush_armed
-            .get(&kind)
-            .unwrap()
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok();
-
-        drop(g);
-
-        if should_arm {
-            let inner = self.inner.clone();
-            tokio::spawn(async move {
-                sleep(Duration::from_millis(inner.cfg.batch_max_delay_ms)).await;
-
-                // timer fired: drain whatever exists
-                let buf = inner.batches.get(&kind).unwrap();
-                let mut g = buf.lock().await;
-                if g.is_empty() {
-                    inner
-                        .batch_flush_armed
-                        .get(&kind)
-                        .unwrap()
-                        .store(false, Ordering::Relaxed);
-                    return;
-                }
-                let drained: Vec<_> = g.drain(..).collect();
-                drop(g);
-
-                inner
-                    .batch_flush_armed
-                    .get(&kind)
-                    .unwrap()
-                    .store(false, Ordering::Relaxed);
-
-                flush_batch_inner(inner, kind, drained).await;
-            });
-        }
-
-        rx.await.map_err(|_| "batch canceled")
+    pub async fn set_config(&self, cfg: RouterConfig) {
+        *self.inner.cfg.write().await = cfg;
     }
 
-    pub fn stats_snapshot(&self) -> RouterStats {
-        let mut routed = HashMap::new();
-        for (k, v) in &self.inner.routed {
-            routed.insert(*k, v.load(Ordering::Relaxed));
-        }
+    pub async fn stats_snapshot(&self) -> RouterStats {
+        let routed = self.inner.routed.lock().await.clone();
+
+        // same for any other tokio::sync::Mutex fields:
+        // let batches = self.inner.batches.lock().await.clone();
+        // etc.
+
         RouterStats {
             routed,
-            dropped: self.inner.dropped.load(Ordering::Relaxed),
-            completed: self.inner.completed.load(Ordering::Relaxed),
+            completed: self.inner.completed.load(std::sync::atomic::Ordering::Relaxed),
+            dropped: self.inner.dropped.load(std::sync::atomic::Ordering::Relaxed),
+            // ...
         }
     }
 
-    pub async fn latency_report(&self) -> Vec<(Strategy, LatencySummary)> {
+
+    pub async fn latency_report(&self) -> Vec<LatencySummary> {
+        let map = self.inner.latency.lock().await.clone();
         let mut out = Vec::new();
-        for (k, v) in &self.inner.latency {
-            out.push((*k, v.snapshot().await));
+        for (strategy, agg) in map {
+            let avg = if agg.count == 0 { 0.0 } else { agg.sum_ms / agg.count as f64 };
+            out.push(LatencySummary {
+                strategy,
+                count: agg.count,
+                avg_ms: avg,
+                p95_ms: agg.p95_ms,
+            });
         }
+        out.sort_by_key(|r| r.strategy.to_string());
         out
     }
 
-    fn bump(&self, s: Strategy) {
-        self.inner.routed.get(&s).unwrap().fetch_add(1, Ordering::Relaxed);
+    pub async fn submit(&self, job: Job) -> Option<Vec<Output>> {
+        let cfg = self.inner.cfg.read().await.clone();
+
+        let cpu_busy = cfg
+            .cpu_parallelism
+            .saturating_sub(self.inner.cpu_slots.available_permits());
+
+        let strategy = choose_strategy(&cfg, &job, cpu_busy);
+
+        debug!(
+            "route job_id={} kind={:?} cost={} scaling={} latency_budget_ms={} strategy={} cpu_busy={}",
+            job.id,
+            job.kind,
+            job.compute_cost,
+            job.scaling_potential,
+            job.latency_budget_ms,
+            strategy,
+            cpu_busy
+        );
+
+        match strategy {
+            Strategy::Drop => {
+                self.bump_route(Strategy::Drop).await;
+                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+
+            Strategy::Inline => {
+                self.bump_route(Strategy::Inline).await;
+                let t0 = Instant::now();
+                let out = execute_job(&job);
+                self.record_latency(Strategy::Inline, t0.elapsed().as_millis() as u64).await;
+                self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                Some(out)
+            }
+
+            Strategy::Spawn => {
+                self.bump_route(Strategy::Spawn).await;
+                let t0 = Instant::now();
+
+                let j = job.clone();
+                let handle = tokio::spawn(async move { execute_job(&j) });
+                let out = handle.await.unwrap_or_default();
+
+                self.record_latency(Strategy::Spawn, t0.elapsed().as_millis() as u64).await;
+                self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                Some(out)
+            }
+
+            Strategy::CpuPool => {
+                self.bump_route(Strategy::CpuPool).await;
+
+                let (tx, rx) = oneshot::channel::<Vec<Output>>();
+                let work = CpuWork {
+                    job,
+                    reply: tx,
+                    enqueued_at: Instant::now(),
+                };
+
+                if self.inner.cpu_tx.try_send(work).is_err() {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    None
+                } else {
+                    let out = rx.await.unwrap_or_default();
+                    self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                    Some(out)
+                }
+            }
+
+            Strategy::Batch => {
+                self.bump_route(Strategy::Batch).await;
+
+                let (tx, rx) = oneshot::channel::<Vec<Output>>();
+                let entry = BatchEntry {
+                    job: job.clone(),
+                    reply: tx,
+                    enqueued_at: Instant::now(),
+                };
+
+                let buf = match self.inner.batches.get(&job.kind) {
+                    Some(b) => b,
+                    None => return None,
+                };
+
+                {
+                    let mut q = buf.lock().await;
+                    q.push_back(entry);
+                    let q_len = q.len();
+
+                    if q_len >= cfg.batch_max_size {
+                        // flush now
+                        drop(q);
+                        flush_batch_kind(self.inner.clone(), job.kind).await;
+                    } else {
+                        // schedule time flush
+                        let inner = self.inner.clone();
+                        let kind = job.kind;
+                        let delay_ms = cfg.batch_max_delay_ms;
+                        tokio::spawn(async move {
+                            sleep(Duration::from_millis(delay_ms)).await;
+                            flush_batch_kind(inner, kind).await;
+                        });
+                    }
+                }
+
+                let out = rx.await.unwrap_or_default();
+                self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                Some(out)
+            }
+        }
     }
 
-    fn busy_estimate(&self) -> usize {
-        self.inner.cfg.cpu_parallelism - self.inner.cpu_slots.available_permits()
+    async fn bump_route(&self, s: Strategy) {
+        let mut m = self.inner.routed.lock().await;
+        *m.entry(s).or_insert(0) += 1;
     }
 
-    fn choose_strategy(&self, job: &Job) -> Strategy {
-        // pressure-aware: if CPU is saturated, prefer batch and/or drop
-        let busy = self.busy_estimate();
-        let pressured = busy >= self.inner.cfg.backpressure_busy_threshold;
+    async fn record_latency(&self, s: Strategy, ms: u64) {
+        let mut m = self.inner.latency.lock().await;
+        let agg = m.entry(s).or_insert_with(LatencyAgg::default);
 
-        // tiny jobs
-        if job.compute_cost <= self.inner.cfg.inline_threshold {
-            return Strategy::Inline;
+        agg.count += 1;
+        agg.sum_ms += ms as f64;
+
+        agg.samples_ms.push(ms);
+        if agg.samples_ms.len() > 512 {
+            agg.samples_ms.remove(0);
         }
 
-        // medium jobs
-        if job.compute_cost <= self.inner.cfg.spawn_threshold && !pressured {
-            return Strategy::Spawn;
+        let mut tmp = agg.samples_ms.clone();
+        tmp.sort_unstable();
+        if !tmp.is_empty() {
+            let idx = ((tmp.len() as f64) * 0.95).ceil() as usize;
+            let idx = idx.saturating_sub(1).min(tmp.len() - 1);
+            agg.p95_ms = tmp[idx];
         }
-
-        // high scaling potential wants batching (esp under pressure)
-        if job.scaling_potential >= 0.80 {
-            return Strategy::Batch;
-        }
-
-        // if we're pressured and job is latency-tight, drop it
-        if pressured && job.latency_budget_ms <= 10 {
-            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-            return Strategy::Drop;
-        }
-
-        Strategy::CpuPool
     }
 }
 
-// =====================
-// CPU dispatcher
-// =====================
+fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strategy {
+    if cpu_busy >= cfg.backpressure_busy_threshold {
+        if job.scaling_potential >= 0.65 {
+            return Strategy::Batch;
+        }
+        return Strategy::Drop;
+    }
+
+    if job.compute_cost <= cfg.inline_threshold {
+        return Strategy::Inline;
+    }
+
+    if job.compute_cost <= cfg.spawn_threshold {
+        return Strategy::Spawn;
+    }
+
+    if job.scaling_potential >= 0.70 {
+        Strategy::Batch
+    } else {
+        Strategy::CpuPool
+    }
+}
 
 async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
     info!("cpu dispatcher started");
 
     while let Some(work) = rx.recv().await {
-        let inner = inner.clone();
-        tokio::spawn(async move {
-            let permit = match inner.cpu_slots.acquire().await {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-
-            let CpuWork { job, reply } = work;
-
-            let out = tokio::task::spawn_blocking(move || execute_job(job))
-                .await
-                .unwrap_or_else(|_| vec![]);
-
-            let _ = reply.send(out);
-            drop(permit);
-        });
-    }
-}
-
-// =====================
-// Batch executor
-// =====================
-
-async fn flush_batch_inner(inner: Arc<Inner>, kind: JobKind, entries: Vec<BatchEntry>) {
-    // For now we compute per-job inside a single bounded CPU slot.
-    // This is the "readable MVP". Next step is true vectorized batching per-kind.
-    tokio::spawn(async move {
-        let permit = match inner.cpu_slots.acquire().await {
+        let permit = match inner.cpu_slots.clone().acquire_owned().await {
             Ok(p) => p,
-            Err(_) => return,
+            Err(_) => break,
         };
 
-        let jobs: Vec<_> = entries.iter().map(|e| e.job.clone()).collect();
+        let inner2 = inner.clone();
+        tokio::spawn(async move {
+            let j = work.job.clone();
 
-        let results = tokio::task::spawn_blocking(move || {
-            jobs.into_iter().map(execute_job).collect::<Vec<_>>()
-        })
-            .await
-            .unwrap_or_else(|_| vec![]);
+            let handle = tokio::task::spawn_blocking(move || execute_job(&j));
+            let out = handle.await.unwrap_or_default();
 
-        debug!(kind = ?kind, batch_n = results.len(), "batch flushed");
+            let _ = work.reply.send(out);
 
-        for (e, r) in entries.into_iter().zip(results.into_iter()) {
-            let _ = e.reply.send(r);
-        }
+            let e2e_ms = work.enqueued_at.elapsed().as_millis() as u64;
 
-        drop(permit);
-    });
+            {
+                let mut m = inner2.latency.lock().await;
+                let agg = m.entry(Strategy::CpuPool).or_insert_with(LatencyAgg::default);
+                agg.count += 1;
+                agg.sum_ms += e2e_ms as f64;
+                agg.samples_ms.push(e2e_ms);
+                if agg.samples_ms.len() > 512 {
+                    agg.samples_ms.remove(0);
+                }
+                let mut tmp = agg.samples_ms.clone();
+                tmp.sort_unstable();
+                if !tmp.is_empty() {
+                    let idx = ((tmp.len() as f64) * 0.95).ceil() as usize;
+                    let idx = idx.saturating_sub(1).min(tmp.len() - 1);
+                    agg.p95_ms = tmp[idx];
+                }
+            }
+
+            drop(permit); // owned permit: safe inside spawned task
+        });
+
+    }
+
+    info!("cpu dispatcher exiting");
 }
 
-// =====================
-// Job execution
-// =====================
+async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
+    let cfg = inner.cfg.read().await.clone();
 
-fn execute_job(job: Job) -> Vec<Output> {
+    let buf = match inner.batches.get(&kind) {
+        Some(b) => b,
+        None => return,
+    };
+
+    let mut batch: Vec<BatchEntry> = Vec::new();
+    {
+        let mut q = buf.lock().await;
+        if q.is_empty() {
+            return;
+        }
+
+        let n = q.len().min(cfg.batch_max_size);
+        for _ in 0..n {
+            if let Some(e) = q.pop_front() {
+                batch.push(e);
+            }
+        }
+    }
+
+    // demo "batch": execute each job and respond
+    for e in batch {
+        let out = execute_job(&e.job);
+        let _ = e.reply.send(out);
+
+        let e2e_ms = e.enqueued_at.elapsed().as_millis() as u64;
+        let mut m = inner.latency.lock().await;
+        let agg = m.entry(Strategy::Batch).or_insert_with(LatencyAgg::default);
+        agg.count += 1;
+        agg.sum_ms += e2e_ms as f64;
+        agg.samples_ms.push(e2e_ms);
+        if agg.samples_ms.len() > 512 {
+            agg.samples_ms.remove(0);
+        }
+        let mut tmp = agg.samples_ms.clone();
+        tmp.sort_unstable();
+        if !tmp.is_empty() {
+            let idx = ((tmp.len() as f64) * 0.95).ceil() as usize;
+            let idx = idx.saturating_sub(1).min(tmp.len() - 1);
+            agg.p95_ms = tmp[idx];
+        }
+    }
+}
+
+// ===== demo job execution =====
+
+fn execute_job(job: &Job) -> Vec<Output> {
     match job.kind {
-        JobKind::HashMix => vec![hash_mix(job.inputs.get(0).copied().unwrap_or(0), job.compute_cost)],
-        JobKind::PrimeCount => vec![count_primes(job.compute_cost.min(80_000))],
-        JobKind::MonteCarloRisk => monte_carlo_risk(job),
+        JobKind::HashMix => vec![hashmix(job)],
+        JobKind::PrimeCount => vec![primecount(job)],
+        JobKind::MonteCarloRisk => vec![montecarlo_risk(job)],
     }
 }
 
-// =====================
-// Monte Carlo risk / ML-heavy math
-// =====================
-//
-// This is quant-shaped CPU work:
-// - deterministic PRNG per job id
-// - nonlinear transform (tanh) on a noisy factor model
-// - aggregates mean/variance and tail (p95)
-//
-// outputs are scaled into u64 for easy printing / transport.
-
-fn monte_carlo_risk(job: Job) -> Vec<Output> {
-    // Interpret compute_cost as "how many paths worth of work"
-    // 1_000 cost ≈ 1 path unit (clamped)
-    let paths = (job.compute_cost / 1_000).clamp(200, 60_000) as usize;
-    let dim = job.inputs.len().clamp(4, 32);
-
-    let mut rng = job.id ^ 0x9E3779B97F4A7C15u64;
-    let mut samples: Vec<f64> = Vec::with_capacity(paths);
-
-    // Precompute factors from inputs (pretend: features / exposures)
-    let mut factors = vec![0.0f64; dim];
-    for i in 0..dim {
-        factors[i] = (job.inputs[i % job.inputs.len()] as f64 * 0.000001).sin()
-            + (i as f64 * 0.01).cos();
-    }
-
-    for _ in 0..paths {
-        let mut x = 0.0f64;
-
-        // "factor model" draw
-        for i in 0..dim {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u = (rng as f64 / u64::MAX as f64) - 0.5; // (-0.5, 0.5)
-            x += u * factors[i];
-        }
-
-        // nonlinear response: saturating "PnL / score"
-        let y = (x * 3.0).tanh();
-        samples.push(y);
-    }
-
-    // aggregate
-    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-
-    let var = samples
-        .iter()
-        .map(|v| {
-            let d = v - mean;
-            d * d
-        })
-        .sum::<f64>()
-        / samples.len() as f64;
-
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p95 = samples[((samples.len() as f64) * 0.95) as usize].min(1.0);
-
-    // scale to u64
-    let scale = 1_000_000.0;
-    vec![(mean * scale) as u64, (var * scale) as u64, (p95 * scale) as u64]
-}
-
-// =====================
-// Helpers
-// =====================
-
-fn hash_mix(seed: u64, rounds: u64) -> u64 {
-    let mut x = seed ^ 0x9E3779B97F4A7C15u64;
-    for _ in 0..rounds.min(100_000) {
+fn hashmix(job: &Job) -> Output {
+    let mut x: u64 = 0xcbf29ce484222325;
+    for &v in &job.inputs {
+        x ^= v;
+        x = x.wrapping_mul(0x100000001b3);
         x ^= x >> 33;
         x = x.wrapping_mul(0xff51afd7ed558ccd);
         x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+        x ^= x >> 33;
     }
-    x
+    let mut t = x;
+    for _ in 0..(job.compute_cost / 64).max(1) {
+        t = t.rotate_left(7) ^ 0x9e3779b97f4a7c15;
+        t = t.wrapping_mul(0xbf58476d1ce4e5b9);
+    }
+    Output::U64(t)
 }
 
-fn count_primes(n: u64) -> u64 {
-    if n < 2 {
-        return 0;
-    }
+fn primecount(job: &Job) -> Output {
+    let n = (job.compute_cost as usize).min(250_000).max(10_000);
+    let mut is_prime = vec![true; n + 1];
+    is_prime[0] = false;
+    is_prime[1] = false;
 
-    let mut count = 0u64;
-    for i in 2..=n {
-        let mut is_prime = true;
-        let r = (i as f64).sqrt() as u64;
-        for d in 2..=r {
-            if i % d == 0 {
-                is_prime = false;
-                break;
+    let mut p = 2;
+    while p * p <= n {
+        if is_prime[p] {
+            let mut k = p * p;
+            while k <= n {
+                is_prime[k] = false;
+                k += p;
             }
         }
-        if is_prime {
-            count += 1;
-        }
+        p += 1;
     }
-    count
+
+    let count = is_prime.iter().filter(|&&b| b).count() as u64;
+    Output::U64(count)
+}
+
+fn montecarlo_risk(job: &Job) -> Output {
+    let sims = (job.compute_cost / 200).min(50_000).max(5_000) as usize;
+
+    let mut seed = 0x1234_5678_9abc_def0u64 ^ job.id;
+    let mut samples: Vec<f64> = Vec::with_capacity(sims);
+
+    for _ in 0..sims {
+        // xorshift64*
+        seed ^= seed >> 12;
+        seed ^= seed << 25;
+        seed ^= seed >> 27;
+        let r = seed.wrapping_mul(0x2545F4914F6CDD1D);
+
+        let u = (r as f64 / u64::MAX as f64) * 2.0 - 1.0;
+        let base = u * 0.05;
+
+        let mut mean = 0.0;
+        let mut vol = 1.0;
+        for &v in &job.inputs {
+            mean += (v as f64 / u64::MAX as f64) * 0.0001;
+            vol += ((v.rotate_left(13) as f64 / u64::MAX as f64) - 0.5) * 0.01;
+        }
+
+        let ret = mean + base * vol.max(0.1);
+        samples.push(ret);
+    }
+
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let idx = ((samples.len() as f64) * 0.05).floor() as usize;
+    let idx = idx.min(samples.len() - 1);
+
+    Output::F64(samples[idx])
 }
