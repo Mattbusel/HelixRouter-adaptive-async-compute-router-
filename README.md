@@ -1,25 +1,62 @@
-# HelixRouter 
-An adaptive Tokio job router that switches execution strategy based on **size vs scaling potential**.
+# HelixRouter
 
-HelixRouter is a small, readable reference implementation for routing mixed workloads in async Rust without accidentally
-blocking the Tokio runtime.
+**HelixRouter** is an adaptive Tokio job router that dynamically selects execution strategies based on **job size**, **parallel payoff**, and **system pressure**.
 
----
+It is designed to explore a simple but under-addressed idea:
 
-## What this is
-- A **policy-driven router** for jobs that may be cheap, moderately expensive, or CPU-heavy.
-- A correct pattern for bridging **async concurrency** with **bounded CPU parallelism** (`spawn_blocking` + `Semaphore`).
-- A toy system that behaves like a real one: **routing decisions + backpressure + counters**.
-
-## What this is not
-- Not a distributed task queue.
-- Not a durable job system (no persistence, retries, DLQ).
-- Not a production scheduler replacement.
-- Not an attempt to be “the platform”. This is intentionally small.
+> Concurrency is cheap. CPU is not.  
+> The best execution strategy depends on *how well the work scales*, not just how big it is.
 
 ---
 
-## Architecture
+## Why
+
+Most async systems default to:
+- spawn everything
+- or batch everything
+- or push complexity downstream
+
+HelixRouter instead treats execution strategy as a **first-class scheduling decision**.
+
+Small jobs should finish *now*.  
+Medium jobs should parallelize *cheaply*.  
+CPU-heavy jobs should be *bounded*.  
+When saturated, the system should *push back*.
+
+This project is a working prototype of that philosophy.
+
+---
+
+## What It Does (Today)
+
+HelixRouter currently supports **five execution strategies**:
+
+- **`inline`**  
+  Tiny jobs executed immediately on the async task
+
+- **`spawn`**  
+  Medium jobs executed via `tokio::spawn`
+
+- **`cpu_pool`**  
+  CPU-heavy jobs routed through a bounded `spawn_blocking` pool using semaphores
+
+- **`batch`**  
+  Jobs grouped by kind and flushed opportunistically (size / time based)
+
+- **`drop`**  
+  Backpressure policy when the system is saturated
+
+Routing decisions are made per-job using:
+- estimated compute cost
+- scaling potential (parallel payoff)
+- soft latency budget
+- current system pressure
+
+---
+
+## Architecture (High-Level)
+
+
 
 ```text
 submit(job)
@@ -114,31 +151,43 @@ routed[spawn]: 62
 routed[inline]: 12
 routed[backpressure_drop]: 40
 
-Why this exists
+Status
 
-Tokio makes concurrency cheap.
-CPU is not cheap.
+Current state: working prototype
+Primary goal: explore adaptive execution strategy selection
+Secondary goal: provide a clean reference implementation for async routing patterns in Rust
 
-Many async systems eventually mix:
+This is not production software (yet), but it is not a mock or stub either.
 
-fast async work
+Planned Next Phases
 
-medium compute
+External configuration (YAML / TOML)
 
-heavy CPU work that must not block the runtime
+Real load benchmarks
 
-HelixRouter demonstrates one clean way to route that work without turning the runtime into a space heater.
+Strategy tuning via observed latency
 
-Roadmap (tight, intentional)
+Pluggable routing heuristics
 
-Batch routing for high scaling_potential jobs (overhead amortization)
+Tracing / metrics export
 
-Pluggable routing policies (trait-based)
+Integration into a real service
 
-More observability (latency histograms, queue depth, strategy distribution)
+Philosophy
+
+HelixRouter is intentionally opinionated:
+
+Scheduling is policy
+
+Execution is plumbing
+
+Async does not mean free
+
+Backpressure is a feature, not a failure
 
 License
 
+MIT
 MIT
 
 
