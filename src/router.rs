@@ -1,13 +1,17 @@
 use crate::types::{Job, Output, Strategy};
+use crate::types::JobKind;
+
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
 };
-use tokio::sync::{mpsc, oneshot, Semaphore};
+
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -17,9 +21,15 @@ pub struct Router {
 
 struct Inner {
     cfg: RouterConfig,
+
+    // CPU lane: single-consumer dispatcher + bounded spawn_blocking via semaphore
     cpu_tx: mpsc::Sender<CpuWork>,
     cpu_slots: Semaphore,
 
+    // Batch buffers per kind (kept simple and readable)
+    batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>>,
+
+    // counters
     routed: HashMap<Strategy, AtomicU64>,
     dropped: AtomicU64,
     completed: AtomicU64,
@@ -29,12 +39,26 @@ struct Inner {
 pub struct RouterConfig {
     pub inline_threshold: u64,
     pub spawn_threshold: u64,
+
     pub cpu_queue_cap: usize,
     pub cpu_parallelism: usize,
+
+    /// Saturation heuristic: if this many CPU permits are in-use, start dropping.
     pub backpressure_busy_threshold: usize,
+
+    /// Batch flush when this many jobs are buffered (per JobKind).
+    pub batch_max_size: usize,
+
+    /// Batch flush after this delay (ms) if not full yet.
+    pub batch_max_delay_ms: u64,
 }
 
 struct CpuWork {
+    job: Job,
+    reply: oneshot::Sender<Vec<Output>>,
+}
+
+struct BatchEntry {
     job: Job,
     reply: oneshot::Sender<Vec<Output>>,
 }
@@ -47,17 +71,24 @@ impl Router {
         routed.insert(Strategy::Inline, AtomicU64::new(0));
         routed.insert(Strategy::Spawn, AtomicU64::new(0));
         routed.insert(Strategy::CpuPool, AtomicU64::new(0));
+        routed.insert(Strategy::Batch, AtomicU64::new(0));
         routed.insert(Strategy::Drop, AtomicU64::new(0));
+
+        let mut batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>> = HashMap::new();
+        batches.insert(JobKind::HashMix, Mutex::new(VecDeque::new()));
+        batches.insert(JobKind::PrimeCount, Mutex::new(VecDeque::new()));
 
         let inner = Arc::new(Inner {
             cfg: cfg.clone(),
             cpu_tx,
             cpu_slots: Semaphore::new(cfg.cpu_parallelism),
+            batches,
             routed,
             dropped: AtomicU64::new(0),
             completed: AtomicU64::new(0),
         });
 
+        // Single-consumer dispatcher owns the Receiver (Tokio mpsc is MPSC, not MPMC).
         let inner2 = inner.clone();
         tokio::spawn(async move {
             cpu_dispatch_loop(inner2, cpu_rx).await;
@@ -108,6 +139,62 @@ impl Router {
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 Ok(out)
             }
+            Strategy::Batch => {
+                if self.busy_estimate() >= self.inner.cfg.backpressure_busy_threshold {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.bump(Strategy::Drop);
+                    return Err("dropped due to backpressure");
+                }
+
+                let kind = job.kind;
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let entry = BatchEntry { job, reply: reply_tx };
+
+                let batch_buf = self
+                    .inner
+                    .batches
+                    .get(&kind)
+                    .ok_or("unknown job kind")?;
+
+                let mut guard = batch_buf.lock().await;
+                guard.push_back(entry);
+
+                let should_flush = guard.len() >= self.inner.cfg.batch_max_size;
+
+                if should_flush {
+                    let drained: Vec<BatchEntry> = guard.drain(..).collect();
+                    drop(guard);
+                    self.flush_batch(drained).await;
+                } else {
+                    // Schedule a delayed flush. If another flush drains earlier, this becomes a no-op.
+                    let inner = self.inner.clone();
+                    let delay_ms = inner.cfg.batch_max_delay_ms;
+
+                    tokio::spawn(async move {
+                        sleep(Duration::from_millis(delay_ms)).await;
+
+                        let buf = match inner.batches.get(&kind) {
+                            Some(b) => b,
+                            None => return,
+                        };
+
+                        let mut g = buf.lock().await;
+                        if g.is_empty() {
+                            return;
+                        }
+
+                        // Drain whatever is available after the window.
+                        let drained: Vec<BatchEntry> = g.drain(..).collect();
+                        drop(g);
+
+                        flush_batch_inner(inner, drained).await;
+                    });
+                }
+
+                let out = reply_rx.await.map_err(|_| "batch canceled")?;
+                self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                Ok(out)
+            }
             Strategy::Drop => Err("dropped"),
         }
     }
@@ -130,6 +217,7 @@ impl Router {
         }
     }
 
+    /// Heuristic "busy" estimate based on permits currently in-use.
     fn busy_estimate(&self) -> usize {
         let available = self.inner.cpu_slots.available_permits();
         let max = self.inner.cfg.cpu_parallelism;
@@ -140,15 +228,27 @@ impl Router {
         let cost = job.compute_cost;
         let scale = job.scaling_potential;
 
+        // small + low scaling -> inline
         if cost <= self.inner.cfg.inline_threshold && scale < 0.8 {
             return Strategy::Inline;
         }
 
+        // medium + low scaling -> spawn
         if cost <= self.inner.cfg.spawn_threshold && scale < 0.65 {
             return Strategy::Spawn;
         }
 
+        // high scaling potential -> batch (amortize overhead)
+        if scale >= 0.8 {
+            return Strategy::Batch;
+        }
+
+        // otherwise -> bounded CPU lane
         Strategy::CpuPool
+    }
+
+    async fn flush_batch(&self, entries: Vec<BatchEntry>) {
+        flush_batch_inner(self.inner.clone(), entries).await;
     }
 }
 
@@ -186,11 +286,50 @@ async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
     info!("cpu dispatcher exiting");
 }
 
+/// Execute a batch in one blocking task and fan results back to callers.
+async fn flush_batch_inner(inner: Arc<Inner>, entries: Vec<BatchEntry>) {
+    let inner2 = inner.clone();
+
+    tokio::spawn(async move {
+        let permit = match inner2.cpu_slots.acquire().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let t0 = Instant::now();
+
+
+
+
+
+        // We run all jobs in a single spawn_blocking call to amortize overhead.
+        // Each job still produces its own Vec<Output>.
+        let jobs: Vec<Job> = entries.iter().map(|e| e.job.clone()).collect();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            jobs.into_iter().map(execute_job).collect::<Vec<Vec<Output>>>()
+        });
+
+        let results = handle.await.unwrap_or_default();
+        let batch_size = results.len();
+
+        for (entry, result) in entries.into_iter().zip(results.into_iter()) {
+            let _ = entry.reply.send(result);
+        }
+
+        debug!(elapsed_ms = t0.elapsed().as_millis() as u64, "batch done");
+
+
+
+        drop(permit);
+    });
+}
+
 // ===== job execution =====
 
 fn execute_job(job: Job) -> Vec<Output> {
     match job.kind {
-        crate::types::JobKind::HashMix => {
+        JobKind::HashMix => {
             let mut outs = Vec::with_capacity(job.inputs.len() + 1);
             let mut acc = 0u64;
             for &x in &job.inputs {
@@ -201,7 +340,7 @@ fn execute_job(job: Job) -> Vec<Output> {
             outs.push(acc);
             outs
         }
-        crate::types::JobKind::PrimeCount => {
+        JobKind::PrimeCount => {
             let mut outs = Vec::with_capacity(job.inputs.len());
             for &x in &job.inputs {
                 let n = (x % 10_000) + job.compute_cost.min(200_000);
@@ -212,6 +351,7 @@ fn execute_job(job: Job) -> Vec<Output> {
     }
 }
 
+// intentionally “worky” hash mixer
 fn hash_mix(seed: u64, rounds: u64) -> u64 {
     let mut x = seed ^ 0x9E3779B97F4A7C15;
     let r = rounds.max(1).min(2_000_000);
@@ -255,4 +395,5 @@ fn is_prime(x: u64) -> bool {
     }
     true
 }
+
 
