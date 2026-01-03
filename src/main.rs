@@ -1,14 +1,28 @@
-use helixrouter::{
-    router::{Router, RouterConfig},
-    types::{Job, JobKind},
-};
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use tracing_subscriber::EnvFilter;
+// src/main.rs
+mod router;
+mod types;
+
+use router::{Router, RouterConfig};
+use types::{Job, JobKind};
+
+use tokio::task::JoinSet;
+use tracing::info;
+
+fn lcg64(state: &mut u64) -> u64 {
+    // simple deterministic PRNG (no deps)
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *state
+}
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
         .init();
 
     let cfg = RouterConfig {
@@ -18,42 +32,41 @@ async fn main() {
         cpu_queue_cap: 512,
         cpu_parallelism: 8,
 
+        backpressure_busy_threshold: 7,
+
         batch_max_size: 8,
         batch_max_delay_ms: 10,
-
-
-        // saturation heuristic: when this many CPU permits are in-use, start dropping
-        backpressure_busy_threshold: 7,
     };
-
 
     let router = Router::new(cfg);
 
-    // simulation
-    let mut rng = StdRng::seed_from_u64(7);
-    let total_jobs = 200;
+    let total_jobs: usize = 200;
+    let mut rng = 0xC0FFEE_u64;
 
-    let mut handles = Vec::with_capacity(total_jobs);
+    // Fan out submits
+    let mut js = JoinSet::new();
+    for i in 0..total_jobs {
+        let r = router.clone();
 
-    for id in 0..total_jobs {
-        let kind = if rng.gen_bool(0.6) { JobKind::HashMix } else { JobKind::PrimeCount };
-
-        let input_count = rng.gen_range(2..=6);
-        let mut inputs = Vec::with_capacity(input_count);
-        for _ in 0..input_count {
-            inputs.push(rng.gen_range(1..=100_000));
-        }
-
-        let compute_cost = match kind {
-            JobKind::HashMix => rng.gen_range(500..=120_000),
-            JobKind::PrimeCount => rng.gen_range(2_000..=80_000),
+        // generate deterministic-ish jobs
+        let id = i as u64;
+        let kind = if (lcg64(&mut rng) % 2) == 0 {
+            JobKind::HashMix
+        } else {
+            JobKind::PrimeCount
         };
 
-        let scaling_potential: f32 = rng.gen_range(0.0..=1.0);
-        let latency_budget_ms = rng.gen_range(5..=80);
+        let compute_cost = 5_000 + (lcg64(&mut rng) % 140_000);
+        let scaling_potential = ((lcg64(&mut rng) % 100) as f32) / 100.0;
+        let latency_budget_ms = 10 + (lcg64(&mut rng) % 80);
+
+        let mut inputs = Vec::with_capacity(8);
+        for _ in 0..8 {
+            inputs.push(lcg64(&mut rng));
+        }
 
         let job = Job {
-            id: id as u64,
+            id,
             kind,
             inputs,
             compute_cost,
@@ -61,24 +74,42 @@ async fn main() {
             latency_budget_ms,
         };
 
-
-        let r2 = router.clone();
-        handles.push(tokio::spawn(async move {
-            let _ = r2.submit(job).await;
-        }));
+        js.spawn(async move {
+            let _ = r.submit(job).await;
+        });
     }
 
-    for h in handles {
-        let _ = h.await;
+    while let Some(res) = js.join_next().await {
+        if let Err(e) = res {
+            info!("task join error: {e}");
+        }
     }
 
     let stats = router.stats_snapshot();
+
     println!("\n== HelixRouter summary ==");
     println!("completed: {}", stats.completed);
     println!("dropped:   {}", stats.dropped);
-    for (k, v) in stats.routed {
-        println!("routed[{k}]: {v}");
+
+    // Print routed in a stable order
+    let order = [
+        types::Strategy::Inline,
+        types::Strategy::Spawn,
+        types::Strategy::CpuPool,
+        types::Strategy::Batch,
+        types::Strategy::Drop,
+    ];
+
+    for s in order {
+        let v = stats.routed.get(&s).copied().unwrap_or(0);
+        println!("routed[{}]: {}", s, v);
     }
 
-    println!("\nTip: run with RUST_LOG=debug for routing traces.");
+    println!("\n== latency by strategy (end-to-end) ==");
+    for (s, r) in router.latency_report().await {
+        println!(
+            "{:<8} count={} avg={:.2}ms p95={}ms",
+            s, r.count, r.avg_ms, r.p95_ms
+        );
+    }
 }
