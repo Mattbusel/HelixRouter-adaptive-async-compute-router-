@@ -1,69 +1,81 @@
-// src/main.rs
+use std::net::SocketAddr;
+
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use tracing_subscriber::EnvFilter;
+
+mod http;
 mod router;
 mod types;
 
 use router::{Router, RouterConfig};
 use types::{Job, JobKind};
 
-use tokio::task::JoinSet;
-use tracing::info;
-
-fn lcg64(state: &mut u64) -> u64 {
-    // simple deterministic PRNG (no deps)
-    *state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    *state
-}
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
+    // NOTE: keep these fields aligned with src/router.rs RouterConfig.
     let cfg = RouterConfig {
         inline_threshold: 8_000,
         spawn_threshold: 60_000,
-
         cpu_queue_cap: 512,
         cpu_parallelism: 8,
-
         backpressure_busy_threshold: 7,
-
         batch_max_size: 8,
         batch_max_delay_ms: 10,
     };
 
     let router = Router::new(cfg);
 
-    let total_jobs: usize = 200;
-    let mut rng = 0xC0FFEE_u64;
+    // ===== HTTP server =====
+    let addr: SocketAddr = std::env::var("HELIX_HTTP_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+        .parse()
+        .expect("HELIX_HTTP_ADDR parse");
 
-    // Fan out submits
-    let mut js = JoinSet::new();
-    for i in 0..total_jobs {
-        let r = router.clone();
+    let r2 = router.clone();
+    tokio::spawn(async move {
+        http::serve(r2, addr).await;
+    });
 
-        // generate deterministic-ish jobs
-        let id = i as u64;
-        let kind = if (lcg64(&mut rng) % 2) == 0 {
+    println!("HelixRouter UI: http://{addr}");
+    println!("Metrics:        http://{addr}/metrics");
+    println!("Stats JSON:     http://{addr}/api/stats");
+    println!();
+
+    // ===== simulation =====
+    let mut rng: StdRng = StdRng::seed_from_u64(7);
+    let total_jobs: u64 = 200;
+
+    let mut handles = Vec::with_capacity(total_jobs as usize);
+
+    for id in 0..total_jobs {
+        let kind = if rng.gen_bool(0.55) {
+            JobKind::PrimeCount
+        } else if rng.gen_bool(0.75) {
             JobKind::HashMix
         } else {
-            JobKind::PrimeCount
+            JobKind::MonteCarloRisk
         };
 
-        let compute_cost = 5_000 + (lcg64(&mut rng) % 140_000);
-        let scaling_potential = ((lcg64(&mut rng) % 100) as f32) / 100.0;
-        let latency_budget_ms = 10 + (lcg64(&mut rng) % 80);
+        let input_count: usize = rng.gen_range(2..=6);
+        let mut inputs: Vec<u64> = Vec::with_capacity(input_count);
 
-        let mut inputs = Vec::with_capacity(8);
-        for _ in 0..8 {
-            inputs.push(lcg64(&mut rng));
+        // u64 inputs only (no negatives)
+        for _ in 0..input_count {
+            inputs.push(rng.gen_range(0..=200_000));
         }
+
+        let compute_cost: u64 = match kind {
+            JobKind::HashMix => rng.gen_range(500..=120_000),
+            JobKind::PrimeCount => rng.gen_range(2_000..=80_000),
+            JobKind::MonteCarloRisk => rng.gen_range(20_000..=250_000),
+        };
+
+        let scaling_potential: f32 = rng.gen_range(0.0..=1.0);
+        let latency_budget_ms: u64 = rng.gen_range(5..=80);
 
         let job = Job {
             id,
@@ -74,24 +86,24 @@ async fn main() {
             latency_budget_ms,
         };
 
-        js.spawn(async move {
+        let r = router.clone();
+        handles.push(tokio::spawn(async move {
             let _ = r.submit(job).await;
-        });
+        }));
     }
 
-    while let Some(res) = js.join_next().await {
-        if let Err(e) = res {
-            info!("task join error: {e}");
-        }
+    for h in handles {
+        let _ = h.await;
     }
 
-    let stats = router.stats_snapshot();
+    let stats = router.stats_snapshot().await;
 
-    println!("\n== HelixRouter summary ==");
+
+    println!("== HelixRouter summary ==");
     println!("completed: {}", stats.completed);
     println!("dropped:   {}", stats.dropped);
 
-    // Print routed in a stable order
+    // stable order
     let order = [
         types::Strategy::Inline,
         types::Strategy::Spawn,
@@ -102,14 +114,23 @@ async fn main() {
 
     for s in order {
         let v = stats.routed.get(&s).copied().unwrap_or(0);
-        println!("routed[{}]: {}", s, v);
+        println!("routed[{s}]: {v}");
     }
 
-    println!("\n== latency by strategy (end-to-end) ==");
-    for (s, r) in router.latency_report().await {
+    println!();
+    println!("== latency by strategy (end-to-end) ==");
+
+    for r in router.latency_report().await {
         println!(
             "{:<8} count={} avg={:.2}ms p95={}ms",
-            s, r.count, r.avg_ms, r.p95_ms
+            r.strategy, r.count, r.avg_ms, r.p95_ms
         );
     }
+
+
+    println!();
+    println!("Sim finished. UI still running. Ctrl+C to exit.");
+
+    tokio::signal::ctrl_c().await.unwrap();
+    println!("bye");
 }
