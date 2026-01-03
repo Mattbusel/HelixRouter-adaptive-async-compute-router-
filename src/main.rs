@@ -14,11 +14,14 @@ async fn main() {
     let cfg = RouterConfig {
         inline_threshold: 8_000,
         spawn_threshold: 60_000,
-        cpu_pool_workers: 0, // unused in dispatcher model
+
         cpu_queue_cap: 512,
         cpu_parallelism: 8,
-        backpressure_queue: 7, // saturation heuristic
+
+        // saturation heuristic: when this many CPU permits are in-use, start dropping
+        backpressure_busy_threshold: 7,
     };
+
 
     let router = Router::new(cfg);
 
@@ -46,13 +49,14 @@ async fn main() {
         let latency_budget_ms = rng.gen_range(5..=80);
 
         let job = Job {
-            id,
+            id: id as u64,
             kind,
             inputs,
             compute_cost,
             scaling_potential,
             latency_budget_ms,
         };
+
 
         let r2 = router.clone();
         handles.push(tokio::spawn(async move {
