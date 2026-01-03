@@ -51,6 +51,7 @@ submit(job)
                                                      v
                                               spawn_blocking(job)
 
+
 Key details:
 
 Tokio mpsc::Receiver is single-consumer, so the CPU lane uses a single dispatcher.
@@ -141,8 +142,4 @@ License
 MIT
 
 
-### One tiny code tweak to match the README labels
-Right now your enum prints `drop`. If you want it to print `backpressure_drop` like the README, update `Display for Strategy` in `types.rs`:
 
-```rust
-Strategy::Drop => "backpressure_drop",
