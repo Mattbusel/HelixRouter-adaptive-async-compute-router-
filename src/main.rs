@@ -18,6 +18,10 @@ async fn main() {
         cpu_queue_cap: 512,
         cpu_parallelism: 8,
 
+        batch_max_size: 8,
+        batch_max_delay_ms: 10,
+
+
         // saturation heuristic: when this many CPU permits are in-use, start dropping
         backpressure_busy_threshold: 7,
     };
