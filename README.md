@@ -5,6 +5,14 @@
 **Adaptive async compute routing with live observability.**
 A Rust-native execution router that dynamically decides *how* work should run based on cost, latency budgets, scaling potential, and backpressure  with real-time metrics and a built-in UI.
 
+
+<p align="center">
+  <img
+    src="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/Screenshot%202026-01-03%20142511.png?raw=true"
+    alt="HelixRouter Live UI"
+    width="900"
+  />
+</p>
 ---
 
 ## Why HelixRouter exists
