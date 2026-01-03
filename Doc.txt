@@ -1,0 +1,308 @@
+HelixRouter — Canonical Project Context
+1. Project Overview
+
+HelixRouter is an adaptive, policy-driven async compute router built in Rust using Tokio.
+
+It is designed to route heterogeneous computational jobs across different execution strategies at runtime, based on:
+
+job size (compute cost)
+
+parallel payoff (scaling potential)
+
+latency sensitivity
+
+live system pressure (CPU saturation, semaphore contention)
+
+The core idea is that execution strategy is a first-class decision, not an implicit side effect of tokio::spawn.
+
+HelixRouter is a long-running infrastructure component, not a CLI tool or batch script.
+
+2. Problem Statement
+
+Most async systems answer only:
+
+“Can this job run?”
+
+They do not answer:
+
+Should this job run inline?
+
+Should it be spawned?
+
+Should it be bounded?
+
+Should it be batched?
+
+Should it be dropped under load?
+
+Naively spawning everything leads to:
+
+CPU oversubscription
+
+unpredictable tail latency
+
+lack of backpressure
+
+poor behavior under contention
+
+HelixRouter exists to make execution policy explicit, observable, and adaptive.
+
+3. Core Design Principles
+
+Policy over mechanics
+Execution decisions are explicit and encoded.
+
+Backpressure is a feature
+Dropping work under pressure is sometimes correct.
+
+Async is not free
+CPU and latency are scarce resources.
+
+Observability is mandatory
+Routing decisions must be visible.
+
+Small, composable primitives
+Tokio channels, semaphores, and tasks are used directly.
+
+4. Job Model
+
+Each job declares intent, not instructions.
+
+Job {
+    id: u64,
+    kind: JobKind,
+    inputs: Vec<u64>,
+    compute_cost: u64,
+    scaling_potential: f32,   // 0.0 – 1.0
+    latency_budget_ms: u64,
+}
+
+Key fields
+
+compute_cost
+Approximate cost proxy (used for routing heuristics).
+
+scaling_potential
+How well the job parallelizes or batches.
+
+low → inline/spawn
+
+high → batch / CPU pool
+
+latency_budget_ms
+Soft constraint used in decision making.
+
+5. Execution Strategies
+
+HelixRouter supports multiple execution strategies, selected dynamically per job.
+
+Strategies
+Strategy	Meaning
+Inline	Execute immediately on the calling task
+Spawn	Fire-and-forget async execution
+CpuPool	Bounded CPU execution via spawn_blocking + semaphore
+Batch	Queue and batch similar jobs
+Drop	Intentionally reject work under pressure
+Why this matters
+
+Different jobs benefit from different execution paths.
+No single strategy is optimal across all loads.
+
+6. Routing Logic
+
+Routing decisions are made by combining:
+
+job characteristics
+
+live CPU saturation
+
+semaphore availability
+
+backpressure thresholds
+
+Routing is deterministic but adaptive.
+
+Example routing trace:
+
+route job_id=123 kind=PrimeCount
+cost=98324 scaling=0.31 latency_budget_ms=32
+strategy=cpu_pool cpu_busy=8
+
+
+This reflects actual runtime state, not static rules.
+
+7. CPU Execution Model
+
+CPU-heavy jobs are routed through a single-consumer dispatcher
+
+Work is executed using tokio::spawn_blocking
+
+Concurrency is bounded via a Semaphore
+
+CPU pressure is observable and influences routing
+
+This prevents:
+
+unbounded CPU contention
+
+async runtime starvation
+
+8. Batching Model
+
+Jobs are batched per JobKind
+
+Batches flush when:
+
+size threshold is reached
+
+or max delay elapses
+
+Batches execute in a single blocking task
+
+Results are fanned back to callers
+
+Batching amortizes overhead and improves throughput for scalable jobs.
+
+9. Observability & Metrics
+
+HelixRouter exposes internal behavior via:
+
+Routing logs
+
+Structured tracing logs per job:
+
+job id
+
+job kind
+
+compute cost
+
+scaling potential
+
+latency budget
+
+selected strategy
+
+CPU pressure
+
+Counters
+
+routed per strategy
+
+dropped jobs
+
+completed jobs
+
+Latency tracking
+
+end-to-end latency per strategy
+
+average and p95 summaries
+
+Latency is measured from submit() call to result.
+
+10. Current JobKinds
+
+Existing example workloads (used for simulation):
+
+HashMix
+
+CPU-heavy deterministic hashing
+
+used to simulate compute load
+
+PrimeCount
+
+naive prime counting
+
+intentionally expensive
+
+demonstrates CPU pressure and tail latency
+
+Planned extension:
+
+MonteCarlo / ML-style workload
+
+CPU-heavy
+
+partially parallelizable
+
+batchable
+
+latency-budgeted
+
+11. Intended Use Cases
+
+HelixRouter is designed for:
+
+CPU-heavy async services
+
+inference / transform pipelines
+
+quant or trading systems
+
+mixed-latency workloads
+
+systems where overload behavior matters
+
+It is especially aligned with domains where:
+
+tail latency matters more than averages
+
+dropping work is acceptable or optimal
+
+execution policy impacts profit or correctness
+
+12. What This Project Is Not
+
+Not a Tokio replacement
+
+Not a general scheduler
+
+Not a distributed task queue
+
+Not a finished product
+
+It is a policy-driven execution router and a foundation for more intelligent async systems.
+
+13. Skill Level Signaled
+
+Building HelixRouter correctly requires:
+
+strong Rust ownership + concurrency skills
+
+async/sync boundary correctness
+
+understanding of backpressure and contention
+
+systems-level thinking
+
+This maps to Senior → Strong Senior / Pre-Staff execution-focused engineering.
+
+14. Project Intent
+
+HelixRouter is intentionally:
+
+opinionated
+
+explicit about tradeoffs
+
+conservative about execution
+
+transparent about behavior
+
+The goal is not maximal throughput at all costs, but controlled execution under pressure.
+
+15. Summary (for LLM context)
+
+HelixRouter is an adaptive async execution router that:
+
+makes execution strategy explicit
+
+routes jobs based on cost, scalability, and load
+
+supports inline, spawn, CPU pool, batching, and dropping
+
+prioritizes backpressure and observability
+
+is aligned with infra, quant, and ML platform systems
