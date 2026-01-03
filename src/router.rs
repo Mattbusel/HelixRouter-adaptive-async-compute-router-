@@ -20,7 +20,6 @@ struct Inner {
     cpu_tx: mpsc::Sender<CpuWork>,
     cpu_slots: Semaphore,
 
-    // simple counters
     routed: HashMap<Strategy, AtomicU64>,
     dropped: AtomicU64,
     completed: AtomicU64,
@@ -28,12 +27,11 @@ struct Inner {
 
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
-    pub inline_threshold: u64,   // below this cost: inline
-    pub spawn_threshold: u64,    // below this cost: spawn
-    pub cpu_pool_workers: usize, // worker tasks
-    pub cpu_queue_cap: usize,    // bounded queue
-    pub cpu_parallelism: usize,  // max spawn_blocking in flight
-    pub backpressure_queue: usize, // if queue is this full -> drop some
+    pub inline_threshold: u64,
+    pub spawn_threshold: u64,
+    pub cpu_queue_cap: usize,
+    pub cpu_parallelism: usize,
+    pub backpressure_busy_threshold: usize,
 }
 
 struct CpuWork {
@@ -60,18 +58,16 @@ impl Router {
             completed: AtomicU64::new(0),
         });
 
-        // launch cpu workers
-        for worker_id in 0..cfg.cpu_pool_workers {
-            let inner2 = inner.clone();
-            tokio::spawn(cpu_worker_loop(worker_id, inner2, cpu_rx.clone()));
-        }
+        let inner2 = inner.clone();
+        tokio::spawn(async move {
+            cpu_dispatch_loop(inner2, cpu_rx).await;
+        });
 
         Self { inner }
     }
 
     pub async fn submit(&self, job: Job) -> Result<Vec<Output>, &'static str> {
         let strat = self.choose_strategy(&job);
-
         self.bump(strat);
 
         match strat {
@@ -93,8 +89,7 @@ impl Router {
                 Ok(out)
             }
             Strategy::CpuPool => {
-                // backpressure: if queue is too deep, drop (toy policy)
-                if self.cpu_queue_len_estimate() >= self.inner.cfg.backpressure_queue {
+                if self.busy_estimate() >= self.inner.cfg.backpressure_busy_threshold {
                     self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                     self.bump(Strategy::Drop);
                     return Err("dropped due to backpressure");
@@ -109,7 +104,7 @@ impl Router {
                     .await
                     .map_err(|_| "cpu queue closed")?;
 
-                let out = reply_rx.await.map_err(|_| "cpu worker canceled")?;
+                let out = reply_rx.await.map_err(|_| "cpu dispatch canceled")?;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 Ok(out)
             }
@@ -135,34 +130,24 @@ impl Router {
         }
     }
 
-    fn cpu_queue_len_estimate(&self) -> usize {
-        // mpsc doesn't expose length reliably; this is a toy heuristic:
-        // infer pressure via available permits (lower permits -> busier)
+    fn busy_estimate(&self) -> usize {
         let available = self.inner.cpu_slots.available_permits();
         let max = self.inner.cfg.cpu_parallelism;
-        let busy = max.saturating_sub(available);
-        // not “queue length”, but correlates with saturation
-        busy
+        max.saturating_sub(available)
     }
 
     fn choose_strategy(&self, job: &Job) -> Strategy {
         let cost = job.compute_cost;
-        let s = job.scaling_potential;
+        let scale = job.scaling_potential;
 
-        // heuristic: high scaling potential justifies overhead sooner
-        let inline_th = self.inner.cfg.inline_threshold;
-        let spawn_th = self.inner.cfg.spawn_threshold;
-
-        // “size vs scale switch”
-        if cost <= inline_th && s < 0.8 {
+        if cost <= self.inner.cfg.inline_threshold && scale < 0.8 {
             return Strategy::Inline;
         }
 
-        if cost <= spawn_th && s < 0.65 {
+        if cost <= self.inner.cfg.spawn_threshold && scale < 0.65 {
             return Strategy::Spawn;
         }
 
-        // Otherwise route to cpu pool (bounded parallelism)
         Strategy::CpuPool
     }
 }
@@ -173,42 +158,37 @@ pub struct RouterStats {
     pub completed: u64,
 }
 
-async fn cpu_worker_loop(worker_id: usize, inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
-    info!(worker_id, "cpu worker started");
+/// Single-consumer dispatcher: owns the Receiver, fans out work with bounded spawn_blocking.
+async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
+    info!("cpu dispatcher started");
 
     while let Some(work) = rx.recv().await {
-        let permit = inner.cpu_slots.acquire().await.expect("semaphore closed");
+        let inner2 = inner.clone();
 
-        let CpuWork { job, reply } = work;
-        let t0 = Instant::now();
+        tokio::spawn(async move {
+            let permit = match inner2.cpu_slots.acquire().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
 
-        // spawn_blocking so we don't block Tokio worker threads
-        let handle = tokio::task::spawn_blocking(move || {
-            let out = execute_job(job);
-            out
+            let CpuWork { job, reply } = work;
+            let t0 = Instant::now();
+
+            let handle = tokio::task::spawn_blocking(move || execute_job(job));
+            let out = handle.await.unwrap_or_default();
+            let _ = reply.send(out);
+
+            debug!(elapsed_ms = t0.elapsed().as_millis() as u64, "cpu_pool done");
+            drop(permit);
         });
-
-        let out = match handle.await {
-            Ok(v) => v,
-            Err(_) => Vec::new(),
-        };
-
-        let _ = reply.send(out);
-        debug!(
-            worker_id,
-            elapsed_ms = t0.elapsed().as_millis() as u64,
-            "cpu_pool done"
-        );
-
-        drop(permit);
     }
 
-    info!(worker_id, "cpu worker exiting");
+    info!("cpu dispatcher exiting");
 }
 
+// ===== job execution =====
+
 fn execute_job(job: Job) -> Vec<Output> {
-    // multi-input -> multi-output
-    // Outputs are per-input results, with some extra derived output for fun.
     match job.kind {
         crate::types::JobKind::HashMix => {
             let mut outs = Vec::with_capacity(job.inputs.len() + 1);
@@ -224,7 +204,6 @@ fn execute_job(job: Job) -> Vec<Output> {
         crate::types::JobKind::PrimeCount => {
             let mut outs = Vec::with_capacity(job.inputs.len());
             for &x in &job.inputs {
-                // compute_cost influences how far we search
                 let n = (x % 10_000) + job.compute_cost.min(200_000);
                 outs.push(count_primes(n));
             }
@@ -233,7 +212,6 @@ fn execute_job(job: Job) -> Vec<Output> {
     }
 }
 
-// intentionally “worky” hash mixer
 fn hash_mix(seed: u64, rounds: u64) -> u64 {
     let mut x = seed ^ 0x9E3779B97F4A7C15;
     let r = rounds.max(1).min(2_000_000);
@@ -277,3 +255,4 @@ fn is_prime(x: u64) -> bool {
     }
     true
 }
+
