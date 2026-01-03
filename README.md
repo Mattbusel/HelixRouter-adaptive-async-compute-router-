@@ -3,7 +3,7 @@
 # HelixRouter
 
 **Adaptive async compute routing with live observability.**
-A Rust-native execution router that dynamically decides *how* work should run based on cost, latency budgets, scaling potential, and backpressure — with real-time metrics and a built-in UI.
+A Rust-native execution router that dynamically decides *how* work should run based on cost, latency budgets, scaling potential, and backpressure  with real-time metrics and a built-in UI.
 
 ---
 
@@ -200,7 +200,7 @@ It is intentionally **policy-light** and **mechanism-heavy**.
 * a production scheduler
 * a Kubernetes replacement
 
-Those are possible directions — not assumptions.
+Those are possible directions  not assumptions.
 
 ---
 
