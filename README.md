@@ -1,181 +1,225 @@
-# **HelixRouter**
 
-### Adaptive async compute routing for Rust / Tokio
 
-HelixRouter is a **runtime-aware async compute router** that dynamically chooses *how* work should execute based on **job cost, parallel payoff, latency constraints, and live system load**.
+# HelixRouter
 
-Most async systems only ask:
-
-> *“Can we run this?”*
-
-HelixRouter asks:
-
-> **“How should this run right now?”**
+**Adaptive async compute routing with live observability.**
+A Rust-native execution router that dynamically decides *how* work should run based on cost, latency budgets, scaling potential, and backpressure — with real-time metrics and a built-in UI.
 
 ---
 
-## Why this exists
+## Why HelixRouter exists
 
-Tokio makes it easy to spawn tasks.
+Modern systems don’t just need to *run jobs*.
+They need to **decide how to run them**.
 
-It does **not** help you decide:
+HelixRouter is an experimental execution control plane that answers:
 
-* when spawning is wasteful
-* when inline execution is cheaper
-* when batching improves throughput
-* when CPU contention destroys latency
-* when backpressure should *reject* work
+> Should this work run inline, be spawned, pooled, batched, or dropped — *right now*?
 
-HelixRouter exists for systems that scale **until policy matters**.
+It’s designed for:
 
----
+* latency-sensitive pipelines
+* heterogeneous workloads
+* infra where *routing decisions matter as much as algorithms*
 
-## The core idea
-
-Jobs describe **intent**, not execution.
-
-```rust
-Job {
-    compute_cost: u64,
-    scaling_potential: f32,   // 0.0 – 1.0
-    latency_budget_ms: u64,
-    kind: JobKind,
-}
-```
-
-At runtime, HelixRouter combines this with **live load signals** to select the most reasonable execution strategy *at that moment*.
-
-No blind spawning.
-No unbounded queues.
-No static rules.
+This is not a queue.
+This is not a job runner.
+This is **adaptive execution logic**.
 
 ---
 
-## Execution strategies
+## What it does (today)
 
-HelixRouter routes work across five strategies:
+###  Adaptive routing strategies
 
-| Strategy    | Purpose                                  |
-| ----------- | ---------------------------------------- |
-| **Inline**  | Execute immediately on the caller        |
-| **Spawn**   | Fire-and-forget async execution          |
-| **CpuPool** | Bounded CPU execution with backpressure  |
-| **Batch**   | Queue and batch similar jobs             |
-| **Drop**    | Intentionally reject work under pressure |
+Each job is routed at runtime into one of several execution paths:
 
-Routing decisions adapt dynamically based on:
+* **inline** — execute immediately on the caller
+* **spawn** — fire-and-forget async execution
+* **cpu_pool** — bounded parallel CPU pool (backpressure-aware)
+* **batch** — aggregate work and process in groups
+* **drop** — intentionally shed load when budgets are exceeded
 
-* current CPU saturation
-* semaphore pressure
-* job size
-* parallel payoff
-* latency sensitivity
+Routing decisions consider:
+
+* estimated compute cost
+* scaling potential (parallel payoff)
+* latency budget
+* current system pressure
 
 ---
 
-## What it already does
+###  Real observability (not mocked)
 
-This is **not a stub**.
+HelixRouter exposes **live system state** while jobs are running:
 
-HelixRouter today includes:
+#### Browser UI
 
-* ✔ Long-running async router
-* ✔ Load-aware routing decisions
-* ✔ Bounded CPU execution lane
-* ✔ Backpressure via semaphores
-* ✔ Per-job-kind batching
-* ✔ Adaptive strategy selection
-* ✔ Structured tracing output
-* ✔ Routing statistics snapshots
-* ✔ End-to-end latency summaries
+`http://127.0.0.1:8080`
 
-Example runtime trace:
+* total completed / dropped jobs
+* routed count by strategy
+* end-to-end latency (avg + p95) per strategy
+
+#### JSON API
+
+`/api/stats`
+
+Structured stats for dashboards, automation, or analysis.
+
+#### Prometheus metrics
+
+`/metrics`
+
+Example:
 
 ```
-route job_id=123 kind=PrimeCount
-cost=98324 scaling=0.31 latency_budget_ms=32
-strategy=cpu_pool cpu_busy=8
+helix_completed 200
+helix_dropped 0
+helix_routed{strategy="cpu_pool"} 59
+helix_routed{strategy="spawn"} 108
 ```
-
-These are **real routing decisions**, not simulated output.
 
 ---
 
-## Observability
+###  End-to-end latency tracking
 
-HelixRouter exposes:
+For each strategy, HelixRouter tracks:
 
-* per-strategy routing counts
-* dropped job counts
-* completed job counts
-* end-to-end latency summaries
-* structured logs via `tracing`
+* execution count
+* average latency
+* p95 latency
 
-Enable detailed routing logs:
+Measured **from routing decision → completion**, not just execution time.
+
+---
+
+###  Simulation harness
+
+The binary includes a built-in workload simulator that:
+
+* generates heterogeneous jobs
+* varies cost, inputs, and latency budgets
+* drives the router under realistic pressure
+
+This makes HelixRouter:
+
+* easy to experiment with
+* easy to benchmark
+* easy to extend
+
+---
+
+## Quick start
 
 ```bash
-RUST_LOG=debug cargo run
+cargo run
 ```
 
----
+Then open:
 
-## Architecture snapshot
+* UI: [http://127.0.0.1:8080](http://127.0.0.1:8080)
+* JSON stats: [http://127.0.0.1:8080/api/stats](http://127.0.0.1:8080/api/stats)
+* Metrics: [http://127.0.0.1:8080/metrics](http://127.0.0.1:8080/metrics)
 
-* Tokio async runtime
-* Semaphore-bounded CPU execution lane
-* Single-consumer dispatcher for CPU-heavy work
-* Per-job-kind batch buffers
-* Atomic counters for metrics
-* Policy-based routing logic
-
-HelixRouter is designed to run continuously as an **infrastructure component**, not a CLI utility.
+Press `Ctrl+C` to stop.
 
 ---
 
-## When this is useful
+## Configuration
 
-HelixRouter shines in systems with:
+Routing behavior is controlled via `RouterConfig`:
 
-* CPU-heavy async workloads
-* mixed latency requirements
-* throughput vs responsiveness tradeoffs
-* real contention under load
+```rust
+let cfg = RouterConfig {
+    inline_threshold: 8_000,
+    spawn_threshold: 60_000,
+    cpu_queue_cap: 512,
+    cpu_parallelism: 8,
+    backpressure_busy_threshold: 7,
+    batch_max_size: 8,
+    batch_max_delay_ms: 10,
+};
+```
 
-Examples include:
-
-* inference pipelines
-* streaming compute
-* async services doing real work
-* background job systems that grew too fast
+These values intentionally trade simplicity for clarity.
+The system is designed to be *tuned*, not hidden.
 
 ---
 
-## What this project is (and isn’t)
+## Architecture (high level)
 
-**This is:**
+```
+Jobs ──▶ Router ──▶ Strategy
+            │
+            ├─ inline
+            ├─ spawn
+            ├─ cpu_pool (bounded)
+            ├─ batch
+            └─ drop
+            │
+        Metrics + Latency Aggregation
+            │
+        HTTP / JSON / Prometheus
+```
 
-* an async systems experiment
-* a policy-driven routing layer
-* a foundation for smarter execution control
+Key design goals:
 
-**This is not:**
+* no blocking inside async runtimes
+* bounded concurrency
+* observable decisions
+* clear separation of concerns
 
-* a Tokio replacement
-* a general task scheduler
-* a finished product
+---
+
+## What this is good for
+
+HelixRouter is especially relevant for:
+
+* **quant / trading infra**
+
+  * routing simulations vs live execution
+  * latency-budgeted compute
+* **ML / inference pipelines**
+
+  * deciding when to batch vs parallelize
+* **data platforms**
+
+  * adaptive execution under load
+* **infra experimentation**
+
+  * testing routing policies with real metrics
+
+It is intentionally **policy-light** and **mechanism-heavy**.
+
+---
+
+## What this is not (yet)
+
+* a distributed system
+* a production scheduler
+* a Kubernetes replacement
+
+Those are possible directions — not assumptions.
 
 ---
 
 ## Status
 
-Experimental. Actively evolving.
-Built to explore how async systems behave when **load is real**.
+This project is **actively evolving**.
+Expect breaking changes, deeper math, and smarter routing logic.
+
+The goal is to explore:
+
+> how execution decisions can become first-class systems.
 
 ---
 
-<div align="center">
+## License
 
- **If this made you think differently about async execution, consider starring it.**
+MIT
+
+
 
 
 
