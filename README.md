@@ -1,194 +1,180 @@
-# HelixRouter
+HelixRouter
 
-**HelixRouter** is an adaptive Tokio job router that dynamically selects execution strategies based on **job size**, **parallel payoff**, and **system pressure**.
+Adaptive async compute routing for Rust / Tokio
 
-It is designed to explore a simple but under-addressed idea:
+HelixRouter is a runtime-aware async compute router that dynamically chooses how work should execute based on cost, scalability, latency constraints, and live system load.
 
-> Concurrency is cheap. CPU is not.  
-> The best execution strategy depends on *how well the work scales*, not just how big it is.
+Most async systems only ask “can we run this?”
+HelixRouter asks “how should this run right now?”
 
----
+Why this exists
 
-## Why
+Tokio makes it easy to spawn tasks.
 
-Most async systems default to:
-- spawn everything
-- or batch everything
-- or push complexity downstream
+It does not help you decide:
 
-HelixRouter instead treats execution strategy as a **first-class scheduling decision**.
+when spawning is a mistake
 
-Small jobs should finish *now*.  
-Medium jobs should parallelize *cheaply*.  
-CPU-heavy jobs should be *bounded*.  
-When saturated, the system should *push back*.
+when inline execution is cheaper
 
-This project is a working prototype of that philosophy.
+when batching improves throughput
 
----
+when backpressure should drop work
 
-## What It Does (Today)
+when CPU contention makes latency meaningless
 
-HelixRouter currently supports **five execution strategies**:
+HelixRouter exists for systems that scale until policy matters.
 
-- **`inline`**  
-  Tiny jobs executed immediately on the async task
+The idea (in one paragraph)
 
-- **`spawn`**  
-  Medium jobs executed via `tokio::spawn`
+Every job declares intent, not instructions.
 
-- **`cpu_pool`**  
-  CPU-heavy jobs routed through a bounded `spawn_blocking` pool using semaphores
-
-- **`batch`**  
-  Jobs grouped by kind and flushed opportunistically (size / time based)
-
-- **`drop`**  
-  Backpressure policy when the system is saturated
-
-Routing decisions are made per-job using:
-- estimated compute cost
-- scaling potential (parallel payoff)
-- soft latency budget
-- current system pressure
-
----
-
-## Architecture (High-Level)
+Job {
+    compute_cost: u64,
+    scaling_potential: f32,   // 0.0 – 1.0
+    latency_budget_ms: u64,
+    kind: JobKind,
+}
 
 
+At runtime, HelixRouter combines this with live load signals to select an execution strategy that makes sense right now.
 
-```text
-submit(job)
-   |
-   v
-+-------------------------+
-|  Size vs Scale Decision |
-|  (routing policy)       |
-+-----------+-------------+
-            |
-            +--------------------+-------------------+--------------------+
-            |                    |                    |
-            v                    v                    v
-        INLINE               SPAWN               CPU_POOL
-   (run directly)      (tokio::spawn)      (bounded spawn_blocking)
-                                                     |
-                                                     v
-                                              +-------------+
-                                              | Dispatcher  |
-                                              |  (mpsc rx)  |
-                                              +------+------+ 
-                                                     |
-                                                     v
-                                              +-------------+
-                                              | Semaphore   |
-                                              | (permits)   |
-                                              +------+------+ 
-                                                     |
-                                                     v
-                                              spawn_blocking(job)
+No static rules.
+No blind spawning.
+No unbounded queues.
 
+Execution strategies
 
-Key details:
+HelixRouter currently routes work across five strategies:
 
-Tokio mpsc::Receiver is single-consumer, so the CPU lane uses a single dispatcher.
+Strategy	Purpose
+Inline	Execute immediately on the caller
+Spawn	Fire-and-forget async execution
+CpuPool	Bounded CPU execution with backpressure
+Batch	Queue and batch similar jobs
+Drop	Intentionally reject work under pressure
 
-CPU parallelism is bounded by a Semaphore to prevent unbounded spawn_blocking fan-out.
+Routing decisions adapt dynamically based on:
 
-Strategies
+current CPU saturation
 
-HelixRouter currently supports:
+semaphore pressure
 
-inline: tiny jobs where overhead dominates
+job size
 
-spawn: medium jobs that benefit from async concurrency
+parallel payoff
 
-cpu_pool: CPU-heavy work executed via bounded spawn_blocking
+latency sensitivity
 
-backpressure_drop: toy policy used when saturated
+What it already does
 
-Routing heuristic (toy, but explicit)
+This is not a stub.
 
-HelixRouter routes based on:
+HelixRouter today includes:
 
-compute_cost (size)
+✔ Long-running async router
+✔ Live load-aware routing decisions
+✔ Bounded CPU execution lane
+✔ Backpressure via semaphores
+✔ Per-job-kind batching
+✔ Adaptive strategy selection
+✔ Structured tracing output
+✔ Routing statistics snapshots
+✔ End-to-end latency summaries
 
-scaling_potential (parallel payoff, 0.0..=1.0)
+Example trace:
 
-a simple saturation heuristic
-
-Default behavior:
-
-Small + low scaling -> inline
-
-Medium + low scaling -> spawn
-
-Otherwise -> cpu_pool
-
-If CPU lane is saturated -> backpressure_drop
-
-This is intentionally simple and easy to change.
-
-Demo
-
-Run the simulation:
-
-RUST_LOG=info cargo run
+route job_id=123 kind=PrimeCount
+cost=98324 scaling=0.31 latency_budget_ms=32
+strategy=cpu_pool cpu_busy=8
 
 
-For more detail:
+This reflects actual runtime decisions, not simulated output.
+
+Observability
+
+Built-in visibility includes:
+
+Per-strategy routing counts
+
+Dropped job counts
+
+Completed job counts
+
+End-to-end latency summaries
+
+Structured logs via tracing
+
+Enable detailed routing logs:
 
 RUST_LOG=debug cargo run
 
+Architecture snapshot
 
-Example output (yours will vary):
+Tokio async runtime
 
-== HelixRouter summary ==
-completed: 160
-dropped:   40
-routed[cpu_pool]: 126
-routed[spawn]: 62
-routed[inline]: 12
-routed[backpressure_drop]: 40
+Semaphore-bounded CPU execution lane
+
+Single-consumer dispatcher for CPU-heavy work
+
+Per-job-kind batch buffers
+
+Atomic counters for metrics
+
+Policy-based routing logic
+
+HelixRouter is designed to run continuously as an infrastructure component, not a CLI tool.
+
+When this is useful
+
+HelixRouter shines in systems with:
+
+CPU-heavy async workloads
+
+Mixed latency requirements
+
+Throughput vs responsiveness tradeoffs
+
+Real contention
+
+Production pressure
+
+Examples:
+
+inference pipelines
+
+streaming compute
+
+async services doing real work
+
+background task systems that grew too fast
+
+What this project is (and isn’t)
+
+This is:
+
+an async systems experiment
+
+a policy-driven routing layer
+
+a foundation for smarter execution control
+
+This is not:
+
+a Tokio replacement
+
+a task scheduler
+
+a finished product
 
 Status
 
-Current state: working prototype
-Primary goal: explore adaptive execution strategy selection
-Secondary goal: provide a clean reference implementation for async routing patterns in Rust
+Experimental. Actively evolving.
+Built to explore how async systems behave when load is real.
 
-This is not production software (yet), but it is not a mock or stub either.
+If this made you think differently about async execution, consider starring it.
 
-Planned Next Phases
 
-External configuration (YAML / TOML)
-
-Real load benchmarks
-
-Strategy tuning via observed latency
-
-Pluggable routing heuristics
-
-Tracing / metrics export
-
-Integration into a real service
-
-Philosophy
-
-HelixRouter is intentionally opinionated:
-
-Scheduling is policy
-
-Execution is plumbing
-
-Async does not mean free
-
-Backpressure is a feature, not a failure
-
-License
-
-MIT
-MIT
 
 
 
