@@ -1,8 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub type Output = u64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum JobKind {
+    HashMix,
+    PrimeCount,
+    MonteCarloRisk,
+}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Strategy {
     Inline,
     Spawn,
@@ -24,28 +30,24 @@ impl fmt::Display for Strategy {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum JobKind {
-    HashMix,
-    PrimeCount,
-
-    /// Monte Carlo risk / uncertainty simulation
-    /// CPU-heavy, partially parallel, batchable
-    MonteCarloRisk,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: u64,
     pub kind: JobKind,
     pub inputs: Vec<u64>,
 
-    /// Approximate computational cost proxy
+    // "size" proxy
     pub compute_cost: u64,
 
-    /// Parallel payoff (0.0 – 1.0)
+    // "parallel payoff" (0.0..=1.0)
     pub scaling_potential: f32,
 
-    /// Soft latency budget used by routing heuristics
+    // soft budget used for decisions (not enforced hard)
     pub latency_budget_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Output {
+    U64(u64),
+    F64(f64),
 }
