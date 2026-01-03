@@ -1,4 +1,3 @@
-// src/types.rs
 use std::fmt;
 
 pub type Output = u64;
@@ -29,6 +28,10 @@ impl fmt::Display for Strategy {
 pub enum JobKind {
     HashMix,
     PrimeCount,
+
+    /// Monte Carlo risk / uncertainty simulation
+    /// CPU-heavy, partially parallel, batchable
+    MonteCarloRisk,
 }
 
 #[derive(Debug, Clone)]
@@ -37,12 +40,12 @@ pub struct Job {
     pub kind: JobKind,
     pub inputs: Vec<u64>,
 
-    // "size" proxy
+    /// Approximate computational cost proxy
     pub compute_cost: u64,
 
-    // "parallel payoff" (0.0..=1.0)
+    /// Parallel payoff (0.0 – 1.0)
     pub scaling_potential: f32,
 
-    // soft budget used for decisions (not enforced hard)
+    /// Soft latency budget used by routing heuristics
     pub latency_budget_ms: u64,
 }
