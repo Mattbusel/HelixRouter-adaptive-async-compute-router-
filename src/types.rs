@@ -1,3 +1,4 @@
+// src/types.rs
 use std::fmt;
 
 pub type Output = u64;
@@ -13,7 +14,7 @@ pub enum Strategy {
 
 impl fmt::Display for Strategy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s: &str = match self {
+        let s = match self {
             Strategy::Inline => "inline",
             Strategy::Spawn => "spawn",
             Strategy::CpuPool => "cpu_pool",
