@@ -4,6 +4,18 @@ An adaptive Tokio job router that switches execution strategy based on **size vs
 ### Why
 Tokio makes concurrency cheap. CPU is not cheap.
 HelixRouter routes jobs to the lowest-overhead strategy that still scales.
+        ┌──────────┐
+        │  submit  │
+        └────┬─────┘
+             │
+   ┌─────────▼─────────┐
+   │  Size vs Scale     │
+   │  Decision Logic    │
+   └──┬─────┬─────┬────┘
+      │     │     │
+   inline  spawn  cpu_pool
+                      │
+                 spawn_blocking
 
 ### Strategies
 - **inline**: tiny jobs
