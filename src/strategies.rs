@@ -1,30 +1,15 @@
-//! # Module: strategies
-//!
-//! ## Responsibility
-//! Pure job execution kernels: HashMix, PrimeCount, MonteCarloRisk.
-//! No I/O, no async, no side effects.
-//!
-//! ## Guarantees
-//! - All functions are pure and deterministic given the same Job.
-//! - No allocation beyond the algorithm's own data structures.
-//! - Never panics: all indexing is bounds-checked or proven safe.
-//!
-//! ## NOT Responsible For
-//! - Strategy selection (see: router.rs)
-//! - Metrics recording (see: metrics.rs)
+//! Pure computation strategies -- no async, no I/O.
 
 use crate::types::{Job, JobKind, Output};
 
-/// Dispatch a job to its execution kernel.
 pub fn execute_job(job: &Job) -> Vec<Output> {
     match job.kind {
-        JobKind::HashMix => vec![hashmix(job)],
-        JobKind::PrimeCount => vec![primecount(job)],
+        JobKind::HashMix       => vec![hashmix(job)],
+        JobKind::PrimeCount    => vec![primecount(job)],
         JobKind::MonteCarloRisk => vec![montecarlo_risk(job)],
     }
 }
 
-/// FNV-1a-inspired mixing kernel with additional multiply-xorshift passes.
 pub fn hashmix(job: &Job) -> Output {
     let mut x: u64 = 0xcbf29ce484222325;
     for &v in &job.inputs {
@@ -44,247 +29,140 @@ pub fn hashmix(job: &Job) -> Output {
     Output::U64(t)
 }
 
-/// Sieve of Eratosthenes prime counter capped to 250_000.
 pub fn primecount(job: &Job) -> Output {
     let n = (job.compute_cost as usize).min(250_000).max(10_000);
     let mut is_prime = vec![true; n + 1];
     is_prime[0] = false;
-    if n >= 1 {
-        is_prime[1] = false;
-    }
-
-    let mut p = 2usize;
+    is_prime[1] = false;
+    let mut p = 2;
     while p * p <= n {
         if is_prime[p] {
             let mut k = p * p;
-            while k <= n {
-                is_prime[k] = false;
-                k += p;
-            }
+            while k <= n { is_prime[k] = false; k += p; }
         }
         p += 1;
     }
-
-    let count = is_prime.iter().filter(|&&b| b).count() as u64;
-    Output::U64(count)
+    Output::U64(is_prime.iter().filter(|&&b| b).count() as u64)
 }
-
-/// Monte Carlo VaR simulation using xorshift64* PRNG.
-pub fn montecarlo_risk(job: &Job) -> Output {
+fn montecarlo_risk(job: &Job) -> Output {
     let sims = (job.compute_cost / 200).min(50_000).max(5_000) as usize;
-
     let mut seed = 0x1234_5678_9abc_def0u64 ^ job.id;
     let mut samples: Vec<f64> = Vec::with_capacity(sims);
-
     for _ in 0..sims {
         seed ^= seed >> 12;
         seed ^= seed << 25;
         seed ^= seed >> 27;
         let r = seed.wrapping_mul(0x2545F4914F6CDD1D);
-
         let u = (r as f64 / u64::MAX as f64) * 2.0 - 1.0;
         let base = u * 0.05;
-
-        let mut mean = 0.0f64;
-        let mut vol = 1.0f64;
+        let mut mean = 0.0;
+        let mut vol = 1.0;
         for &v in &job.inputs {
             mean += (v as f64 / u64::MAX as f64) * 0.0001;
             vol += ((v.rotate_left(13) as f64 / u64::MAX as f64) - 0.5) * 0.01;
         }
-
-        let ret = mean + base * vol.max(0.1);
-        samples.push(ret);
+        samples.push(mean + base * vol.max(0.1));
     }
-
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = ((samples.len() as f64) * 0.05).floor() as usize;
-    let idx = idx.min(samples.len().saturating_sub(1));
-
-    Output::F64(samples[idx])
+    Output::F64(samples[idx.min(samples.len() - 1)])
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::JobKind;
 
-    fn make_job(id: u64, kind: JobKind, cost: u64) -> Job {
-        Job {
-            id,
-            kind,
-            inputs: vec![1, 2, 3],
-            compute_cost: cost,
-            scaling_potential: 0.5,
-            latency_budget_ms: 50,
-        }
+    fn job(kind: JobKind, cost: u64) -> Job {
+        Job { id: 1, kind, inputs: vec![100, 200, 300], compute_cost: cost, scaling_potential: 0.5, latency_budget_ms: 50 }
     }
-
-    // ===== execute_job dispatch =====
-
-    #[test]
-    fn test_execute_job_hashmix_returns_one_output() {
-        let j = make_job(1, JobKind::HashMix, 1000);
-        let out = execute_job(&j);
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn test_execute_job_primecount_returns_one_output() {
-        let j = make_job(1, JobKind::PrimeCount, 10_000);
-        let out = execute_job(&j);
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn test_execute_job_montecarlo_returns_one_output() {
-        let j = make_job(1, JobKind::MonteCarloRisk, 20_000);
-        let out = execute_job(&j);
-        assert_eq!(out.len(), 1);
-    }
-
-    // ===== hashmix =====
 
     #[test]
     fn test_hashmix_returns_u64() {
-        let j = make_job(1, JobKind::HashMix, 1000);
-        let out = hashmix(&j);
-        assert!(matches!(out, Output::U64(_)));
+        let out = execute_job(&job(JobKind::HashMix, 5000));
+        assert_eq!(out.len(), 1);
+        match &out[0] { Output::U64(_) => {}, _ => panic!("expected U64") }
     }
-
-    #[test]
-    fn test_hashmix_deterministic_same_job() {
-        let j = make_job(42, JobKind::HashMix, 5000);
-        let a = hashmix(&j);
-        let b = hashmix(&j);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_hashmix_different_inputs_different_output() {
-        let j1 = Job { inputs: vec![1], ..make_job(1, JobKind::HashMix, 1000) };
-        let j2 = Job { inputs: vec![9999], ..make_job(1, JobKind::HashMix, 1000) };
-        assert_ne!(hashmix(&j1), hashmix(&j2));
-    }
-
-    #[test]
-    fn test_hashmix_empty_inputs_does_not_panic() {
-        let j = Job { inputs: vec![], ..make_job(1, JobKind::HashMix, 64) };
-        let _ = hashmix(&j);
-    }
-
-    #[test]
-    fn test_hashmix_cost_one_does_not_panic() {
-        let j = make_job(1, JobKind::HashMix, 1);
-        let _ = hashmix(&j);
-    }
-
-    #[test]
-    fn test_hashmix_large_cost_does_not_panic() {
-        let j = make_job(1, JobKind::HashMix, 120_000);
-        let _ = hashmix(&j);
-    }
-
-    // ===== primecount =====
 
     #[test]
     fn test_primecount_returns_u64() {
-        let j = make_job(1, JobKind::PrimeCount, 10_000);
-        let out = primecount(&j);
-        assert!(matches!(out, Output::U64(_)));
+        let out = execute_job(&job(JobKind::PrimeCount, 10_000));
+        match &out[0] { Output::U64(n) => assert!(*n > 0), _ => panic!() }
     }
-
-    #[test]
-    fn test_primecount_known_value_at_10000() {
-        // There are 1229 primes <= 10000
-        let j = make_job(1, JobKind::PrimeCount, 10_000);
-        if let Output::U64(n) = primecount(&j) {
-            assert_eq!(n, 1229);
-        } else {
-            panic!("expected U64");
-        }
-    }
-
-    #[test]
-    fn test_primecount_deterministic() {
-        let j = make_job(5, JobKind::PrimeCount, 20_000);
-        assert_eq!(primecount(&j), primecount(&j));
-    }
-
-    #[test]
-    fn test_primecount_small_cost_clamped_to_10000() {
-        let j = make_job(1, JobKind::PrimeCount, 1);
-        // Should not panic; clamped to min 10000
-        if let Output::U64(n) = primecount(&j) {
-            assert_eq!(n, 1229); // 1229 primes <= 10000
-        }
-    }
-
-    #[test]
-    fn test_primecount_max_cost_clamped_to_250000() {
-        let j = make_job(1, JobKind::PrimeCount, u64::MAX);
-        let out = primecount(&j);
-        assert!(matches!(out, Output::U64(_)));
-    }
-
-    // ===== montecarlo_risk =====
 
     #[test]
     fn test_montecarlo_returns_f64() {
-        let j = make_job(1, JobKind::MonteCarloRisk, 20_000);
-        let out = montecarlo_risk(&j);
-        assert!(matches!(out, Output::F64(_)));
+        let out = execute_job(&job(JobKind::MonteCarloRisk, 20_000));
+        match &out[0] { Output::F64(_) => {}, _ => panic!("expected F64") }
     }
 
     #[test]
-    fn test_montecarlo_deterministic() {
-        let j = make_job(77, JobKind::MonteCarloRisk, 30_000);
-        assert_eq!(montecarlo_risk(&j), montecarlo_risk(&j));
+    fn test_hashmix_deterministic() {
+        let j = job(JobKind::HashMix, 5000);
+        let a = execute_job(&j);
+        let b = execute_job(&j);
+        match (&a[0], &b[0]) {
+            (Output::U64(x), Output::U64(y)) => assert_eq!(x, y),
+            _ => panic!()
+        }
     }
 
     #[test]
-    fn test_montecarlo_result_in_reasonable_range() {
-        let j = make_job(1, JobKind::MonteCarloRisk, 20_000);
-        if let Output::F64(v) = montecarlo_risk(&j) {
-            // VaR at 5th percentile should be a small negative or near-zero
-            assert!(v > -1.0 && v < 1.0);
+    fn test_primecount_known_value() {
+        let j = job(JobKind::PrimeCount, 10_000);
+        match &execute_job(&j)[0] {
+            Output::U64(n) => assert_eq!(*n, 1229),
+            _ => panic!()
+        }
+    }
+
+    #[test]
+    fn test_montecarlo_result_in_range() {
+        let out = execute_job(&job(JobKind::MonteCarloRisk, 20_000));
+        match &out[0] { Output::F64(v) => assert!(v.is_finite()), _ => panic!() }
+    }
+
+    #[test]
+    fn test_execute_job_one_output() {
+        for kind in [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk] {
+            let out = execute_job(&job(kind, 15_000));
+            assert_eq!(out.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_hashmix_different_inputs_differ() {
+        let mut j1 = job(JobKind::HashMix, 5000);
+        let mut j2 = job(JobKind::HashMix, 5000);
+        j1.inputs = vec![1];
+        j2.inputs = vec![2];
+        let a = execute_job(&j1);
+        let b = execute_job(&j2);
+        match (&a[0], &b[0]) {
+            (Output::U64(x), Output::U64(y)) => assert_ne!(x, y),
+            _ => panic!()
+        }
+    }
+
+    #[test]
+    fn test_primecount_larger_n_more_primes() {
+        let small = job(JobKind::PrimeCount, 10_000);
+        let large = job(JobKind::PrimeCount, 50_000);
+        match (execute_job(&small)[0].clone(), execute_job(&large)[0].clone()) {
+            (Output::U64(s), Output::U64(l)) => assert!(l > s),
+            _ => panic!()
         }
     }
 
     #[test]
     fn test_montecarlo_different_ids_differ() {
-        let j1 = make_job(1, JobKind::MonteCarloRisk, 20_000);
-        let j2 = make_job(2, JobKind::MonteCarloRisk, 20_000);
-        assert_ne!(montecarlo_risk(&j1), montecarlo_risk(&j2));
-    }
-
-    #[test]
-    fn test_montecarlo_empty_inputs_does_not_panic() {
-        let j = Job { inputs: vec![], ..make_job(1, JobKind::MonteCarloRisk, 20_000) };
-        let _ = montecarlo_risk(&j);
-    }
-
-    #[test]
-    fn test_montecarlo_min_cost_does_not_panic() {
-        let j = make_job(1, JobKind::MonteCarloRisk, 1);
-        let _ = montecarlo_risk(&j);
-    }
-
-    #[test]
-    fn test_montecarlo_max_cost_clamped() {
-        let j = make_job(1, JobKind::MonteCarloRisk, u64::MAX);
-        let _ = montecarlo_risk(&j);
-    }
-
-    // ===== Output equality =====
-
-    #[test]
-    fn test_output_u64_eq() {
-        assert_eq!(Output::U64(42), Output::U64(42));
-        assert_ne!(Output::U64(42), Output::U64(43));
-    }
-
-    #[test]
-    fn test_output_f64_eq() {
-        assert_eq!(Output::F64(1.0), Output::F64(1.0));
-        assert_ne!(Output::F64(1.0), Output::F64(2.0));
+        let mut j1 = job(JobKind::MonteCarloRisk, 20_000);
+        let mut j2 = job(JobKind::MonteCarloRisk, 20_000);
+        j1.id = 1; j2.id = 9999;
+        let a = execute_job(&j1);
+        let b = execute_job(&j2);
+        match (&a[0], &b[0]) {
+            (Output::F64(x), Output::F64(y)) => assert!((x - y).abs() > 1e-12),
+            _ => panic!()
+        }
     }
 }

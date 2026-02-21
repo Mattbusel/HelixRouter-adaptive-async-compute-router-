@@ -2,7 +2,7 @@
 use helixrouter::{
     config::RouterConfig,
     router::Router,
-    simulator::{generate_jobs, SimProfile},
+    simulator::{Simulator, SimulatorConfig},
     strategies::execute_job,
     types::{Job, JobKind, Output, Strategy},
 };
@@ -39,9 +39,9 @@ async fn test_full_sim_completes_all_inline_jobs() {
 }
 
 #[tokio::test]
-async fn test_full_sim_via_simulator_profile() {
+async fn test_full_sim_via_simulator() {
     let router = Router::new(RouterConfig::default());
-    let jobs = generate_jobs(&SimProfile { job_count: 50, ..Default::default() });
+    let jobs = Simulator::new(SimulatorConfig { total_jobs: 50, ..Default::default() }).all_jobs();
 
     let mut handles = Vec::new();
     for job in jobs {
@@ -59,7 +59,7 @@ async fn test_full_sim_via_simulator_profile() {
 #[tokio::test]
 async fn test_routed_by_strategy_sums_to_total() {
     let router = Router::new(RouterConfig::default());
-    let jobs = generate_jobs(&SimProfile { job_count: 30, ..Default::default() });
+    let jobs = Simulator::new(SimulatorConfig { total_jobs: 30, ..Default::default() }).all_jobs();
     for job in jobs {
         let _ = router.submit(job).await;
     }
@@ -101,28 +101,20 @@ async fn test_montecarlo_inline_produces_f64() {
 
 #[tokio::test]
 async fn test_backpressure_causes_drops() {
-    // Use a very high spawn threshold so all high-cost jobs go to CpuPool,
-    // then saturate cpu_parallelism → expect Drop for low-scaling jobs.
     let mut cfg = RouterConfig::default();
     cfg.cpu_parallelism = 1;
     cfg.backpressure_busy_threshold = 1;
-    // Submit many jobs to the cpu pool to drive busy count up
     let router = Router::new(cfg);
 
-    // Submit a blocking job that uses the only cpu slot
     let r2 = router.clone();
     let blocker = tokio::spawn(async move {
-        // cost > spawn_threshold, low scaling → CpuPool
         r2.submit(make_job(0, JobKind::PrimeCount, 250_000, 0.1)).await
     });
-    // Give blocker a moment to occupy the slot
     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
-    // Now submit a job that should be dropped (cpu_busy >= threshold, low scaling)
     let job = make_job(99, JobKind::HashMix, 100_000, 0.0);
     let result = router.submit(job).await;
     let _ = blocker.await;
-    // dropped or None (may or may not race, but stats should show drop)
     let stats = router.stats_snapshot().await;
     assert!(result.is_none() || stats.dropped >= 1 || stats.completed >= 1);
 }
@@ -130,10 +122,9 @@ async fn test_backpressure_causes_drops() {
 #[tokio::test]
 async fn test_backpressure_high_scaling_does_not_drop() {
     let mut cfg = RouterConfig::default();
-    cfg.batch_max_size = 1; // immediate flush
+    cfg.batch_max_size = 1;
     let router = Router::new(cfg);
 
-    // High scaling jobs should route to Batch even under backpressure, not Drop
     let job = make_job(99, JobKind::HashMix, 100_000, 0.9);
     let result = router.submit(job).await;
     assert!(result.is_some());
@@ -145,7 +136,6 @@ async fn test_backpressure_high_scaling_does_not_drop() {
 async fn test_config_reload_affects_routing() {
     let router = Router::new(RouterConfig::default());
 
-    // Lower inline threshold → this job goes inline
     let mut new_cfg = RouterConfig::default();
     new_cfg.inline_threshold = 50_000;
     router.set_config(new_cfg).await;
@@ -178,7 +168,6 @@ async fn test_latency_report_populated_after_work() {
 #[tokio::test]
 async fn test_strategy_spawn_returns_correct_output() {
     let router = Router::new(RouterConfig::default());
-    // spawn range: inline_threshold < cost <= spawn_threshold
     let cost = RouterConfig::default().inline_threshold + 1;
     let job = make_job(1, JobKind::HashMix, cost, 0.5);
     let expected = execute_job(&job);
@@ -246,8 +235,9 @@ async fn test_decisions_broadcast_on_every_submit() {
 // ===== Simulator integration =====
 
 #[test]
-fn test_generate_jobs_used_in_sim_all_valid() {
-    let jobs = generate_jobs(&SimProfile { job_count: 100, ..Default::default() });
+fn test_simulator_all_jobs_valid() {
+    let jobs = Simulator::new(SimulatorConfig { total_jobs: 100, ..Default::default() }).all_jobs();
+    assert_eq!(jobs.len(), 100);
     for j in &jobs {
         assert!(j.scaling_potential >= 0.0 && j.scaling_potential <= 1.0);
         assert!(j.latency_budget_ms >= 5);

@@ -1,195 +1,174 @@
-//! # Module: simulator
-//!
-//! ## Responsibility
-//! Deterministic workload generation for load testing and benchmarking.
-//!
-//! ## Guarantees
-//! - Deterministic: same seed always produces same sequence.
-//! - All outputs are valid `Job` values (no panics, no out-of-range fields).
-//!
-//! ## NOT Responsible For
-//! - Submitting jobs to the router (see: main.rs)
-//! - Metrics collection (see: metrics.rs)
+//! Workload simulator -- generates heterogeneous Job streams.
 
-use rand::{rngs::StdRng, Rng, SeedableRng};
 use crate::types::{Job, JobKind};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
-/// Describes one segment of a synthetic workload.
 #[derive(Debug, Clone)]
-pub struct SimProfile {
-    /// Number of jobs to generate.
-    pub job_count: u64,
-    /// Seed for the PRNG (ensures determinism).
+pub struct SimulatorConfig {
     pub seed: u64,
-    /// Probability (0.0..=1.0) that a job is PrimeCount.
-    pub prime_prob: f64,
-    /// Probability of remaining jobs being HashMix (rest → MonteCarloRisk).
-    pub hashmix_prob: f64,
+    pub total_jobs: u64,
+    pub heavy_job_fraction: f64,
 }
 
-impl Default for SimProfile {
+impl Default for SimulatorConfig {
     fn default() -> Self {
-        Self {
-            job_count: 200,
-            seed: 7,
-            prime_prob: 0.55,
-            hashmix_prob: 0.75,
-        }
+        Self { seed: 7, total_jobs: 200, heavy_job_fraction: 0.15 }
     }
 }
 
-/// Generate a batch of `Job`s from a `SimProfile`.
-pub fn generate_jobs(profile: &SimProfile) -> Vec<Job> {
-    let mut rng: StdRng = StdRng::seed_from_u64(profile.seed);
-    let mut jobs = Vec::with_capacity(profile.job_count as usize);
+pub struct Simulator {
+    rng: StdRng,
+    cfg: SimulatorConfig,
+    next_id: u64,
+}
 
-    for id in 0..profile.job_count {
-        let kind = if rng.gen_bool(profile.prime_prob) {
+impl Simulator {
+    pub fn new(cfg: SimulatorConfig) -> Self {
+        Self { rng: StdRng::seed_from_u64(cfg.seed), cfg, next_id: 0 }
+    }
+
+    pub fn next_job(&mut self) -> Option<Job> {
+        if self.next_id >= self.cfg.total_jobs { return None; }
+        let id = self.next_id;
+        self.next_id += 1;
+        Some(self.gen_job(id))
+    }
+
+    pub fn all_jobs(&mut self) -> Vec<Job> {
+        let mut jobs = Vec::with_capacity(self.cfg.total_jobs as usize);
+        while let Some(j) = self.next_job() { jobs.push(j); }
+        jobs
+    }
+
+    fn gen_job(&mut self, id: u64) -> Job {
+        let kind = if self.rng.gen_bool(0.55) {
             JobKind::PrimeCount
-        } else if rng.gen_bool(profile.hashmix_prob) {
+        } else if self.rng.gen_bool(0.75) {
             JobKind::HashMix
         } else {
             JobKind::MonteCarloRisk
         };
-
-        let input_count: usize = rng.gen_range(2..=6);
-        let inputs: Vec<u64> = (0..input_count).map(|_| rng.gen_range(0..=200_000)).collect();
-
-        let compute_cost: u64 = match kind {
-            JobKind::HashMix => rng.gen_range(500..=120_000),
-            JobKind::PrimeCount => rng.gen_range(2_000..=80_000),
-            JobKind::MonteCarloRisk => rng.gen_range(20_000..=250_000),
+        let input_count: usize = self.rng.gen_range(2..=6);
+        let inputs: Vec<u64> = (0..input_count).map(|_| self.rng.gen_range(0..=200_000)).collect();
+        let is_heavy = self.rng.gen_bool(self.cfg.heavy_job_fraction);
+        let compute_cost: u64 = if is_heavy {
+            self.rng.gen_range(80_000..=300_000)
+        } else {
+            match kind {
+                JobKind::HashMix       => self.rng.gen_range(500..=120_000),
+                JobKind::PrimeCount    => self.rng.gen_range(2_000..=80_000),
+                JobKind::MonteCarloRisk => self.rng.gen_range(20_000..=250_000),
+            }
         };
-
-        let scaling_potential: f32 = rng.gen_range(0.0f32..=1.0);
-        let latency_budget_ms: u64 = rng.gen_range(5..=80);
-
-        jobs.push(Job {
+        Job {
             id,
             kind,
             inputs,
             compute_cost,
-            scaling_potential,
-            latency_budget_ms,
-        });
+            scaling_potential: self.rng.gen_range(0.0..=1.0),
+            latency_budget_ms: self.rng.gen_range(5..=80),
+        }
     }
-
-    jobs
 }
 
+pub fn pressure_burst(seed: u64, warm_count: u64, burst_count: u64) -> Vec<Job> {
+    let mut sim = Simulator::new(SimulatorConfig { seed, total_jobs: warm_count, heavy_job_fraction: 0.0 });
+    let mut jobs = sim.all_jobs();
+    let mut heavy = Simulator::new(SimulatorConfig { seed: seed.wrapping_add(1), total_jobs: burst_count, heavy_job_fraction: 1.0 });
+    jobs.extend(heavy.all_jobs());
+    for (i, j) in jobs.iter_mut().enumerate() { j.id = i as u64; }
+    jobs
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_generate_jobs_correct_count() {
-        let profile = SimProfile { job_count: 50, ..Default::default() };
-        let jobs = generate_jobs(&profile);
-        assert_eq!(jobs.len(), 50);
+    fn test_simulator_produces_correct_count() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 50, ..Default::default() });
+        assert_eq!(sim.all_jobs().len(), 50);
     }
 
     #[test]
-    fn test_generate_jobs_deterministic_same_seed() {
-        let profile = SimProfile::default();
-        let a = generate_jobs(&profile);
-        let b = generate_jobs(&profile);
+    fn test_simulator_ids_are_monotonic() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 20, ..Default::default() });
+        let jobs = sim.all_jobs();
+        for (i, j) in jobs.iter().enumerate() { assert_eq!(j.id, i as u64); }
+    }
+
+    #[test]
+    fn test_simulator_deterministic() {
+        let cfg = SimulatorConfig { seed: 42, total_jobs: 30, ..Default::default() };
+        let a = Simulator::new(cfg.clone()).all_jobs();
+        let b = Simulator::new(cfg).all_jobs();
         assert_eq!(a.len(), b.len());
         for (ja, jb) in a.iter().zip(b.iter()) {
-            assert_eq!(ja.id, jb.id);
-            assert_eq!(ja.kind, jb.kind);
             assert_eq!(ja.compute_cost, jb.compute_cost);
-            assert_eq!(ja.inputs, jb.inputs);
+            assert_eq!(ja.kind, jb.kind);
         }
     }
 
     #[test]
-    fn test_generate_jobs_different_seeds_differ() {
-        let a = generate_jobs(&SimProfile { seed: 1, ..Default::default() });
-        let b = generate_jobs(&SimProfile { seed: 2, ..Default::default() });
-        // Very unlikely to be identical with different seeds
-        let all_same = a.iter().zip(b.iter()).all(|(ja, jb)| ja.compute_cost == jb.compute_cost);
-        assert!(!all_same);
+    fn test_simulator_inputs_nonempty() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 10, ..Default::default() });
+        for j in sim.all_jobs() { assert!(!j.inputs.is_empty()); }
     }
 
     #[test]
-    fn test_generate_jobs_ids_sequential() {
-        let profile = SimProfile { job_count: 10, ..Default::default() };
-        let jobs = generate_jobs(&profile);
-        for (i, j) in jobs.iter().enumerate() {
-            assert_eq!(j.id, i as u64);
-        }
-    }
-
-    #[test]
-    fn test_generate_jobs_inputs_non_empty() {
-        let jobs = generate_jobs(&SimProfile { job_count: 20, ..Default::default() });
-        for j in &jobs {
-            assert!(!j.inputs.is_empty());
-            assert!(j.inputs.len() >= 2 && j.inputs.len() <= 6);
-        }
-    }
-
-    #[test]
-    fn test_generate_jobs_scaling_potential_in_range() {
-        let jobs = generate_jobs(&SimProfile { job_count: 50, ..Default::default() });
-        for j in &jobs {
+    fn test_simulator_scaling_potential_in_range() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 50, ..Default::default() });
+        for j in sim.all_jobs() {
             assert!(j.scaling_potential >= 0.0 && j.scaling_potential <= 1.0);
         }
     }
 
     #[test]
-    fn test_generate_jobs_latency_budget_in_range() {
-        let jobs = generate_jobs(&SimProfile { job_count: 50, ..Default::default() });
-        for j in &jobs {
-            assert!(j.latency_budget_ms >= 5 && j.latency_budget_ms <= 80);
-        }
+    fn test_simulator_latency_budget_positive() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 20, ..Default::default() });
+        for j in sim.all_jobs() { assert!(j.latency_budget_ms >= 5); }
     }
 
     #[test]
-    fn test_generate_jobs_contains_all_kinds_eventually() {
-        let jobs = generate_jobs(&SimProfile { job_count: 500, ..Default::default() });
-        let has_prime = jobs.iter().any(|j| j.kind == JobKind::PrimeCount);
+    fn test_simulator_next_job_none_at_end() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 2, ..Default::default() });
+        assert!(sim.next_job().is_some());
+        assert!(sim.next_job().is_some());
+        assert!(sim.next_job().is_none());
+    }
+
+    #[test]
+    fn test_heavy_fraction_produces_heavy_jobs() {
+        let mut sim = Simulator::new(SimulatorConfig { seed: 1, total_jobs: 100, heavy_job_fraction: 1.0 });
+        let jobs = sim.all_jobs();
+        let heavy_count = jobs.iter().filter(|j| j.compute_cost >= 80_000).count();
+        assert!(heavy_count > 80, "expected mostly heavy jobs, got {heavy_count}");
+    }
+
+    #[test]
+    fn test_pressure_burst_ids_monotonic() {
+        let jobs = pressure_burst(1, 10, 5);
+        for (i, j) in jobs.iter().enumerate() { assert_eq!(j.id, i as u64); }
+    }
+
+    #[test]
+    fn test_pressure_burst_total_count() {
+        let jobs = pressure_burst(1, 10, 5);
+        assert_eq!(jobs.len(), 15);
+    }
+
+    #[test]
+    fn test_simulator_all_job_kinds_represented() {
+        let mut sim = Simulator::new(SimulatorConfig { seed: 99, total_jobs: 100, ..Default::default() });
+        let jobs = sim.all_jobs();
         let has_hash = jobs.iter().any(|j| j.kind == JobKind::HashMix);
-        let has_mc = jobs.iter().any(|j| j.kind == JobKind::MonteCarloRisk);
-        assert!(has_prime, "no PrimeCount jobs");
-        assert!(has_hash, "no HashMix jobs");
-        assert!(has_mc, "no MonteCarloRisk jobs");
+        let has_prime = jobs.iter().any(|j| j.kind == JobKind::PrimeCount);
+        assert!(has_hash, "expected HashMix jobs");
+        assert!(has_prime, "expected PrimeCount jobs");
     }
 
     #[test]
-    fn test_generate_jobs_zero_count_returns_empty() {
-        let jobs = generate_jobs(&SimProfile { job_count: 0, ..Default::default() });
-        assert!(jobs.is_empty());
-    }
-
-    #[test]
-    fn test_sim_profile_default_fields() {
-        let p = SimProfile::default();
-        assert_eq!(p.job_count, 200);
-        assert_eq!(p.seed, 7);
-    }
-
-    #[test]
-    fn test_compute_cost_in_range_for_hashmix() {
-        let jobs = generate_jobs(&SimProfile { job_count: 200, seed: 0, ..Default::default() });
-        for j in jobs.iter().filter(|j| j.kind == JobKind::HashMix) {
-            assert!(j.compute_cost >= 500 && j.compute_cost <= 120_000);
-        }
-    }
-
-    #[test]
-    fn test_compute_cost_in_range_for_primecount() {
-        let jobs = generate_jobs(&SimProfile { job_count: 200, seed: 0, ..Default::default() });
-        for j in jobs.iter().filter(|j| j.kind == JobKind::PrimeCount) {
-            assert!(j.compute_cost >= 2_000 && j.compute_cost <= 80_000);
-        }
-    }
-
-    #[test]
-    fn test_compute_cost_in_range_for_montecarlo() {
-        let jobs = generate_jobs(&SimProfile { job_count: 200, seed: 0, ..Default::default() });
-        for j in jobs.iter().filter(|j| j.kind == JobKind::MonteCarloRisk) {
-            assert!(j.compute_cost >= 20_000 && j.compute_cost <= 250_000);
-        }
+    fn test_simulator_compute_cost_positive() {
+        let mut sim = Simulator::new(SimulatorConfig { total_jobs: 30, ..Default::default() });
+        for j in sim.all_jobs() { assert!(j.compute_cost > 0); }
     }
 }

@@ -189,8 +189,8 @@ impl Router {
     pub async fn ema_latency(&self) -> std::collections::HashMap<Strategy, f64> {
         let metrics = self.inner.metrics.lock().await;
         metrics.latency.iter()
-            .filter(|(_, agg)| agg.ema_ms.is_initialized())
-            .map(|(s, agg)| (*s, agg.ema_ms.value))
+            .filter(|(_, agg)| agg.count > 0)
+            .map(|(s, agg)| (*s, agg.ema_ms))
             .collect()
     }
 

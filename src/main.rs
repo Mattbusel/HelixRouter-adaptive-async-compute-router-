@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 
-use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 mod config;
@@ -13,28 +12,7 @@ mod web;
 
 use config::RouterConfig;
 use router::Router;
-use simulator::{generate_jobs, SimProfile};
-
-/// HelixRouter — adaptive async compute router.
-#[derive(Parser, Debug)]
-#[command(name = "helixrouter", version, about)]
-struct Cli {
-    /// HTTP bind address.
-    #[arg(long, default_value = "127.0.0.1:8080", env = "HELIX_HTTP_ADDR")]
-    addr: SocketAddr,
-
-    /// Enable distributed mode (requires --features distributed).
-    #[arg(long, default_value_t = false)]
-    distributed: bool,
-
-    /// Number of simulation jobs to run at startup (0 = skip simulation).
-    #[arg(long, default_value_t = 200)]
-    sim_jobs: u64,
-
-    /// RNG seed for the simulation.
-    #[arg(long, default_value_t = 7)]
-    sim_seed: u64,
-}
+use simulator::{Simulator, SimulatorConfig};
 
 #[tokio::main]
 async fn main() {
@@ -42,26 +20,26 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    let cli = Cli::parse();
+    let addr: SocketAddr = std::env::var("HELIX_HTTP_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+        .parse()
+        .expect("HELIX_HTTP_ADDR parse");
 
-    if cli.distributed {
-        #[cfg(not(feature = "distributed"))]
-        {
-            eprintln!("error: --distributed requires compilation with --features distributed");
-            std::process::exit(1);
-        }
-        #[cfg(feature = "distributed")]
-        {
-            tracing::info!("distributed mode enabled");
-        }
-    }
+    let sim_jobs: u64 = std::env::var("HELIX_SIM_JOBS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+
+    let sim_seed: u64 = std::env::var("HELIX_SIM_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
 
     let cfg = RouterConfig::default();
     let router = Router::new(cfg);
 
     // HTTP server
     let r2 = router.clone();
-    let addr = cli.addr;
     tokio::spawn(async move {
         web::serve(r2, addr).await;
     });
@@ -74,12 +52,9 @@ async fn main() {
     println!();
 
     // Simulation
-    if cli.sim_jobs > 0 {
-        let profile = SimProfile { job_count: cli.sim_jobs, seed: cli.sim_seed, ..Default::default() };
-        let jobs = generate_jobs(&profile);
-        let total = jobs.len();
-
-        let mut handles = Vec::with_capacity(total);
+    if sim_jobs > 0 {
+        let jobs = Simulator::new(SimulatorConfig { seed: sim_seed, total_jobs: sim_jobs, ..Default::default() }).all_jobs();
+        let mut handles = Vec::with_capacity(jobs.len());
         for job in jobs {
             let r = router.clone();
             handles.push(tokio::spawn(async move { r.submit(job).await }));
@@ -122,7 +97,7 @@ async fn main() {
         println!();
     }
 
-    println!("Sim finished. UI still running. Ctrl+C to exit.");
+    println!("Sim finished. UI still running at http://{addr}. Ctrl+C to exit.");
     tokio::signal::ctrl_c().await.unwrap();
     println!("bye");
 }
