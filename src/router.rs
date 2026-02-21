@@ -1,4 +1,19 @@
-use crate::types::{Job, JobKind, Output, Strategy};
+//! # Module: router
+//!
+//! ## Responsibility
+//! Adaptive async compute router. Selects execution strategy (Inline/Spawn/CpuPool/Batch/Drop)
+//! per-job based on compute cost, backpressure, EMA latency, and pressure score.
+//! Broadcasts `RoutingDecision` events for the live UI feed.
+//!
+//! ## Guarantees
+//! - Bounded concurrency always enforced via Semaphore.
+//! - No blocking inside async runtimes (cpu-bound work uses spawn_blocking).
+//! - All metrics mutations hold locks for the minimum required duration.
+//!
+//! ## NOT Responsible For
+//! - Config persistence (see: config.rs)
+//! - Job execution kernels (see: strategies.rs)
+//! - HTTP serving (see: web.rs)
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -9,42 +24,51 @@ use std::{
     time::Instant,
 };
 
-use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock, Semaphore};
+use serde::Serialize;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouterConfig {
-    pub inline_threshold: u64,
-    pub spawn_threshold: u64,
+use crate::config::RouterConfig;
+use crate::metrics::{latency_summaries, MetricsStore, LatencySummary};
+use crate::strategies::execute_job;
+use crate::types::{Job, JobKind, Output, Strategy};
 
-    pub cpu_queue_cap: usize,
-    pub cpu_parallelism: usize,
+// ===== RoutingDecision (live feed) =====
 
-    pub backpressure_busy_threshold: usize,
-
-    pub batch_max_size: usize,
-    pub batch_max_delay_ms: u64,
+/// Emitted for every routing decision so the web UI can display a live stream.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutingDecision {
+    pub job_id: u64,
+    pub strategy: Strategy,
+    pub compute_cost: u64,
+    pub cpu_busy: usize,
+    pub pressure: f64,
 }
 
-impl Default for RouterConfig {
-    fn default() -> Self {
-        Self {
-            inline_threshold: 8_000,
-            spawn_threshold: 60_000,
-            cpu_queue_cap: 512,
-            cpu_parallelism: 8,
-            backpressure_busy_threshold: 7,
-            batch_max_size: 8,
-            batch_max_delay_ms: 10,
-        }
-    }
+// ===== Public stats snapshots =====
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouterStats {
+    pub routed: HashMap<Strategy, u64>,
+    pub dropped: u64,
+    pub completed: u64,
+    pub adaptive_spawn_threshold: u64,
+    pub pressure_score: f64,
 }
 
-#[derive(Clone)]
-pub struct Router {
-    inner: Arc<Inner>,
+// ===== Internal types =====
+
+struct CpuWork {
+    job: Job,
+    reply: oneshot::Sender<Vec<Output>>,
+    enqueued_at: Instant,
+}
+
+struct BatchEntry {
+    job: Job,
+    reply: oneshot::Sender<Vec<Output>>,
+    enqueued_at: Instant,
 }
 
 struct Inner {
@@ -59,52 +83,34 @@ struct Inner {
     dropped: AtomicU64,
     completed: AtomicU64,
 
-    latency: Mutex<HashMap<Strategy, LatencyAgg>>,
+    metrics: Mutex<MetricsStore>,
+
+    /// Adaptive spawn_threshold (may differ from cfg.spawn_threshold after adaptation).
+    adaptive_spawn_threshold: Mutex<u64>,
+
+    /// Broadcast channel for live routing decisions.
+    decision_tx: broadcast::Sender<RoutingDecision>,
 }
 
-struct CpuWork {
-    job: Job,
-    reply: oneshot::Sender<Vec<Output>>,
-    enqueued_at: Instant,
-}
+// ===== Router =====
 
-struct BatchEntry {
-    job: Job,
-    reply: oneshot::Sender<Vec<Output>>,
-    enqueued_at: Instant,
-}
-
-#[derive(Debug, Clone, Default)]
-struct LatencyAgg {
-    count: u64,
-    sum_ms: f64,
-    p95_ms: u64,
-    samples_ms: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RouterStats {
-    pub routed: HashMap<Strategy, u64>,
-    pub dropped: u64,
-    pub completed: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LatencySummary {
-    pub strategy: Strategy,
-    pub count: u64,
-    pub avg_ms: f64,
-    pub p95_ms: u64,
+#[derive(Clone)]
+pub struct Router {
+    inner: Arc<Inner>,
 }
 
 impl Router {
     pub fn new(cfg: RouterConfig) -> Self {
         let (cpu_tx, cpu_rx) = mpsc::channel::<CpuWork>(cfg.cpu_queue_cap);
+        let (decision_tx, _) = broadcast::channel::<RoutingDecision>(256);
 
         let mut batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>> = HashMap::new();
         batches.insert(JobKind::HashMix, Mutex::new(VecDeque::new()));
         batches.insert(JobKind::PrimeCount, Mutex::new(VecDeque::new()));
         batches.insert(JobKind::MonteCarloRisk, Mutex::new(VecDeque::new()));
+
+        let alpha = cfg.ema_alpha;
+        let initial_spawn = cfg.spawn_threshold;
 
         let inner = Arc::new(Inner {
             cfg: RwLock::new(cfg.clone()),
@@ -114,17 +120,18 @@ impl Router {
             routed: Mutex::new(HashMap::new()),
             dropped: AtomicU64::new(0),
             completed: AtomicU64::new(0),
-            latency: Mutex::new(HashMap::new()),
+            metrics: Mutex::new(MetricsStore::new(alpha)),
+            adaptive_spawn_threshold: Mutex::new(initial_spawn),
+            decision_tx,
         });
 
-        // CPU dispatcher
         let inner2 = inner.clone();
-        tokio::spawn(async move {
-            cpu_dispatch_loop(inner2, cpu_rx).await;
-        });
+        tokio::spawn(async move { cpu_dispatch_loop(inner2, cpu_rx).await });
 
         Self { inner }
     }
+
+    // ===== Config =====
 
     pub async fn config(&self) -> RouterConfig {
         self.inner.cfg.read().await.clone()
@@ -134,62 +141,78 @@ impl Router {
         *self.inner.cfg.write().await = cfg;
     }
 
+    // ===== Stats =====
+
     pub async fn stats_snapshot(&self) -> RouterStats {
         let routed = self.inner.routed.lock().await.clone();
-
-        // same for any other tokio::sync::Mutex fields:
-        // let batches = self.inner.batches.lock().await.clone();
-        // etc.
+        let metrics = self.inner.metrics.lock().await;
+        let pressure = metrics.pressure.score(0.0); // queue_frac polled separately
+        drop(metrics);
 
         RouterStats {
             routed,
-            completed: self.inner.completed.load(std::sync::atomic::Ordering::Relaxed),
-            dropped: self.inner.dropped.load(std::sync::atomic::Ordering::Relaxed),
-            // ...
+            completed: self.inner.completed.load(Ordering::Relaxed),
+            dropped: self.inner.dropped.load(Ordering::Relaxed),
+            adaptive_spawn_threshold: *self.inner.adaptive_spawn_threshold.lock().await,
+            pressure_score: pressure,
         }
     }
-
 
     pub async fn latency_report(&self) -> Vec<LatencySummary> {
-        let map = self.inner.latency.lock().await.clone();
-        let mut out = Vec::new();
-        for (strategy, agg) in map {
-            let avg = if agg.count == 0 { 0.0 } else { agg.sum_ms / agg.count as f64 };
-            out.push(LatencySummary {
-                strategy,
-                count: agg.count,
-                avg_ms: avg,
-                p95_ms: agg.p95_ms,
-            });
-        }
-        out.sort_by_key(|r| r.strategy.to_string());
-        out
+        let metrics = self.inner.metrics.lock().await;
+        latency_summaries(&metrics)
     }
+
+    /// Subscribe to live routing decisions (for SSE feed).
+    pub fn subscribe_decisions(&self) -> broadcast::Receiver<RoutingDecision> {
+        self.inner.decision_tx.subscribe()
+    }
+
+    // ===== Submit =====
 
     pub async fn submit(&self, job: Job) -> Option<Vec<Output>> {
         let cfg = self.inner.cfg.read().await.clone();
+        let adaptive_threshold = *self.inner.adaptive_spawn_threshold.lock().await;
 
         let cpu_busy = cfg
             .cpu_parallelism
             .saturating_sub(self.inner.cpu_slots.available_permits());
 
-        let strategy = choose_strategy(&cfg, &job, cpu_busy);
+        let queue_frac =
+            1.0 - (self.inner.cpu_slots.available_permits() as f64 / cfg.cpu_parallelism as f64);
+
+        // Use adaptive threshold for spawn decision
+        let effective_cfg = RouterConfig {
+            spawn_threshold: adaptive_threshold,
+            ..cfg.clone()
+        };
+
+        let strategy = choose_strategy(&effective_cfg, &job, cpu_busy);
+
+        let pressure = {
+            let m = self.inner.metrics.lock().await;
+            m.pressure.score(queue_frac)
+        };
 
         debug!(
-            "route job_id={} kind={:?} cost={} scaling={} latency_budget_ms={} strategy={} cpu_busy={}",
-            job.id,
-            job.kind,
-            job.compute_cost,
-            job.scaling_potential,
-            job.latency_budget_ms,
-            strategy,
-            cpu_busy
+            "route job_id={} kind={:?} cost={} strategy={} cpu_busy={} pressure={:.2}",
+            job.id, job.kind, job.compute_cost, strategy, cpu_busy, pressure
         );
+
+        // Broadcast decision (ignore if no subscribers)
+        let _ = self.inner.decision_tx.send(RoutingDecision {
+            job_id: job.id,
+            strategy,
+            compute_cost: job.compute_cost,
+            cpu_busy,
+            pressure,
+        });
 
         match strategy {
             Strategy::Drop => {
                 self.bump_route(Strategy::Drop).await;
                 self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                self.record_pressure(queue_frac, true, 1.0).await;
                 None
             }
 
@@ -197,7 +220,9 @@ impl Router {
                 self.bump_route(Strategy::Inline).await;
                 let t0 = Instant::now();
                 let out = execute_job(&job);
-                self.record_latency(Strategy::Inline, t0.elapsed().as_millis() as u64).await;
+                let ms = t0.elapsed().as_millis() as u64;
+                self.record_latency(Strategy::Inline, ms).await;
+                self.record_pressure(queue_frac, false, ms as f64 / job.latency_budget_ms.max(1) as f64).await;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 Some(out)
             }
@@ -205,12 +230,12 @@ impl Router {
             Strategy::Spawn => {
                 self.bump_route(Strategy::Spawn).await;
                 let t0 = Instant::now();
-
                 let j = job.clone();
                 let handle = tokio::spawn(async move { execute_job(&j) });
                 let out = handle.await.unwrap_or_default();
-
-                self.record_latency(Strategy::Spawn, t0.elapsed().as_millis() as u64).await;
+                let ms = t0.elapsed().as_millis() as u64;
+                self.record_latency(Strategy::Spawn, ms).await;
+                self.record_pressure(queue_frac, false, ms as f64 / job.latency_budget_ms.max(1) as f64).await;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 Some(out)
             }
@@ -219,14 +244,11 @@ impl Router {
                 self.bump_route(Strategy::CpuPool).await;
 
                 let (tx, rx) = oneshot::channel::<Vec<Output>>();
-                let work = CpuWork {
-                    job,
-                    reply: tx,
-                    enqueued_at: Instant::now(),
-                };
+                let work = CpuWork { job: job.clone(), reply: tx, enqueued_at: Instant::now() };
 
                 if self.inner.cpu_tx.try_send(work).is_err() {
                     self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.record_pressure(queue_frac, true, 1.0).await;
                     None
                 } else {
                     let out = rx.await.unwrap_or_default();
@@ -239,11 +261,7 @@ impl Router {
                 self.bump_route(Strategy::Batch).await;
 
                 let (tx, rx) = oneshot::channel::<Vec<Output>>();
-                let entry = BatchEntry {
-                    job: job.clone(),
-                    reply: tx,
-                    enqueued_at: Instant::now(),
-                };
+                let entry = BatchEntry { job: job.clone(), reply: tx, enqueued_at: Instant::now() };
 
                 let buf = match self.inner.batches.get(&job.kind) {
                     Some(b) => b,
@@ -256,11 +274,9 @@ impl Router {
                     let q_len = q.len();
 
                     if q_len >= cfg.batch_max_size {
-                        // flush now
                         drop(q);
                         flush_batch_kind(self.inner.clone(), job.kind).await;
                     } else {
-                        // schedule time flush
                         let inner = self.inner.clone();
                         let kind = job.kind;
                         let delay_ms = cfg.batch_max_delay_ms;
@@ -278,34 +294,46 @@ impl Router {
         }
     }
 
+    // ===== Adaptive threshold adjustment =====
+
+    /// Adjust spawn_threshold upward if cpu_pool p95 exceeds budget factor.
+    pub async fn maybe_adapt_threshold(&self) {
+        let cfg = self.inner.cfg.read().await.clone();
+        let metrics = self.inner.metrics.lock().await;
+
+        if let Some(agg) = metrics.latency.get(&Strategy::CpuPool) {
+            if agg.count < 10 {
+                return; // not enough data
+            }
+            let avg_budget = 40.0_f64; // heuristic default
+            let p95 = agg.p95_ms as f64;
+            if p95 > avg_budget * cfg.adaptive_p95_threshold_factor {
+                drop(metrics);
+                let mut threshold = self.inner.adaptive_spawn_threshold.lock().await;
+                *threshold = threshold.saturating_add(cfg.adaptive_step);
+                info!("adaptive: raised spawn_threshold to {}", *threshold);
+            }
+        }
+    }
+
+    // ===== Helpers =====
+
     async fn bump_route(&self, s: Strategy) {
-        let mut m = self.inner.routed.lock().await;
-        *m.entry(s).or_insert(0) += 1;
+        *self.inner.routed.lock().await.entry(s).or_insert(0) += 1;
     }
 
     async fn record_latency(&self, s: Strategy, ms: u64) {
-        let mut m = self.inner.latency.lock().await;
-        let agg = m.entry(s).or_insert_with(LatencyAgg::default);
+        self.inner.metrics.lock().await.record_latency(s, ms);
+    }
 
-        agg.count += 1;
-        agg.sum_ms += ms as f64;
-
-        agg.samples_ms.push(ms);
-        if agg.samples_ms.len() > 512 {
-            agg.samples_ms.remove(0);
-        }
-
-        let mut tmp = agg.samples_ms.clone();
-        tmp.sort_unstable();
-        if !tmp.is_empty() {
-            let idx = ((tmp.len() as f64) * 0.95).ceil() as usize;
-            let idx = idx.saturating_sub(1).min(tmp.len() - 1);
-            agg.p95_ms = tmp[idx];
-        }
+    async fn record_pressure(&self, queue_frac: f64, was_dropped: bool, lat_frac: f64) {
+        self.inner.metrics.lock().await.pressure.record(queue_frac, was_dropped, lat_frac);
     }
 }
 
-fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strategy {
+// ===== Strategy selection =====
+
+pub fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strategy {
     if cpu_busy >= cfg.backpressure_busy_threshold {
         if job.scaling_potential >= 0.65 {
             return Strategy::Batch;
@@ -328,6 +356,8 @@ fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strategy {
     }
 }
 
+// ===== CPU dispatch loop =====
+
 async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
     info!("cpu dispatcher started");
 
@@ -340,39 +370,22 @@ async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
         let inner2 = inner.clone();
         tokio::spawn(async move {
             let j = work.job.clone();
-
             let handle = tokio::task::spawn_blocking(move || execute_job(&j));
             let out = handle.await.unwrap_or_default();
-
             let _ = work.reply.send(out);
 
-            let e2e_ms = work.enqueued_at.elapsed().as_millis() as u64;
+            let ms = work.enqueued_at.elapsed().as_millis() as u64;
+            inner2.metrics.lock().await.record_latency(Strategy::CpuPool, ms);
+            // completed is incremented by the submit() caller after rx.await
 
-            {
-                let mut m = inner2.latency.lock().await;
-                let agg = m.entry(Strategy::CpuPool).or_insert_with(LatencyAgg::default);
-                agg.count += 1;
-                agg.sum_ms += e2e_ms as f64;
-                agg.samples_ms.push(e2e_ms);
-                if agg.samples_ms.len() > 512 {
-                    agg.samples_ms.remove(0);
-                }
-                let mut tmp = agg.samples_ms.clone();
-                tmp.sort_unstable();
-                if !tmp.is_empty() {
-                    let idx = ((tmp.len() as f64) * 0.95).ceil() as usize;
-                    let idx = idx.saturating_sub(1).min(tmp.len() - 1);
-                    agg.p95_ms = tmp[idx];
-                }
-            }
-
-            drop(permit); // owned permit: safe inside spawned task
+            drop(permit);
         });
-
     }
 
     info!("cpu dispatcher exiting");
 }
+
+// ===== Batch flush =====
 
 async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
     let cfg = inner.cfg.read().await.clone();
@@ -388,7 +401,6 @@ async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
         if q.is_empty() {
             return;
         }
-
         let n = q.len().min(cfg.batch_max_size);
         for _ in 0..n {
             if let Some(e) = q.pop_front() {
@@ -397,111 +409,212 @@ async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
         }
     }
 
-    // demo "batch": execute each job and respond
     for e in batch {
         let out = execute_job(&e.job);
         let _ = e.reply.send(out);
 
-        let e2e_ms = e.enqueued_at.elapsed().as_millis() as u64;
-        let mut m = inner.latency.lock().await;
-        let agg = m.entry(Strategy::Batch).or_insert_with(LatencyAgg::default);
-        agg.count += 1;
-        agg.sum_ms += e2e_ms as f64;
-        agg.samples_ms.push(e2e_ms);
-        if agg.samples_ms.len() > 512 {
-            agg.samples_ms.remove(0);
-        }
-        let mut tmp = agg.samples_ms.clone();
-        tmp.sort_unstable();
-        if !tmp.is_empty() {
-            let idx = ((tmp.len() as f64) * 0.95).ceil() as usize;
-            let idx = idx.saturating_sub(1).min(tmp.len() - 1);
-            agg.p95_ms = tmp[idx];
-        }
+        let ms = e.enqueued_at.elapsed().as_millis() as u64;
+        inner.metrics.lock().await.record_latency(Strategy::Batch, ms);
     }
 }
 
-// ===== demo job execution =====
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RouterConfig;
 
-fn execute_job(job: &Job) -> Vec<Output> {
-    match job.kind {
-        JobKind::HashMix => vec![hashmix(job)],
-        JobKind::PrimeCount => vec![primecount(job)],
-        JobKind::MonteCarloRisk => vec![montecarlo_risk(job)],
-    }
-}
-
-fn hashmix(job: &Job) -> Output {
-    let mut x: u64 = 0xcbf29ce484222325;
-    for &v in &job.inputs {
-        x ^= v;
-        x = x.wrapping_mul(0x100000001b3);
-        x ^= x >> 33;
-        x = x.wrapping_mul(0xff51afd7ed558ccd);
-        x ^= x >> 33;
-        x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
-        x ^= x >> 33;
-    }
-    let mut t = x;
-    for _ in 0..(job.compute_cost / 64).max(1) {
-        t = t.rotate_left(7) ^ 0x9e3779b97f4a7c15;
-        t = t.wrapping_mul(0xbf58476d1ce4e5b9);
-    }
-    Output::U64(t)
-}
-
-fn primecount(job: &Job) -> Output {
-    let n = (job.compute_cost as usize).min(250_000).max(10_000);
-    let mut is_prime = vec![true; n + 1];
-    is_prime[0] = false;
-    is_prime[1] = false;
-
-    let mut p = 2;
-    while p * p <= n {
-        if is_prime[p] {
-            let mut k = p * p;
-            while k <= n {
-                is_prime[k] = false;
-                k += p;
-            }
+    fn default_job(id: u64, cost: u64, scaling: f32) -> Job {
+        Job {
+            id,
+            kind: JobKind::HashMix,
+            inputs: vec![1, 2],
+            compute_cost: cost,
+            scaling_potential: scaling,
+            latency_budget_ms: 50,
         }
-        p += 1;
     }
 
-    let count = is_prime.iter().filter(|&&b| b).count() as u64;
-    Output::U64(count)
-}
+    // ===== choose_strategy =====
 
-fn montecarlo_risk(job: &Job) -> Output {
-    let sims = (job.compute_cost / 200).min(50_000).max(5_000) as usize;
+    #[test]
+    fn test_choose_strategy_inline_when_low_cost() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100, 0.5);
+        assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::Inline);
+    }
 
-    let mut seed = 0x1234_5678_9abc_def0u64 ^ job.id;
-    let mut samples: Vec<f64> = Vec::with_capacity(sims);
+    #[test]
+    fn test_choose_strategy_spawn_when_mid_cost() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 20_000, 0.5);
+        assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::Spawn);
+    }
 
-    for _ in 0..sims {
-        // xorshift64*
-        seed ^= seed >> 12;
-        seed ^= seed << 25;
-        seed ^= seed >> 27;
-        let r = seed.wrapping_mul(0x2545F4914F6CDD1D);
+    #[test]
+    fn test_choose_strategy_cpupool_when_high_cost_low_scaling() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100_000, 0.1);
+        assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::CpuPool);
+    }
 
-        let u = (r as f64 / u64::MAX as f64) * 2.0 - 1.0;
-        let base = u * 0.05;
+    #[test]
+    fn test_choose_strategy_batch_when_high_cost_high_scaling() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100_000, 0.9);
+        assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::Batch);
+    }
 
-        let mut mean = 0.0;
-        let mut vol = 1.0;
-        for &v in &job.inputs {
-            mean += (v as f64 / u64::MAX as f64) * 0.0001;
-            vol += ((v.rotate_left(13) as f64 / u64::MAX as f64) - 0.5) * 0.01;
+    #[test]
+    fn test_choose_strategy_drop_under_backpressure_low_scaling() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100_000, 0.1);
+        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Drop);
+    }
+
+    #[test]
+    fn test_choose_strategy_batch_under_backpressure_high_scaling() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100_000, 0.7);
+        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Batch);
+    }
+
+    #[test]
+    fn test_choose_strategy_inline_at_exact_threshold() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, cfg.inline_threshold, 0.5);
+        assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::Inline);
+    }
+
+    #[test]
+    fn test_choose_strategy_spawn_just_above_inline_threshold() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, cfg.inline_threshold + 1, 0.5);
+        assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::Spawn);
+    }
+
+    #[test]
+    fn test_choose_strategy_batch_threshold_at_scaling_0_65() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100_000, 0.65);
+        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Batch);
+    }
+
+    #[test]
+    fn test_choose_strategy_drop_at_scaling_0_64() {
+        let cfg = RouterConfig::default();
+        let job = default_job(1, 100_000, 0.64);
+        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Drop);
+    }
+
+    // ===== Router integration (async) =====
+
+    #[tokio::test]
+    async fn test_router_submit_inline_returns_output() {
+        let router = Router::new(RouterConfig::default());
+        let job = default_job(1, 100, 0.5);
+        let out = router.submit(job).await;
+        assert!(out.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_router_submit_spawn_returns_output() {
+        let router = Router::new(RouterConfig::default());
+        let job = default_job(2, 20_000, 0.5);
+        let out = router.submit(job).await;
+        assert!(out.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_router_submit_batch_returns_output() {
+        let router = Router::new(RouterConfig::default());
+        let job = default_job(3, 100_000, 0.9);
+        let out = router.submit(job).await;
+        assert!(out.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_router_drop_increments_dropped_counter() {
+        let mut cfg = RouterConfig::default();
+        cfg.backpressure_busy_threshold = 1;
+        cfg.cpu_parallelism = 1;
+        // Force backpressure: busy = parallelism
+        let router = Router::new(cfg.clone());
+
+        // Acquire all slots so cpu_busy = parallelism
+        let _permit = router.inner.cpu_slots.clone().acquire_many_owned(1).await.unwrap();
+
+        let job = default_job(10, 100_000, 0.1); // low scaling → Drop
+        let out = router.submit(job).await;
+        assert!(out.is_none());
+
+        let stats = router.stats_snapshot().await;
+        assert!(stats.dropped >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_router_stats_completed_increments() {
+        let router = Router::new(RouterConfig::default());
+        for i in 0..5 {
+            router.submit(default_job(i, 100, 0.5)).await;
         }
-
-        let ret = mean + base * vol.max(0.1);
-        samples.push(ret);
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.completed, 5);
     }
 
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = ((samples.len() as f64) * 0.05).floor() as usize;
-    let idx = idx.min(samples.len() - 1);
+    #[tokio::test]
+    async fn test_router_latency_report_non_empty_after_work() {
+        let router = Router::new(RouterConfig::default());
+        router.submit(default_job(1, 100, 0.5)).await;
+        let report = router.latency_report().await;
+        assert!(!report.is_empty());
+    }
 
-    Output::F64(samples[idx])
+    #[tokio::test]
+    async fn test_router_set_config_updates_inline_threshold() {
+        let router = Router::new(RouterConfig::default());
+        let mut new_cfg = RouterConfig::default();
+        new_cfg.inline_threshold = 100;
+        router.set_config(new_cfg.clone()).await;
+        let got = router.config().await;
+        assert_eq!(got.inline_threshold, 100);
+    }
+
+    #[tokio::test]
+    async fn test_router_subscribe_decisions_receives_event() {
+        let router = Router::new(RouterConfig::default());
+        let mut rx = router.subscribe_decisions();
+        router.submit(default_job(1, 100, 0.5)).await;
+        let decision = rx.try_recv();
+        assert!(decision.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_router_routed_map_includes_inline() {
+        let router = Router::new(RouterConfig::default());
+        router.submit(default_job(1, 100, 0.5)).await;
+        let stats = router.stats_snapshot().await;
+        assert!(stats.routed.get(&Strategy::Inline).copied().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_router_adaptive_threshold_accessible() {
+        let router = Router::new(RouterConfig::default());
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.adaptive_spawn_threshold, RouterConfig::default().spawn_threshold);
+    }
+
+    #[tokio::test]
+    async fn test_router_concurrent_submits_all_complete() {
+        let router = Router::new(RouterConfig::default());
+        let mut handles = Vec::new();
+        for i in 0..20u64 {
+            let r = router.clone();
+            handles.push(tokio::spawn(async move {
+                r.submit(default_job(i, 100, 0.5)).await
+            }));
+        }
+        for h in handles {
+            assert!(h.await.unwrap().is_some());
+        }
+    }
 }
