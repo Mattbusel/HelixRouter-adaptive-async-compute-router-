@@ -90,6 +90,8 @@ struct Inner {
 
     /// Broadcast channel for live routing decisions.
     decision_tx: broadcast::Sender<RoutingDecision>,
+    /// Ring buffer of last 50 routing decisions (for /api/routing-log).
+    routing_log: Mutex<VecDeque<RoutingDecision>>,
 }
 
 // ===== Router =====
@@ -123,6 +125,7 @@ impl Router {
             metrics: Mutex::new(MetricsStore::new(alpha)),
             adaptive_spawn_threshold: Mutex::new(initial_spawn),
             decision_tx,
+            routing_log: Mutex::new(VecDeque::new()),
         });
 
         let inner2 = inner.clone();
@@ -168,6 +171,44 @@ impl Router {
         self.inner.decision_tx.subscribe()
     }
 
+    /// Return the last 50 routing decisions (most recent last).
+    pub async fn routing_log(&self) -> Vec<RoutingDecision> {
+        self.inner.routing_log.lock().await.iter().cloned().collect()
+    }
+
+    /// Return current composite pressure score in [0.0, 1.0].
+    pub async fn pressure(&self) -> f64 {
+        let metrics = self.inner.metrics.lock().await;
+        let cfg = self.inner.cfg.read().await;
+        let cpu_busy = cfg.cpu_parallelism.saturating_sub(self.inner.cpu_slots.available_permits());
+        let queue_frac = cpu_busy as f64 / cfg.cpu_parallelism.max(1) as f64;
+        metrics.pressure.score(queue_frac)
+    }
+
+    /// Return EMA latency (ms) per strategy for strategies that have been observed.
+    pub async fn ema_latency(&self) -> std::collections::HashMap<Strategy, f64> {
+        let metrics = self.inner.metrics.lock().await;
+        metrics.latency.iter()
+            .filter(|(_, agg)| agg.ema_ms.is_initialized())
+            .map(|(s, agg)| (*s, agg.ema_ms.value))
+            .collect()
+    }
+
+    /// Hot-patch a single config field by name. Returns true if the field was recognized.
+    pub async fn update_config_field(&self, field: &str, value: u64) -> bool {
+        let mut cfg = self.inner.cfg.write().await;
+        match field {
+            "inline_threshold" => { cfg.inline_threshold = value; true }
+            "spawn_threshold" => { cfg.spawn_threshold = value; true }
+            "backpressure_busy_threshold" => { cfg.backpressure_busy_threshold = value as usize; true }
+            "batch_max_size" => { cfg.batch_max_size = value as usize; true }
+            "batch_max_delay_ms" => { cfg.batch_max_delay_ms = value; true }
+            "cpu_queue_cap" => { cfg.cpu_queue_cap = value as usize; true }
+            "cpu_parallelism" => { cfg.cpu_parallelism = value as usize; true }
+            _ => false,
+        }
+    }
+
     // ===== Submit =====
 
     pub async fn submit(&self, job: Job) -> Option<Vec<Output>> {
@@ -199,14 +240,22 @@ impl Router {
             job.id, job.kind, job.compute_cost, strategy, cpu_busy, pressure
         );
 
-        // Broadcast decision (ignore if no subscribers)
-        let _ = self.inner.decision_tx.send(RoutingDecision {
+        // Broadcast decision and append to routing log
+        let decision = RoutingDecision {
             job_id: job.id,
             strategy,
             compute_cost: job.compute_cost,
             cpu_busy,
             pressure,
-        });
+        };
+        let _ = self.inner.decision_tx.send(decision.clone());
+        {
+            let mut log = self.inner.routing_log.lock().await;
+            log.push_back(decision);
+            if log.len() > 50 {
+                log.pop_front();
+            }
+        }
 
         match strategy {
             Strategy::Drop => {
@@ -305,12 +354,12 @@ impl Router {
             if agg.count < 10 {
                 return; // not enough data
             }
-            let avg_budget = 40.0_f64; // heuristic default
-            let p95 = agg.p95_ms as f64;
-            if p95 > avg_budget * cfg.adaptive_p95_threshold_factor {
+            let p95 = agg.p95_ms;
+            if p95 > cfg.cpu_p95_budget_ms {
                 drop(metrics);
                 let mut threshold = self.inner.adaptive_spawn_threshold.lock().await;
-                *threshold = threshold.saturating_add(cfg.adaptive_step);
+                let new_val = (*threshold + *threshold / 10).min(cfg.spawn_threshold.saturating_mul(10));
+                *threshold = new_val;
                 info!("adaptive: raised spawn_threshold to {}", *threshold);
             }
         }

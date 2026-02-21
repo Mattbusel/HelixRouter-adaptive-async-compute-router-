@@ -1,5 +1,5 @@
 /// Comprehensive tests for the config module.
-use helixrouter::config::{ConfigError, ConfigReloader, RouterConfig};
+use helixrouter::config::RouterConfig;
 
 // ===== Default config =====
 
@@ -35,73 +35,121 @@ fn test_default_ema_alpha_in_range() {
 // ===== Boundary validation =====
 
 #[test]
-fn test_inline_threshold_max_value_valid() {
+fn test_inline_threshold_just_below_spawn_is_valid() {
     let mut cfg = RouterConfig::default();
     cfg.inline_threshold = cfg.spawn_threshold - 1;
     assert!(cfg.validate().is_ok());
 }
 
 #[test]
-fn test_cpu_parallelism_one_backpressure_one_is_valid() {
+fn test_inline_equal_spawn_is_invalid() {
     let mut cfg = RouterConfig::default();
-    cfg.cpu_parallelism = 1;
-    cfg.backpressure_busy_threshold = 1;
+    cfg.inline_threshold = cfg.spawn_threshold;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_inline_greater_than_spawn_is_invalid() {
+    let mut cfg = RouterConfig::default();
+    cfg.inline_threshold = cfg.spawn_threshold + 1;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_cpu_parallelism_zero_is_invalid() {
+    let mut cfg = RouterConfig::default();
+    cfg.cpu_parallelism = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_cpu_queue_cap_zero_is_invalid() {
+    let mut cfg = RouterConfig::default();
+    cfg.cpu_queue_cap = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_batch_max_size_zero_is_invalid() {
+    let mut cfg = RouterConfig::default();
+    cfg.batch_max_size = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_ema_alpha_zero_is_invalid() {
+    let mut cfg = RouterConfig::default();
+    cfg.ema_alpha = 0.0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_ema_alpha_one_is_valid() {
+    let mut cfg = RouterConfig::default();
+    cfg.ema_alpha = 1.0;
     assert!(cfg.validate().is_ok());
 }
 
 #[test]
-fn test_large_queue_cap_valid() {
+fn test_ema_alpha_gt_one_is_invalid() {
     let mut cfg = RouterConfig::default();
-    cfg.cpu_queue_cap = 65536;
+    cfg.ema_alpha = 1.001;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_adaptive_step_zero_is_invalid() {
+    let mut cfg = RouterConfig::default();
+    cfg.adaptive_step = 0.0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_adaptive_step_one_is_valid() {
+    let mut cfg = RouterConfig::default();
+    cfg.adaptive_step = 1.0;
     assert!(cfg.validate().is_ok());
 }
 
 #[test]
-fn test_large_batch_size_valid() {
+fn test_adaptive_step_gt_one_is_invalid() {
     let mut cfg = RouterConfig::default();
-    cfg.batch_max_size = 1024;
-    assert!(cfg.validate().is_ok());
-}
-
-#[test]
-fn test_ema_alpha_minimum_above_zero() {
-    let mut cfg = RouterConfig::default();
-    cfg.ema_alpha = f64::MIN_POSITIVE;
-    assert!(cfg.validate().is_ok());
+    cfg.adaptive_step = 1.001;
+    assert!(cfg.validate().is_err());
 }
 
 // ===== Error messages =====
 
 #[test]
-fn test_config_error_inline_message_specific() {
+fn test_validation_error_is_string() {
     let mut cfg = RouterConfig::default();
-    cfg.inline_threshold = 0;
-    let e = cfg.validate().unwrap_err();
-    assert!(e.0.contains("inline_threshold"), "error: {}", e.0);
+    cfg.cpu_parallelism = 0;
+    let e: String = cfg.validate().unwrap_err();
+    assert!(!e.is_empty());
 }
 
 #[test]
-fn test_config_error_spawn_message_specific() {
+fn test_validation_error_mentions_invalid_field() {
     let mut cfg = RouterConfig::default();
-    cfg.spawn_threshold = 0;
+    cfg.inline_threshold = cfg.spawn_threshold + 1;
     let e = cfg.validate().unwrap_err();
-    assert!(e.0.contains("spawn_threshold"), "error: {}", e.0);
+    assert!(e.contains("inline_threshold") || e.contains("spawn_threshold"), "err: {e}");
 }
 
 #[test]
-fn test_config_error_cpu_parallelism_message_specific() {
+fn test_validation_error_cpu_parallelism_mentions_field() {
     let mut cfg = RouterConfig::default();
     cfg.cpu_parallelism = 0;
     let e = cfg.validate().unwrap_err();
-    assert!(e.0.contains("cpu_parallelism"), "error: {}", e.0);
+    assert!(e.contains("cpu_parallelism"), "err: {e}");
 }
 
 #[test]
-fn test_config_error_ema_alpha_message_specific() {
+fn test_validation_error_ema_alpha_mentions_field() {
     let mut cfg = RouterConfig::default();
     cfg.ema_alpha = 0.0;
     let e = cfg.validate().unwrap_err();
-    assert!(e.0.contains("ema_alpha"), "error: {}", e.0);
+    assert!(e.contains("ema_alpha"), "err: {e}");
 }
 
 // ===== Serde =====
@@ -127,88 +175,11 @@ fn test_config_json_contains_ema_alpha_field() {
 }
 
 #[test]
-fn test_config_json_contains_adaptive_step_field() {
-    let json = serde_json::to_string(&RouterConfig::default()).unwrap();
-    assert!(json.contains("adaptive_step"));
-}
-
-// ===== ConfigError =====
-
-#[test]
-fn test_config_error_implements_display() {
-    let e = ConfigError("bad field".into());
-    let s = format!("{e}");
-    assert!(s.contains("bad field"));
-}
-
-#[test]
-fn test_config_error_implements_debug() {
-    let e = ConfigError("x".into());
-    assert!(!format!("{e:?}").is_empty());
-}
-
-#[test]
-fn test_config_error_implements_std_error() {
-    fn takes_error(_: &dyn std::error::Error) {}
-    let e = ConfigError("y".into());
-    takes_error(&e);
-}
-
-// ===== ConfigReloader =====
-
-#[test]
-fn test_reloader_new_has_initial_value() {
-    let r = ConfigReloader::new(RouterConfig::default());
-    assert_eq!(*r.rx.borrow(), RouterConfig::default());
-}
-
-#[test]
-fn test_reloader_update_valid_succeeds() {
-    let r = ConfigReloader::new(RouterConfig::default());
-    let mut cfg = RouterConfig::default();
-    cfg.inline_threshold = 1000;
-    assert!(r.update(cfg).is_ok());
-}
-
-#[test]
-fn test_reloader_update_invalid_fails() {
-    let r = ConfigReloader::new(RouterConfig::default());
-    let mut bad = RouterConfig::default();
-    bad.ema_alpha = -1.0;
-    assert!(r.update(bad).is_err());
-}
-
-#[test]
-fn test_reloader_subscribe_receives_updates() {
-    let r = ConfigReloader::new(RouterConfig::default());
-    let mut sub = r.subscribe();
-    let mut cfg = RouterConfig::default();
-    cfg.batch_max_size = 16;
-    r.update(cfg.clone()).unwrap();
-    assert!(sub.has_changed().unwrap());
-    assert_eq!(sub.borrow_and_update().batch_max_size, 16);
-}
-
-#[test]
-fn test_reloader_multiple_subscribers_all_see_update() {
-    let r = ConfigReloader::new(RouterConfig::default());
-    let mut s1 = r.subscribe();
-    let mut s2 = r.subscribe();
-    let mut cfg = RouterConfig::default();
-    cfg.cpu_queue_cap = 128;
-    r.update(cfg).unwrap();
-    assert!(s1.has_changed().unwrap());
-    assert!(s2.has_changed().unwrap());
-}
-
-#[test]
-fn test_reloader_old_value_unchanged_if_update_fails() {
-    let r = ConfigReloader::new(RouterConfig::default());
-    let before = r.rx.borrow().clone();
-    let mut bad = RouterConfig::default();
-    bad.inline_threshold = 0;
-    let _ = r.update(bad);
-    assert_eq!(*r.rx.borrow(), before);
+fn test_config_partial_json_uses_serde_defaults() {
+    // Minimal JSON missing optional fields should still deserialize
+    let minimal = r#"{"inline_threshold":1000,"spawn_threshold":5000,"cpu_queue_cap":64,"cpu_parallelism":4,"backpressure_busy_threshold":3,"batch_max_size":4,"batch_max_delay_ms":5}"#;
+    let cfg: RouterConfig = serde_json::from_str(minimal).unwrap();
+    assert!(cfg.ema_alpha > 0.0 && cfg.ema_alpha <= 1.0);
 }
 
 // ===== Clone and PartialEq =====
@@ -226,4 +197,50 @@ fn test_modified_config_not_equal_to_default() {
     let mut b = RouterConfig::default();
     b.inline_threshold += 1;
     assert_ne!(a, b);
+}
+
+#[test]
+fn test_config_debug_not_empty() {
+    let cfg = RouterConfig::default();
+    assert!(!format!("{cfg:?}").is_empty());
+}
+
+// ===== Field values =====
+
+#[test]
+fn test_default_field_inline_threshold() {
+    assert_eq!(RouterConfig::default().inline_threshold, 8_000);
+}
+
+#[test]
+fn test_default_field_spawn_threshold() {
+    assert_eq!(RouterConfig::default().spawn_threshold, 60_000);
+}
+
+#[test]
+fn test_default_field_cpu_parallelism() {
+    assert_eq!(RouterConfig::default().cpu_parallelism, 8);
+}
+
+#[test]
+fn test_edge_case_cpu_queue_cap_one_valid() {
+    let mut cfg = RouterConfig::default();
+    cfg.cpu_queue_cap = 1;
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn test_edge_case_batch_max_size_one_valid() {
+    let mut cfg = RouterConfig::default();
+    cfg.batch_max_size = 1;
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn test_multiple_invalid_fields_first_error_returned() {
+    let mut cfg = RouterConfig::default();
+    cfg.cpu_parallelism = 0;
+    cfg.cpu_queue_cap = 0;
+    // validate() should return an error (first one found)
+    assert!(cfg.validate().is_err());
 }
