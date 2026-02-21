@@ -8,47 +8,6 @@ use std::time::Duration;
 use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
 
-// ===== ConfigError =====
-
-/// A structured validation error for RouterConfig.
-#[derive(Debug, Clone)]
-pub struct ConfigError(pub String);
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ConfigError: {}", self.0)
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-// ===== ConfigReloader =====
-
-/// Hot-reloadable config container backed by a tokio watch channel.
-pub struct ConfigReloader {
-    tx: watch::Sender<RouterConfig>,
-    pub rx: watch::Receiver<RouterConfig>,
-}
-
-impl ConfigReloader {
-    /// Create a new reloader with the given initial config.
-    pub fn new(initial: RouterConfig) -> Self {
-        let (tx, rx) = watch::channel(initial);
-        Self { tx, rx }
-    }
-
-    /// Push a new config. Returns Err if validation fails (old value retained).
-    pub fn update(&self, cfg: RouterConfig) -> Result<(), ConfigError> {
-        cfg.validate()?;
-        let _ = self.tx.send(cfg);
-        Ok(())
-    }
-
-    /// Subscribe to future config changes.
-    pub fn subscribe(&self) -> watch::Receiver<RouterConfig> {
-        self.tx.subscribe()
-    }
-}
 
 // ===== ConfigError =====
 

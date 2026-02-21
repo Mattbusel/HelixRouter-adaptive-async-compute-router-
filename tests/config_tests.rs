@@ -1,5 +1,5 @@
 /// Comprehensive tests for the config module.
-use helixrouter::config::RouterConfig;
+use helixrouter::config::{ConfigError, RouterConfig};
 
 // ===== Default config =====
 
@@ -124,8 +124,8 @@ fn test_adaptive_step_gt_one_is_invalid() {
 fn test_validation_error_is_string() {
     let mut cfg = RouterConfig::default();
     cfg.cpu_parallelism = 0;
-    let e: String = cfg.validate().unwrap_err();
-    assert!(!e.is_empty());
+    let e: ConfigError = cfg.validate().unwrap_err();
+    assert!(!e.0.is_empty());
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn test_validation_error_mentions_invalid_field() {
     let mut cfg = RouterConfig::default();
     cfg.inline_threshold = cfg.spawn_threshold + 1;
     let e = cfg.validate().unwrap_err();
-    assert!(e.contains("inline_threshold") || e.contains("spawn_threshold"), "err: {e}");
+    assert!(e.0.contains("inline_threshold") || e.0.contains("spawn_threshold"), "err: {}", e.0);
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_validation_error_cpu_parallelism_mentions_field() {
     let mut cfg = RouterConfig::default();
     cfg.cpu_parallelism = 0;
     let e = cfg.validate().unwrap_err();
-    assert!(e.contains("cpu_parallelism"), "err: {e}");
+    assert!(e.0.contains("cpu_parallelism"), "err: {}", e.0);
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn test_validation_error_ema_alpha_mentions_field() {
     let mut cfg = RouterConfig::default();
     cfg.ema_alpha = 0.0;
     let e = cfg.validate().unwrap_err();
-    assert!(e.contains("ema_alpha"), "err: {e}");
+    assert!(e.0.contains("ema_alpha"), "err: {}", e.0);
 }
 
 // ===== Serde =====
