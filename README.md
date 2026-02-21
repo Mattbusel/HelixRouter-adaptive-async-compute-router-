@@ -6,7 +6,7 @@ HelixRouter is a runtime execution control plane that decides *how* work runs â€
 
 <p align="center">
   <img
-    src="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/Screenshot%202026-01-03%20142511.png?raw=true"
+    src="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/dashboard.png"
     alt="HelixRouter Live UI"
     width="900"
   />
