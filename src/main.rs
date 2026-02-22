@@ -20,10 +20,22 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    let addr: SocketAddr = std::env::var("HELIX_HTTP_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
-        .parse()
-        .expect("HELIX_HTTP_ADDR parse");
+    // --port flag overrides HELIX_HTTP_ADDR env var
+    let port: Option<u16> = {
+        let args: Vec<String> = std::env::args().collect();
+        args.windows(2)
+            .find(|w| w[0] == "--port")
+            .and_then(|w| w[1].parse().ok())
+    };
+
+    let addr: SocketAddr = if let Some(p) = port {
+        format!("127.0.0.1:{p}").parse().expect("port parse")
+    } else {
+        std::env::var("HELIX_HTTP_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+            .parse()
+            .expect("HELIX_HTTP_ADDR parse")
+    };
 
     let sim_jobs: u64 = std::env::var("HELIX_SIM_JOBS")
         .ok()
