@@ -394,6 +394,16 @@ impl NeuralRouter {
         &self.weights
     }
 
+    /// Return a mutable reference to the full weight matrix.
+    ///
+    /// Useful for restoring checkpointed weights or for test setup.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn weights_mut(&mut self) -> &mut [[f64; N_FEATURES]; N_STRATEGIES] {
+        &mut self.weights
+    }
+
     /// Return the total number of outcomes recorded since construction.
     ///
     /// # Panics
