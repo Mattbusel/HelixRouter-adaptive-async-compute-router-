@@ -29,11 +29,11 @@ fn make_decision(id: u64) -> RoutingDecision {
 #[test] fn test_jk_hashmix_disp() { assert_eq!(format!("{}", JobKind::HashMix), "hash_mix"); }
 #[test] fn test_jk_primecount_disp() { assert_eq!(format!("{}", JobKind::PrimeCount), "prime_count"); }
 #[test] fn test_jk_montecarlorisk_disp() { assert_eq!(format!("{}", JobKind::MonteCarloRisk), "monte_carlo_risk"); }
-#[test] fn test_jk_eq() { assert_eq\!(JobKind::HashMix, JobKind::HashMix); assert_ne\!(JobKind::HashMix, JobKind::PrimeCount); }
-#[test] fn test_jk_copy() { let k = JobKind::PrimeCount; let m = k; assert_eq\!(k, m); }
-#[test] fn test_jk_clone() { assert_eq\!(JobKind::MonteCarloRisk.clone(), JobKind::MonteCarloRisk); }
-#[test] fn test_jk_hashmap() { let mut m: HashMap<JobKind, u32> = HashMap::new(); m.insert(JobKind::MonteCarloRisk, 3); assert_eq\!(m[&JobKind::MonteCarloRisk], 3); }
-#[test] fn test_jk_unique() { let s: HashSet<String> = [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk].iter().map(|k| k.to_string()).collect(); assert_eq\!(s.len(), 3); }
-#[test] fn test_jk_hashmix_json() { let j = serde_json::to_string(&JobKind::HashMix).unwrap(); assert_eq\!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::HashMix); }
-#[test] fn test_jk_primecount_json() { let j = serde_json::to_string(&JobKind::PrimeCount).unwrap(); assert_eq\!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::PrimeCount); }
-#[test] fn test_jk_montecarlorisk_json() { let j = serde_json::to_string(&JobKind::MonteCarloRisk).unwrap(); assert_eq\!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::MonteCarloRisk); }
+#[test] fn test_jk_eq() { assert_eq!(JobKind::HashMix, JobKind::HashMix); assert_ne!(JobKind::HashMix, JobKind::PrimeCount); }
+#[test] fn test_jk_copy() { let k = JobKind::PrimeCount; let m = k; assert_eq!(k, m); }
+#[test] fn test_jk_clone() { assert_eq!(JobKind::MonteCarloRisk.clone(), JobKind::MonteCarloRisk); }
+#[test] fn test_jk_hashmap() { let mut m: HashMap<JobKind, u32> = HashMap::new(); m.insert(JobKind::MonteCarloRisk, 3); assert_eq!(m[&JobKind::MonteCarloRisk], 3); }
+#[test] fn test_jk_unique() { let s: HashSet<String> = [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk].iter().map(|k| k.to_string()).collect(); assert_eq!(s.len(), 3); }
+#[test] fn test_jk_hashmix_json() { let j = serde_json::to_string(&JobKind::HashMix).unwrap(); assert_eq!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::HashMix); }
+#[test] fn test_jk_primecount_json() { let j = serde_json::to_string(&JobKind::PrimeCount).unwrap(); assert_eq!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::PrimeCount); }
+#[test] fn test_jk_montecarlorisk_json() { let j = serde_json::to_string(&JobKind::MonteCarloRisk).unwrap(); assert_eq!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::MonteCarloRisk); }
