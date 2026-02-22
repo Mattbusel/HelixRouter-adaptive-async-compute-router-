@@ -324,12 +324,12 @@ impl NeuralRouter {
         // Greedy: argmax, respecting Drop constraint.
         let mut best_idx = 0;
         let mut best_score = f64::NEG_INFINITY;
-        for i in 0..N_STRATEGIES {
+        for (i, &score) in scores.iter().enumerate() {
             if i == IDX_DROP && !drop_allowed {
                 continue;
             }
-            if scores[i] > best_score {
-                best_score = scores[i];
+            if score > best_score {
+                best_score = score;
                 best_idx = i;
             }
         }
@@ -375,8 +375,8 @@ impl NeuralRouter {
         let features = Self::feature_vector(features_job, pressure);
         let s_idx = strategy_index(outcome.strategy);
 
-        for i in 0..N_FEATURES {
-            self.weights[s_idx][i] += self.config.learning_rate * reward * features[i];
+        for (w, f) in self.weights[s_idx].iter_mut().zip(features.iter()) {
+            *w += self.config.learning_rate * reward * f;
         }
     }
 

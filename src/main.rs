@@ -15,9 +15,12 @@ use router::Router;
 use simulator::{Simulator, SimulatorConfig};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("info".parse().map_err(|e: tracing_subscriber::filter::ParseError| e)?),
+        )
         .init();
 
     // --port flag overrides HELIX_HTTP_ADDR env var
@@ -29,12 +32,11 @@ async fn main() {
     };
 
     let addr: SocketAddr = if let Some(p) = port {
-        format!("127.0.0.1:{p}").parse().expect("port parse")
+        format!("127.0.0.1:{p}").parse()?
     } else {
         std::env::var("HELIX_HTTP_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
-            .parse()
-            .expect("HELIX_HTTP_ADDR parse")
+            .parse()?
     };
 
     let sim_jobs: u64 = std::env::var("HELIX_SIM_JOBS")
@@ -67,7 +69,9 @@ async fn main() {
     // HTTP server
     let r2 = router.clone();
     tokio::spawn(async move {
-        web::serve(r2, addr).await;
+        if let Err(e) = web::serve(r2, addr).await {
+            tracing::error!(err = %e, "web server error");
+        }
     });
 
     println!("HelixRouter UI:  http://{addr}");
@@ -124,6 +128,7 @@ async fn main() {
     }
 
     println!("Sim finished. UI still running at http://{addr}. Ctrl+C to exit.");
-    tokio::signal::ctrl_c().await.unwrap();
+    tokio::signal::ctrl_c().await?;
     println!("bye");
+    Ok(())
 }

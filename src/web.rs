@@ -32,7 +32,7 @@ use crate::types::Strategy;
 
 type AppState = Arc<Router>;
 
-pub async fn serve(router: Router, addr: SocketAddr) {
+pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
     let shared: AppState = Arc::new(router);
 
     let app = AxumRouter::new()
@@ -43,11 +43,8 @@ pub async fn serve(router: Router, addr: SocketAddr) {
         .route("/api/stream/decisions", get(sse_decisions))
         .with_state(shared);
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("bind http addr");
-
-    axum::serve(listener, app).await.expect("serve");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await.map_err(std::io::Error::other)
 }
 
 // ===== UI =====
