@@ -182,6 +182,56 @@ pub async fn watch_config(
     }
 }
 
+/// Watch a config file and call `on_update` whenever the file changes and
+/// the new config validates.  Replaces `watch_config` for callers that own
+/// a `Router` rather than a standalone `RwLock`.
+///
+/// Spawns a background loop at the given `interval`.  The returned
+/// `JoinHandle` can be aborted to stop watching.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() {
+/// use std::{path::PathBuf, sync::Arc, time::Duration};
+/// use helix_router::config::{RouterConfig, watch_config_with_callback};
+/// watch_config_with_callback(
+///     PathBuf::from("config.json"),
+///     Duration::from_secs(5),
+///     |cfg| { eprintln!("new config: {:?}", cfg); },
+/// );
+/// # }
+/// ```
+pub fn watch_config_with_callback<F>(path: PathBuf, interval: Duration, on_update: F)
+where
+    F: Fn(RouterConfig) + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut last_content = String::new();
+        loop {
+            tokio::time::sleep(interval).await;
+            let content = match tokio::fs::read_to_string(&path).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if content == last_content {
+                continue;
+            }
+            last_content = content.clone();
+            match serde_json::from_str::<RouterConfig>(&content) {
+                Ok(new_cfg) => match new_cfg.validate() {
+                    Ok(()) => {
+                        info!("RouterConfig hot-reloaded from {:?}", path);
+                        on_update(new_cfg);
+                    }
+                    Err(e) => warn!("Hot-reload validation error: {e}"),
+                },
+                Err(e) => warn!("Hot-reload parse error: {e}"),
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +444,81 @@ mod tests {
         bad.inline_threshold = 0;
         let _ = r.update(bad);
         assert_eq!(*r.rx.borrow(), before);
+    }
+
+    // ===== watch_config_with_callback tests =====
+
+    /// Verify the callback fires when a valid JSON config file changes.
+    #[tokio::test]
+    async fn test_watch_config_callback_fires_on_valid_change() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::AsyncWriteExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // Write initial valid config
+        let initial = RouterConfig::default();
+        tokio::fs::write(&path, serde_json::to_string(&initial).unwrap())
+            .await
+            .unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::<RouterConfig>::new()));
+        let seen_clone = Arc::clone(&seen);
+
+        watch_config_with_callback(path.clone(), Duration::from_millis(50), move |cfg| {
+            seen_clone.lock().unwrap().push(cfg);
+        });
+
+        // Give the watcher time to run once (interval = 50ms).
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Modify the file so a subsequent poll picks up the change.
+        let mut modified = RouterConfig::default();
+        modified.batch_max_size = 64;
+        tokio::fs::write(&path, serde_json::to_string(&modified).unwrap())
+            .await
+            .unwrap();
+
+        // Wait for the watcher to fire.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let updates = seen.lock().unwrap().clone();
+        assert!(
+            !updates.is_empty(),
+            "callback should have been called at least once"
+        );
+        assert_eq!(
+            updates.last().unwrap().batch_max_size,
+            64,
+            "callback should receive updated batch_max_size"
+        );
+    }
+
+    /// Verify the callback is NOT fired for an invalid config file.
+    #[tokio::test]
+    async fn test_watch_config_callback_skips_invalid_config() {
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // Write invalid JSON
+        tokio::fs::write(&path, b"{ not valid json }").await.unwrap();
+
+        let seen = Arc::new(Mutex::new(0usize));
+        let seen_clone = Arc::clone(&seen);
+
+        watch_config_with_callback(path.clone(), Duration::from_millis(50), move |_| {
+            *seen_clone.lock().unwrap() += 1;
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            0,
+            "callback should not fire for invalid config"
+        );
     }
 }

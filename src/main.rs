@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use tracing_subscriber::EnvFilter;
 
@@ -10,7 +10,7 @@ mod strategies;
 mod types;
 mod web;
 
-use config::RouterConfig;
+use config::{watch_config_with_callback, RouterConfig};
 use router::Router;
 use simulator::{Simulator, SimulatorConfig};
 
@@ -49,6 +49,20 @@ async fn main() {
 
     let cfg = RouterConfig::default();
     let router = Router::new(cfg);
+
+    // Config hot-reload: if HELIX_CONFIG_PATH is set, watch that file and
+    // push updates into the router whenever the file changes.
+    if let Ok(config_path) = std::env::var("HELIX_CONFIG_PATH") {
+        let watch_router = router.clone();
+        watch_config_with_callback(
+            PathBuf::from(config_path),
+            Duration::from_secs(5),
+            move |new_cfg| {
+                let r = watch_router.clone();
+                tokio::spawn(async move { r.set_config(new_cfg).await });
+            },
+        );
+    }
 
     // HTTP server
     let r2 = router.clone();
