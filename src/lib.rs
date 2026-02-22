@@ -1,5 +1,7 @@
+pub mod autoscaler;
 pub mod config;
 pub mod metrics;
+pub mod neural_router;
 pub mod router;
 pub mod simulator;
 pub mod strategies;

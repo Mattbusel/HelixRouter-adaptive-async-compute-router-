@@ -29,7 +29,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
-use crate::config::RouterConfig;
+use crate::config::{RouterConfig, RouterConfigPatch};
 use crate::metrics::{latency_summaries, MetricsStore, LatencySummary};
 use crate::strategies::execute_job;
 use crate::types::{Job, JobKind, Output, Strategy};
@@ -142,6 +142,22 @@ impl Router {
 
     pub async fn set_config(&self, cfg: RouterConfig) {
         *self.inner.cfg.write().await = cfg;
+    }
+
+    /// Apply a sparse config patch — only overwrite fields that are `Some`.
+    ///
+    /// Returns the merged config after applying the patch.
+    pub async fn patch_config(&self, patch: RouterConfigPatch) -> RouterConfig {
+        let mut cfg = self.inner.cfg.write().await;
+        if let Some(v) = patch.inline_threshold { cfg.inline_threshold = v; }
+        if let Some(v) = patch.spawn_threshold { cfg.spawn_threshold = v; }
+        if let Some(v) = patch.cpu_queue_cap { cfg.cpu_queue_cap = v; }
+        if let Some(v) = patch.cpu_parallelism { cfg.cpu_parallelism = v; }
+        if let Some(v) = patch.batch_max_size { cfg.batch_max_size = v; }
+        if let Some(v) = patch.ema_alpha { cfg.ema_alpha = v; }
+        if let Some(v) = patch.adaptive_step { cfg.adaptive_step = v; }
+        if let Some(v) = patch.cpu_p95_budget_ms { cfg.cpu_p95_budget_ms = v; }
+        cfg.clone()
     }
 
     // ===== Stats =====

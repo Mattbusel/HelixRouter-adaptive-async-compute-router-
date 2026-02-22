@@ -72,6 +72,38 @@ impl Default for RouterConfig {
     }
 }
 
+/// A partial config update — only the fields that are `Some` are applied.
+///
+/// Used by the PATCH `/api/config` endpoint and the EOT HelixBridge
+/// to send sparse updates without requiring all fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RouterConfigPatch {
+    /// Override inline_threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_threshold: Option<u64>,
+    /// Override spawn_threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_threshold: Option<u64>,
+    /// Override cpu_queue_cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_queue_cap: Option<usize>,
+    /// Override cpu_parallelism.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_parallelism: Option<usize>,
+    /// Override batch_max_size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_max_size: Option<usize>,
+    /// Override ema_alpha.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ema_alpha: Option<f64>,
+    /// Override adaptive_step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive_step: Option<f64>,
+    /// Override cpu_p95_budget_ms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_p95_budget_ms: Option<u64>,
+}
+
 impl RouterConfig {
     #[allow(dead_code)]
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -194,7 +226,7 @@ pub async fn watch_config(
 /// ```no_run
 /// # async fn example() {
 /// use std::{path::PathBuf, sync::Arc, time::Duration};
-/// use helix_router::config::{RouterConfig, watch_config_with_callback};
+/// use helixrouter::config::{RouterConfig, watch_config_with_callback};
 /// watch_config_with_callback(
 ///     PathBuf::from("config.json"),
 ///     Duration::from_secs(5),

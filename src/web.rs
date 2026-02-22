@@ -25,7 +25,7 @@ use serde::Serialize;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
-use crate::config::RouterConfig;
+use crate::config::{RouterConfig, RouterConfigPatch};
 use crate::metrics::prometheus_text;
 use crate::router::Router;
 use crate::types::Strategy;
@@ -39,7 +39,7 @@ pub async fn serve(router: Router, addr: SocketAddr) {
         .route("/", get(ui))
         .route("/metrics", get(metrics_prom))
         .route("/api/stats", get(stats_json))
-        .route("/api/config", get(get_config).post(set_config))
+        .route("/api/config", get(get_config).post(set_config).patch(patch_config))
         .route("/api/stream/decisions", get(sse_decisions))
         .with_state(shared);
 
@@ -349,6 +349,22 @@ async fn set_config(
 ) -> impl IntoResponse {
     router.set_config(cfg).await;
     StatusCode::NO_CONTENT
+}
+
+/// PATCH /api/config — apply a partial config update.
+///
+/// Only fields present in the JSON body are modified; absent fields
+/// retain their current values. Returns the merged config.
+///
+/// This is the endpoint that EOT's HelixBridge should target, since
+/// it sends `RouterConfigPatch` with optional fields rather than a
+/// full `RouterConfig`.
+async fn patch_config(
+    State(router): State<AppState>,
+    Json(patch): Json<RouterConfigPatch>,
+) -> impl IntoResponse {
+    let merged = router.patch_config(patch).await;
+    Json(merged)
 }
 
 // ===== Prometheus =====
