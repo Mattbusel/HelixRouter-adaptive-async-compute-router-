@@ -145,11 +145,7 @@ fn index_to_strategy(i: usize) -> Strategy {
 
 /// Compute the dot product of two fixed-length 7-element slices.
 fn dot7(a: &[f64; N_FEATURES], b: &[f64; N_FEATURES]) -> f64 {
-    let mut acc = 0.0_f64;
-    for i in 0..N_FEATURES {
-        acc += a[i] * b[i];
-    }
-    acc
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 /// Simple 64-bit LCG (linear congruential generator) for deterministic
@@ -268,8 +264,8 @@ impl NeuralRouter {
     pub fn score_all(&self, job: &Job, pressure: f64) -> [f64; N_STRATEGIES] {
         let features = Self::feature_vector(job, pressure);
         let mut scores = [0.0_f64; N_STRATEGIES];
-        for (i, row) in self.weights.iter().enumerate() {
-            scores[i] = dot7(row, &features);
+        for (score, row) in scores.iter_mut().zip(self.weights.iter()) {
+            *score = dot7(row, &features);
         }
         scores
     }
@@ -1008,7 +1004,7 @@ mod tests {
             learning_rate: 1.0,
             ..Default::default()
         });
-        let mut router_b = NeuralRouter::new(NeuralRouterConfig {
+        let router_b = NeuralRouter::new(NeuralRouterConfig {
             min_samples_before_learning: 1,
             learning_rate: 1.0,
             ..Default::default()
