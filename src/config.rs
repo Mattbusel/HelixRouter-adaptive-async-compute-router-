@@ -484,7 +484,6 @@ mod tests {
     #[tokio::test]
     async fn test_watch_config_callback_fires_on_valid_change() {
         use std::sync::{Arc, Mutex};
-        use tokio::io::AsyncWriteExt;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();

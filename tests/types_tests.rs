@@ -1,4 +1,4 @@
-use helixrouter::types::{Job, JobKind, Output, PressureSnapshot, RoutingDecision, Strategy};
+use helixrouter::types::{Job, JobKind, RoutingDecision, Strategy};
 use std::collections::{HashMap, HashSet};
 
 fn make_job(id: u64, kind: JobKind, cost: u64) -> Job {
@@ -37,3 +37,5 @@ fn make_decision(id: u64) -> RoutingDecision {
 #[test] fn test_jk_hashmix_json() { let j = serde_json::to_string(&JobKind::HashMix).unwrap(); assert_eq!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::HashMix); }
 #[test] fn test_jk_primecount_json() { let j = serde_json::to_string(&JobKind::PrimeCount).unwrap(); assert_eq!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::PrimeCount); }
 #[test] fn test_jk_montecarlorisk_json() { let j = serde_json::to_string(&JobKind::MonteCarloRisk).unwrap(); assert_eq!(serde_json::from_str::<JobKind>(&j).unwrap(), JobKind::MonteCarloRisk); }
+#[test] fn test_make_job_fields() { let j = make_job(42, JobKind::PrimeCount, 500); assert_eq!(j.id, 42); assert_eq!(j.kind, JobKind::PrimeCount); assert_eq!(j.compute_cost, 500); assert_eq!(j.inputs, vec![10, 20, 30]); }
+#[test] fn test_make_decision_fields() { let d = make_decision(7); assert_eq!(d.job_id, 7); assert_eq!(d.strategy, Strategy::Inline); assert_eq!(d.compute_cost, 1000); }
