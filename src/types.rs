@@ -71,6 +71,7 @@ pub enum Output {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RoutingDecision {
     pub job_id: u64,
     pub kind: JobKind,
@@ -87,6 +88,7 @@ pub struct RoutingDecision {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct PressureSnapshot {
     pub cpu_busy: usize,
     pub queue_depth: usize,

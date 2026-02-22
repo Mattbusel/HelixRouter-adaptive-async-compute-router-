@@ -172,11 +172,13 @@ impl Router {
     }
 
     /// Return the last 50 routing decisions (most recent last).
+    #[allow(dead_code)]
     pub async fn routing_log(&self) -> Vec<RoutingDecision> {
         self.inner.routing_log.lock().await.iter().cloned().collect()
     }
 
     /// Return current composite pressure score in [0.0, 1.0].
+    #[allow(dead_code)]
     pub async fn pressure(&self) -> f64 {
         let metrics = self.inner.metrics.lock().await;
         let cfg = self.inner.cfg.read().await;
@@ -186,6 +188,7 @@ impl Router {
     }
 
     /// Return EMA latency (ms) per strategy for strategies that have been observed.
+    #[allow(dead_code)]
     pub async fn ema_latency(&self) -> std::collections::HashMap<Strategy, f64> {
         let metrics = self.inner.metrics.lock().await;
         metrics.latency.iter()
@@ -195,6 +198,7 @@ impl Router {
     }
 
     /// Hot-patch a single config field by name. Returns true if the field was recognized.
+    #[allow(dead_code)]
     pub async fn update_config_field(&self, field: &str, value: u64) -> bool {
         let mut cfg = self.inner.cfg.write().await;
         match field {

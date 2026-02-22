@@ -71,6 +71,7 @@ impl Simulator {
     }
 }
 
+#[allow(dead_code)]
 pub fn pressure_burst(seed: u64, warm_count: u64, burst_count: u64) -> Vec<Job> {
     let mut sim = Simulator::new(SimulatorConfig { seed, total_jobs: warm_count, heavy_job_fraction: 0.0 });
     let mut jobs = sim.all_jobs();

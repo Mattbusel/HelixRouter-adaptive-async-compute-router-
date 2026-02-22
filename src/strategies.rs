@@ -30,7 +30,7 @@ pub fn hashmix(job: &Job) -> Output {
 }
 
 pub fn primecount(job: &Job) -> Output {
-    let n = (job.compute_cost as usize).min(250_000).max(10_000);
+    let n = (job.compute_cost as usize).clamp(10_000, 250_000);
     let mut is_prime = vec![true; n + 1];
     is_prime[0] = false;
     is_prime[1] = false;
@@ -45,7 +45,7 @@ pub fn primecount(job: &Job) -> Output {
     Output::U64(is_prime.iter().filter(|&&b| b).count() as u64)
 }
 fn montecarlo_risk(job: &Job) -> Output {
-    let sims = (job.compute_cost / 200).min(50_000).max(5_000) as usize;
+    let sims = (job.compute_cost / 200).clamp(5_000, 50_000) as usize;
     let mut seed = 0x1234_5678_9abc_def0u64 ^ job.id;
     let mut samples: Vec<f64> = Vec::with_capacity(sims);
     for _ in 0..sims {

@@ -53,11 +53,13 @@ pub struct LatencySummary {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct CostPredictor {
     pub samples: Vec<(u64, f64)>,
     pub cost_ratio_ema: f64,
 }
 
+#[allow(dead_code)]
 impl CostPredictor {
     pub fn record(&mut self, estimated_cost: u64, actual_ms: f64, alpha: f64) {
         if estimated_cost == 0 { return; }
@@ -82,6 +84,7 @@ impl CostPredictor {
     }
 }
 
+#[allow(dead_code)]
 pub fn pressure_score(
     cpu_busy: usize,
     cpu_parallelism: usize,
@@ -173,7 +176,7 @@ impl MetricsStore {
     }
 
     pub fn record_latency(&mut self, s: Strategy, ms: u64) {
-        self.latency.entry(s).or_insert_with(LatencyAgg::default).record(ms, self.alpha);
+        self.latency.entry(s).or_default().record(ms, self.alpha);
     }
 }
 

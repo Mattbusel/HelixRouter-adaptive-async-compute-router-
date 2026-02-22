@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 
@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 /// A validation error from `RouterConfig::validate`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ConfigError(pub String);
 
 impl fmt::Display for ConfigError {
@@ -72,6 +73,7 @@ impl Default for RouterConfig {
 }
 
 impl RouterConfig {
+    #[allow(dead_code)]
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.inline_threshold == 0 {
             return Err(ConfigError(format!(
@@ -122,12 +124,14 @@ impl RouterConfig {
 ///
 /// Call `update()` to push a validated new config to all subscribers.
 /// Call `subscribe()` to get a watch `Receiver` for reactive consumers.
+#[allow(dead_code)]
 pub struct ConfigReloader {
     /// The canonical receiver — expose so tests can call `.borrow()` directly.
     pub rx: tokio::sync::watch::Receiver<RouterConfig>,
     tx: tokio::sync::watch::Sender<RouterConfig>,
 }
 
+#[allow(dead_code)]
 impl ConfigReloader {
     pub fn new(initial: RouterConfig) -> Self {
         let (tx, rx) = tokio::sync::watch::channel(initial);
@@ -150,6 +154,7 @@ impl ConfigReloader {
 
 // ===== File-watch hot-reload =====
 
+#[allow(dead_code)]
 pub async fn watch_config(
     path: PathBuf,
     config_lock: Arc<RwLock<RouterConfig>>,
