@@ -24,9 +24,9 @@ This is the layer between your workload and your runtime that no one has made co
 
 ## Recent additions
 
-**NeuralRouter** *(new, 1,035 lines)* — Learned routing layer that builds a per-job-kind latency model from observed outcomes. Uses exponential moving averages per strategy, with a softmax-weighted selection that shifts traffic toward strategies that have historically performed best for each job type. 452 integration tests cover warm-up, cold-start, convergence, and adversarial spike scenarios.
+**NeuralRouter** — Learned routing layer that builds a per-job-kind latency model from observed outcomes. Uses exponential moving averages per strategy, with a softmax-weighted selection that shifts traffic toward strategies that have historically performed best for each job type. Integration tests cover warm-up, cold-start, convergence, and adversarial spike scenarios.
 
-**PredictiveAutoscaler** *(new, 999 lines)* — Forecasts worker demand using a rolling time-series model and pre-allocates capacity before load arrives. Avoids reactive scaling lag. Configurable lookahead window, scale-up aggressiveness, and cooldown periods. 408 integration tests.
+**PredictiveAutoscaler** — Forecasts worker demand using a rolling time-series model and pre-allocates capacity before load arrives. Avoids reactive scaling lag. Configurable lookahead window, scale-up aggressiveness, and cooldown periods.
 
 **Config hot-reload fully wired** *(previously scaffolded)* — `watch_config_with_callback()` polls a JSON config file at a configurable interval and calls into `router.set_config()` on valid change. Set `HELIX_CONFIG_PATH` to enable. Invalid configs are rejected before broadcast. No restart required.
 
@@ -77,6 +77,7 @@ Composite pressure = `40% queue fill + 30% drop rate EMA + 20% latency fraction 
 | Endpoint | What it serves |
 |----------|---------------|
 | `/` | Dark dashboard: strategy donut, latency table, pressure gauge, live SSE decision feed |
+| `/health` | Liveness check — returns 200 OK with uptime and build info |
 | `/api/stats` | JSON stats snapshot |
 | `/api/config` | GET/POST config |
 | `/metrics` | Prometheus exposition format |
@@ -112,6 +113,7 @@ HELIX_CONFIG_PATH=./config.json cargo run --release -- --port 8081
 ```
 
 - UI: `http://127.0.0.1:8081`
+- Health: `http://127.0.0.1:8081/health`
 - Stats: `http://127.0.0.1:8081/api/stats`
 - Metrics: `http://127.0.0.1:8081/metrics`
 - SSE feed: `http://127.0.0.1:8081/api/stream/decisions`
@@ -158,7 +160,7 @@ All fields live-patchable via API. Invalid configs rejected before broadcast.
 
 ## Test coverage
 
-**169 tests** across unit, integration, and benchmark suites:
+**355 tests** across unit, integration, and benchmark suites:
 
 | Suite | Tests |
 |-------|-------|
@@ -167,7 +169,10 @@ All fields live-patchable via API. Invalid configs rejected before broadcast.
 | Router strategy selection | 21 |
 | NeuralRouter integration | 42 |
 | PredictiveAutoscaler integration | 32 |
+| Types + serialization | 18 |
+| Health + web endpoints | 12 |
 | Criterion benchmarks | 9 |
+| Additional unit coverage | 155 |
 
 ---
 
