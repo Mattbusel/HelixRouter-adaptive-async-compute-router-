@@ -100,6 +100,7 @@ pub struct AutoscaleRecommendation {
     /// Recommended bounded queue capacity.
     pub recommended_queue_cap: usize,
     /// Predicted jobs-per-second at `now + predict_horizon_secs`.
+    #[allow(dead_code)] // public API field; available to lib consumers
     pub predicted_rate: f64,
     /// Human-readable explanation of why this recommendation was made.
     pub reason: String,
@@ -140,6 +141,7 @@ impl Autoscaler {
     }
 
     /// Return the number of observations currently in the ring buffer.
+    #[allow(dead_code)] // public API; not used by the main binary but available to lib consumers
     pub fn observation_count(&self) -> usize {
         self.observations.len()
     }
@@ -345,6 +347,7 @@ impl Autoscaler {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -995,5 +998,43 @@ mod tests {
         // 1 job/sec with cap 10_000 → rate far below 30% threshold
         let rate = a.predict_rate();
         assert!(rate < 3000.0 * 0.30, "low load rate should be small, got {rate}");
+    }
+
+    // ── predicted_rate is present in recommendation ───────────────────────
+
+    #[test]
+    fn recommendation_predicted_rate_is_finite_and_non_negative() {
+        let mut a = default_autoscaler();
+        feed_increasing(&mut a, 15, 50);
+        let rec = a.recommend(4, 128).expect("should have recommendation");
+        assert!(rec.predicted_rate.is_finite(), "predicted_rate should be finite: {}", rec.predicted_rate);
+        assert!(rec.predicted_rate >= 0.0, "predicted_rate should be non-negative: {}", rec.predicted_rate);
+    }
+
+    #[test]
+    fn recommendation_predicted_rate_increases_with_load() {
+        let mut a_low = default_autoscaler();
+        feed_low_load(&mut a_low, 15);
+        let rec_low = a_low.recommend(4, 1000).expect("recommendation");
+        let rate_low = rec_low.predicted_rate;
+
+        let mut a_high = default_autoscaler();
+        // 500 jobs/sec = high load
+        feed_increasing(&mut a_high, 15, 500);
+        let rec_high = a_high.recommend(4, 1000).expect("recommendation");
+        let rate_high = rec_high.predicted_rate;
+
+        assert!(
+            rate_high > rate_low,
+            "high load predicted_rate ({rate_high}) should exceed low load ({rate_low})"
+        );
+    }
+
+    #[test]
+    fn recommendation_predicted_rate_is_zero_without_observations() {
+        let mut a = default_autoscaler();
+        // No observations yet — predict_rate() should return 0.0
+        let rate = a.predict_rate();
+        assert_eq!(rate, 0.0, "predicted_rate with no observations should be 0.0");
     }
 }

@@ -2,8 +2,10 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use tracing_subscriber::EnvFilter;
 
+mod autoscaler;
 mod config;
 mod metrics;
+mod neural_router;
 mod router;
 mod simulator;
 mod strategies;
@@ -66,6 +68,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Periodic autoscaler tick: feed load observations every 10 seconds.
+    {
+        let autoscale_router = router.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                autoscale_router.autoscale_tick().await;
+            }
+        });
+    }
+
     // HTTP server
     let r2 = router.clone();
     tokio::spawn(async move {
@@ -93,8 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = h.await;
         }
 
-        // Adaptive threshold adjustment after simulation
+        // Adaptive threshold and autoscaler tick after simulation
         router.maybe_adapt_threshold().await;
+        router.autoscale_tick().await;
+
+        // Neural router summary
+        let neural = router.neural_snapshot().await;
+        println!("== Neural router summary ==");
+        println!("samples:     {}", neural.sample_count);
+        println!("avg_reward:  {:.4}", neural.avg_reward);
+        println!("warmed_up:   {}", neural.is_warmed_up);
+        println!();
 
         let stats = router.stats_snapshot().await;
         println!("== HelixRouter summary ==");

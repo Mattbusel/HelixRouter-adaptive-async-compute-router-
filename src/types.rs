@@ -25,6 +25,7 @@ impl fmt::Display for JobKind {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum Strategy {
     Inline,
     Spawn,
@@ -102,6 +103,7 @@ pub struct PressureSnapshot {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -181,7 +183,7 @@ mod tests {
             timestamp_ms: 1_700_000_000_000,
         };
         let j = serde_json::to_string(&d).unwrap();
-        assert!(j.contains("\"strategy\":\"Spawn\""));
+        assert!(j.contains("\"strategy\":\"spawn\""));
         assert!(j.contains("\"job_id\":1"));
     }
 
