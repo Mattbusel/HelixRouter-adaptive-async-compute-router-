@@ -90,9 +90,16 @@ pub struct RouterConfigPatch {
     /// Override cpu_parallelism.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_parallelism: Option<usize>,
+    /// Override backpressure_busy_threshold — number of busy CPU workers above
+    /// which Batch/Drop strategies are forced regardless of compute cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backpressure_busy_threshold: Option<usize>,
     /// Override batch_max_size.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_max_size: Option<usize>,
+    /// Override batch_max_delay_ms — maximum time a batch waits before flushing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_max_delay_ms: Option<u64>,
     /// Override ema_alpha.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ema_alpha: Option<f64>,
@@ -102,6 +109,10 @@ pub struct RouterConfigPatch {
     /// Override cpu_p95_budget_ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_p95_budget_ms: Option<u64>,
+    /// Override adaptive_p95_threshold_factor — multiplier above which adaptive
+    /// threshold raising triggers (e.g. 1.5 × cpu_p95_budget_ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive_p95_threshold_factor: Option<f64>,
 }
 
 impl RouterConfig {
@@ -265,6 +276,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -396,6 +396,7 @@ impl NeuralRouter {
     ///
     /// # Panics
     /// This function never panics.
+    #[allow(dead_code)] // public API; available to lib consumers for manual weight injection
     pub fn weights_mut(&mut self) -> &mut [[f64; N_FEATURES]; N_STRATEGIES] {
         &mut self.weights
     }
@@ -404,8 +405,21 @@ impl NeuralRouter {
     ///
     /// # Panics
     /// This function never panics.
+    #[allow(dead_code)] // called from router.rs::neural_snapshot()
     pub fn sample_count(&self) -> u64 {
         self.sample_count
+    }
+
+    /// Return `true` once enough outcomes have been recorded that the weight
+    /// matrix has passed through at least one gradient-update cycle.
+    ///
+    /// Callers can gate on this before preferring `choose` over a deterministic
+    /// threshold heuristic to avoid cold-start routing instability.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn is_warmed_up(&self) -> bool {
+        self.sample_count >= self.config.min_samples_before_learning as u64
     }
 
     /// Return the average reward across all recorded outcomes.
@@ -421,6 +435,74 @@ impl NeuralRouter {
             self.total_reward / self.sample_count as f64
         }
     }
+
+    /// Serialize the current learned state into a portable [`WeightSnapshot`].
+    ///
+    /// The snapshot can be persisted (e.g. to disk or Redis) and later passed
+    /// to [`NeuralRouter::restore`] to warm-start a new instance without
+    /// losing the routing preferences accumulated at runtime.
+    ///
+    /// # Panics
+    /// This function never panics.
+    #[allow(dead_code)] // public API; used by tests and lib consumers for persistence
+    pub fn snapshot(&self) -> WeightSnapshot {
+        WeightSnapshot {
+            weights: self.weights,
+            sample_count: self.sample_count,
+            total_reward: self.total_reward,
+        }
+    }
+
+    /// Restore learned state from a previously captured [`WeightSnapshot`].
+    ///
+    /// The config (learning rate, epsilon, etc.) is **not** part of the
+    /// snapshot — only the trained weights and sample statistics are
+    /// restored.  Pass the same `NeuralRouterConfig` used originally (or a
+    /// newer one) to [`NeuralRouter::new`] before calling this.
+    ///
+    /// # Panics
+    /// This function never panics.
+    #[allow(dead_code)] // public API; used by tests and lib consumers for warm-start restore
+    pub fn restore(&mut self, snap: WeightSnapshot) {
+        self.weights = snap.weights;
+        self.sample_count = snap.sample_count;
+        self.total_reward = snap.total_reward;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weight snapshot (persistence)
+// ---------------------------------------------------------------------------
+
+/// A portable snapshot of the [`NeuralRouter`]'s trained state.
+///
+/// Serialize with [`serde_json::to_string`] or any Serde-compatible format,
+/// persist to disk / Redis / S3, and pass back to [`NeuralRouter::restore`]
+/// on the next startup to avoid cold-start convergence lag.
+///
+/// # Example
+///
+/// ```rust
+/// # use helixrouter::neural_router::{NeuralRouter, NeuralRouterConfig};
+/// let mut router = NeuralRouter::new(NeuralRouterConfig::default());
+/// // … train for a while …
+/// let snap = router.snapshot();
+/// let json = serde_json::to_string(&snap).expect("serialize");
+///
+/// // On restart:
+/// let mut fresh = NeuralRouter::new(NeuralRouterConfig::default());
+/// let loaded: helixrouter::neural_router::WeightSnapshot =
+///     serde_json::from_str(&json).expect("deserialize");
+/// fresh.restore(loaded);
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WeightSnapshot {
+    /// Trained weight matrix: `weights[strategy][feature]`.
+    pub weights: [[f64; N_FEATURES]; N_STRATEGIES],
+    /// Total outcomes recorded when this snapshot was taken.
+    pub sample_count: u64,
+    /// Running sum of all rewards when this snapshot was taken.
+    pub total_reward: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +523,7 @@ fn lcg_unit_from_u64(seed: u64) -> f64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1027,5 +1110,193 @@ mod tests {
             router_b.weights()[IDX_CPUPOOL],
             "weight matrices must be independent"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WeightSnapshot — persistence round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn snapshot_captures_weights_and_stats() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            learning_rate: 0.5,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::PrimeCount, 300_000, 0.8, 500);
+        for _ in 0..5 {
+            router.record_outcome(&job, 0.3, within_budget_outcome(Strategy::Spawn, 500));
+        }
+
+        let snap = router.snapshot();
+        assert_eq!(snap.sample_count, router.sample_count());
+        assert!((snap.total_reward - router.total_reward).abs() < 1e-12);
+        assert_eq!(snap.weights, *router.weights());
+    }
+
+    #[test]
+    fn restore_loads_weights_into_fresh_router() {
+        let mut trained = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            learning_rate: 1.0,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::HashMix, 900_000, 1.0, 800);
+        for _ in 0..15 {
+            trained.record_outcome(&job, 0.2, within_budget_outcome(Strategy::CpuPool, 800));
+        }
+        let snap = trained.snapshot();
+
+        let mut fresh = NeuralRouter::new(NeuralRouterConfig::default());
+        fresh.restore(snap);
+
+        assert_eq!(fresh.sample_count(), trained.sample_count());
+        assert_eq!(fresh.weights(), trained.weights());
+    }
+
+    #[test]
+    fn snapshot_restore_round_trip_via_json() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 2,
+            learning_rate: 0.1,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::MonteCarloRisk, 50_000, 0.5, 1000);
+        for _ in 0..10 {
+            router.record_outcome(&job, 0.6, over_budget_outcome(Strategy::Spawn, 1000));
+        }
+
+        let snap = router.snapshot();
+        let json = serde_json::to_string(&snap).expect("serialize snapshot");
+        let loaded: WeightSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
+
+        let mut restored = NeuralRouter::new(NeuralRouterConfig::default());
+        restored.restore(loaded);
+
+        assert_eq!(restored.sample_count(), router.sample_count());
+        for (a, b) in restored.weights().iter().zip(router.weights().iter()) {
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert!((x - y).abs() < 1e-12, "weight mismatch after JSON round-trip");
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_of_untrained_router_has_zero_samples() {
+        let router = NeuralRouter::new(NeuralRouterConfig::default());
+        let snap = router.snapshot();
+        assert_eq!(snap.sample_count, 0);
+        assert!((snap.total_reward).abs() < 1e-12);
+    }
+
+    #[test]
+    fn restore_then_continue_training_accumulates_correctly() {
+        let mut original = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            learning_rate: 0.05,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::HashMix, 10_000, 0.3, 200);
+        for _ in 0..5 {
+            original.record_outcome(&job, 0.1, within_budget_outcome(Strategy::Inline, 200));
+        }
+        let snap = original.snapshot();
+        let count_before = snap.sample_count;
+
+        let mut resumed = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            learning_rate: 0.05,
+            ..Default::default()
+        });
+        resumed.restore(snap);
+
+        // Continue training on the resumed instance.
+        for _ in 0..3 {
+            resumed.record_outcome(&job, 0.1, within_budget_outcome(Strategy::Inline, 200));
+        }
+
+        assert_eq!(resumed.sample_count(), count_before + 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // is_warmed_up
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_warmed_up_false_before_min_samples() {
+        let router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 5,
+            ..Default::default()
+        });
+        assert!(!router.is_warmed_up(), "should not be warmed up with zero samples");
+    }
+
+    #[test]
+    fn is_warmed_up_false_just_below_threshold() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 5,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::HashMix, 100, 0.5, 500);
+        for _ in 0..4 {
+            router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Inline, 500));
+        }
+        assert!(!router.is_warmed_up(), "4 samples < threshold 5, should not be warmed up");
+    }
+
+    #[test]
+    fn is_warmed_up_true_at_exact_threshold() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 5,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::HashMix, 100, 0.5, 500);
+        for _ in 0..5 {
+            router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Inline, 500));
+        }
+        assert!(router.is_warmed_up(), "5 samples == threshold 5, should be warmed up");
+    }
+
+    #[test]
+    fn is_warmed_up_true_above_threshold() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 3,
+            ..Default::default()
+        });
+        let job = make_job(JobKind::HashMix, 100, 0.5, 500);
+        for _ in 0..10 {
+            router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Spawn, 500));
+        }
+        assert!(router.is_warmed_up(), "10 samples > threshold 3, must be warmed up");
+    }
+
+    #[test]
+    fn is_warmed_up_false_after_restore_with_zero_samples() {
+        let snap = WeightSnapshot {
+            weights: [[0.0; N_FEATURES]; N_STRATEGIES],
+            sample_count: 0,
+            total_reward: 0.0,
+        };
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            ..Default::default()
+        });
+        router.restore(snap);
+        assert!(!router.is_warmed_up(), "restored zero samples: should not be warmed up");
+    }
+
+    #[test]
+    fn is_warmed_up_true_after_restore_with_sufficient_samples() {
+        let snap = WeightSnapshot {
+            weights: [[0.01; N_FEATURES]; N_STRATEGIES],
+            sample_count: 100,
+            total_reward: 50.0,
+        };
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 10,
+            ..Default::default()
+        });
+        router.restore(snap);
+        assert!(router.is_warmed_up(), "restored 100 samples > threshold 10: should be warmed up");
     }
 }

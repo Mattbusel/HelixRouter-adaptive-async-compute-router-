@@ -37,10 +37,12 @@ pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
 
     let app = AxumRouter::new()
         .route("/", get(ui))
+        .route("/health", get(health))
         .route("/metrics", get(metrics_prom))
         .route("/api/stats", get(stats_json))
         .route("/api/config", get(get_config).post(set_config).patch(patch_config))
         .route("/api/stream/decisions", get(sse_decisions))
+        .route("/api/neural", get(get_neural))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -253,6 +255,26 @@ setInterval(tick, 1500);
 </body>
 </html>"#;
 
+// ===== Health check =====
+
+/// `GET /health` — lightweight liveness probe.
+///
+/// Returns `{"status":"ok","uptime_secs":<n>}`.
+/// Bridges (HelixPressureProbe, HelixBridge) call this to verify connectivity
+/// before starting their polling loops.
+#[derive(Debug, Clone, Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    uptime_secs: u64,
+}
+
+async fn health(State(router): State<AppState>) -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        uptime_secs: router.uptime_secs(),
+    })
+}
+
 async fn ui() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
@@ -265,8 +287,13 @@ async fn sse_decisions(State(router): State<AppState>) -> Sse<impl tokio_stream:
         .filter_map(|item| {
             match item {
                 Ok(decision) => {
-                    let data = serde_json::to_string(&decision).unwrap_or_default();
-                    Some(Ok(Event::default().data(data)))
+                    match serde_json::to_string(&decision) {
+                        Ok(data) => Some(Ok(Event::default().data(data))),
+                        Err(e) => {
+                            tracing::warn!(err = %e, "SSE: failed to serialize RoutingDecision; skipping event");
+                            None
+                        }
+                    }
                 }
                 Err(_) => None,
             }
@@ -364,6 +391,17 @@ async fn patch_config(
     Json(merged)
 }
 
+// ===== Neural router snapshot =====
+
+/// GET /api/neural — current state of the online-learning neural router.
+///
+/// Returns sample count, average reward, warm-up status, and the full weight
+/// matrix so operators (and EOT's HelixBridge) can observe how the neural
+/// router is weighting each (strategy, feature) pair.
+async fn get_neural(State(router): State<AppState>) -> impl IntoResponse {
+    Json(router.neural_snapshot().await)
+}
+
 // ===== Prometheus =====
 
 async fn metrics_prom(State(router): State<AppState>) -> Response {
@@ -380,8 +418,31 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // ── Health endpoint tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_health_response_status_is_ok() {
+        let resp = HealthResponse { status: "ok", uptime_secs: 0 };
+        assert_eq!(resp.status, "ok");
+    }
+
+    #[test]
+    fn test_health_response_serializes_to_json() {
+        let resp = HealthResponse { status: "ok", uptime_secs: 42 };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        assert!(json.contains("\"status\":\"ok\""), "json: {json}");
+        assert!(json.contains("\"uptime_secs\":42"), "json: {json}");
+    }
+
+    #[test]
+    fn test_health_response_uptime_is_non_negative() {
+        let resp = HealthResponse { status: "ok", uptime_secs: u64::MAX };
+        assert!(resp.uptime_secs <= u64::MAX);
+    }
 
     #[test]
     fn test_index_html_is_not_empty() {

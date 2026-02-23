@@ -29,10 +29,29 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
+use crate::autoscaler::{Autoscaler, AutoscalerConfig, LoadObservation};
 use crate::config::{RouterConfig, RouterConfigPatch};
 use crate::metrics::{latency_summaries, MetricsStore, LatencySummary};
+use crate::neural_router::{NeuralRouter, NeuralRouterConfig, StrategyOutcome, WeightSnapshot};
 use crate::strategies::execute_job;
 use crate::types::{Job, JobKind, Output, Strategy};
+
+// ===== NeuralSnapshot =====
+
+/// A point-in-time snapshot of the neural router's learned state.
+///
+/// Returned by `Router::neural_snapshot()` and served at `GET /api/neural`.
+#[derive(Debug, Clone, Serialize)]
+pub struct NeuralSnapshot {
+    /// Total outcomes recorded so far.
+    pub sample_count: u64,
+    /// Average reward across all recorded outcomes (positive = net good routing).
+    pub avg_reward: f64,
+    /// Whether the neural router has passed the warm-up threshold.
+    pub is_warmed_up: bool,
+    /// Full weight matrix `[strategy][feature]` — 5×7 f64 array.
+    pub weights: [[f64; 7]; 5],
+}
 
 // ===== RoutingDecision (live feed) =====
 
@@ -92,6 +111,17 @@ struct Inner {
     decision_tx: broadcast::Sender<RoutingDecision>,
     /// Ring buffer of last 50 routing decisions (for /api/routing-log).
     routing_log: Mutex<VecDeque<RoutingDecision>>,
+
+    /// Monotonic instant when this `Router` was created (for uptime tracking).
+    started_at: Instant,
+
+    /// Online-learning neural router (epsilon-greedy weight matrix).
+    /// Consulted for non-Drop strategy selection once warmed up.
+    neural: Mutex<NeuralRouter>,
+
+    /// Predictive autoscaler: linear trend fit over load observations.
+    /// Call `autoscale_tick()` periodically to feed observations.
+    autoscaler: Mutex<Autoscaler>,
 }
 
 // ===== Router =====
@@ -126,6 +156,9 @@ impl Router {
             adaptive_spawn_threshold: Mutex::new(initial_spawn),
             decision_tx,
             routing_log: Mutex::new(VecDeque::new()),
+            started_at: Instant::now(),
+            neural: Mutex::new(NeuralRouter::new(NeuralRouterConfig::default())),
+            autoscaler: Mutex::new(Autoscaler::new(AutoscalerConfig::default())),
         });
 
         let inner2 = inner.clone();
@@ -144,6 +177,11 @@ impl Router {
         *self.inner.cfg.write().await = cfg;
     }
 
+    /// Return how many whole seconds have elapsed since this router was created.
+    pub fn uptime_secs(&self) -> u64 {
+        self.inner.started_at.elapsed().as_secs()
+    }
+
     /// Apply a sparse config patch — only overwrite fields that are `Some`.
     ///
     /// Returns the merged config after applying the patch.
@@ -153,10 +191,13 @@ impl Router {
         if let Some(v) = patch.spawn_threshold { cfg.spawn_threshold = v; }
         if let Some(v) = patch.cpu_queue_cap { cfg.cpu_queue_cap = v; }
         if let Some(v) = patch.cpu_parallelism { cfg.cpu_parallelism = v; }
+        if let Some(v) = patch.backpressure_busy_threshold { cfg.backpressure_busy_threshold = v; }
         if let Some(v) = patch.batch_max_size { cfg.batch_max_size = v; }
+        if let Some(v) = patch.batch_max_delay_ms { cfg.batch_max_delay_ms = v; }
         if let Some(v) = patch.ema_alpha { cfg.ema_alpha = v; }
         if let Some(v) = patch.adaptive_step { cfg.adaptive_step = v; }
         if let Some(v) = patch.cpu_p95_budget_ms { cfg.cpu_p95_budget_ms = v; }
+        if let Some(v) = patch.adaptive_p95_threshold_factor { cfg.adaptive_p95_threshold_factor = v; }
         cfg.clone()
     }
 
@@ -248,17 +289,38 @@ impl Router {
             ..cfg.clone()
         };
 
-        let strategy = choose_strategy(&effective_cfg, &job, cpu_busy);
+        let heuristic_strategy = choose_strategy(&effective_cfg, &job, cpu_busy);
 
         let pressure = {
             let m = self.inner.metrics.lock().await;
             m.pressure.score(queue_frac)
         };
 
+        // Apply neural override: when the neural router is warmed up, prefer its
+        // choice for non-Drop decisions (Drop is always governed by the heuristic's
+        // backpressure gate to preserve safety under overload).
+        let strategy = if heuristic_strategy != Strategy::Drop {
+            let neural = self.inner.neural.lock().await;
+            if neural.is_warmed_up() {
+                let nc = neural.choose(&job, pressure);
+                if nc != Strategy::Drop { nc } else { heuristic_strategy }
+            } else {
+                heuristic_strategy
+            }
+        } else {
+            Strategy::Drop
+        };
+
         debug!(
-            "route job_id={} kind={:?} cost={} strategy={} cpu_busy={} pressure={:.2}",
-            job.id, job.kind, job.compute_cost, strategy, cpu_busy, pressure
+            "route job_id={} kind={:?} cost={} heuristic={} strategy={} neural_warmed={} cpu_busy={} pressure={:.2}",
+            job.id, job.kind, job.compute_cost, heuristic_strategy, strategy,
+            self.inner.neural.lock().await.is_warmed_up(),
+            cpu_busy, pressure
         );
+
+        // Clone job so we can record the neural outcome after execution.
+        let job_for_neural = job.clone();
+        let budget_ms = job.latency_budget_ms;
 
         // Broadcast decision and append to routing log
         let decision = RoutingDecision {
@@ -282,6 +344,7 @@ impl Router {
                 self.bump_route(Strategy::Drop).await;
                 self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                 self.record_pressure(queue_frac, true, 1.0).await;
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true).await;
                 None
             }
 
@@ -291,8 +354,9 @@ impl Router {
                 let out = execute_job(&job);
                 let ms = t0.elapsed().as_millis() as u64;
                 self.record_latency(Strategy::Inline, ms).await;
-                self.record_pressure(queue_frac, false, ms as f64 / job.latency_budget_ms.max(1) as f64).await;
+                self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64).await;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
                 Some(out)
             }
 
@@ -304,8 +368,9 @@ impl Router {
                 let out = handle.await.unwrap_or_default();
                 let ms = t0.elapsed().as_millis() as u64;
                 self.record_latency(Strategy::Spawn, ms).await;
-                self.record_pressure(queue_frac, false, ms as f64 / job.latency_budget_ms.max(1) as f64).await;
+                self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64).await;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
                 Some(out)
             }
 
@@ -318,10 +383,14 @@ impl Router {
                 if self.inner.cpu_tx.try_send(work).is_err() {
                     self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                     self.record_pressure(queue_frac, true, 1.0).await;
+                    self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true).await;
                     None
                 } else {
+                    let t0 = Instant::now();
                     let out = rx.await.unwrap_or_default();
+                    let ms = t0.elapsed().as_millis() as u64;
                     self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                    self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
                     Some(out)
                 }
             }
@@ -356,8 +425,11 @@ impl Router {
                     }
                 }
 
+                let t0 = Instant::now();
                 let out = rx.await.unwrap_or_default();
+                let ms = t0.elapsed().as_millis() as u64;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
                 Some(out)
             }
         }
@@ -397,6 +469,118 @@ impl Router {
 
     async fn record_pressure(&self, queue_frac: f64, was_dropped: bool, lat_frac: f64) {
         self.inner.metrics.lock().await.pressure.record(queue_frac, was_dropped, lat_frac);
+    }
+
+    /// Record the outcome of a routing decision into the neural router's weight matrix.
+    ///
+    /// Acquires and releases the neural lock in a single short critical section.
+    async fn record_neural_outcome(
+        &self,
+        job: &Job,
+        pressure: f64,
+        strategy: Strategy,
+        latency_ms: u64,
+        dropped: bool,
+    ) {
+        let mut neural = self.inner.neural.lock().await;
+        neural.record_outcome(
+            job,
+            pressure,
+            StrategyOutcome {
+                strategy,
+                latency_ms,
+                budget_ms: job.latency_budget_ms,
+                dropped,
+            },
+        );
+    }
+
+    /// Snapshot the neural router's current learned state for observability.
+    pub async fn neural_snapshot(&self) -> NeuralSnapshot {
+        let neural = self.inner.neural.lock().await;
+        NeuralSnapshot {
+            sample_count: neural.sample_count(),
+            avg_reward: neural.avg_reward(),
+            is_warmed_up: neural.is_warmed_up(),
+            weights: *neural.weights(),
+        }
+    }
+
+    /// Restore neural router weights from a previously captured snapshot.
+    ///
+    /// Use this to warm-start the neural router after a restart, avoiding
+    /// cold-start convergence lag.
+    #[allow(dead_code)] // public API; not called by the main binary but available to lib consumers
+    pub async fn restore_neural_weights(&self, snap: WeightSnapshot) {
+        let mut neural = self.inner.neural.lock().await;
+        neural.restore(snap);
+    }
+
+    /// Feed a load observation into the autoscaler and apply any recommendation.
+    ///
+    /// Call this periodically (e.g. every 10 seconds) from a background task.
+    /// When the autoscaler recommends scaling up, the `cpu_queue_cap` is
+    /// increased; when it recommends scaling down, it is decreased.
+    pub async fn autoscale_tick(&self) {
+        use crate::autoscaler::ScaleDirection;
+
+        let stats = self.stats_snapshot().await;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let total_jobs = stats.completed + stats.dropped;
+        let drop_rate = if total_jobs > 0 {
+            stats.dropped as f64 / total_jobs as f64
+        } else {
+            0.0
+        };
+
+        let obs = LoadObservation {
+            timestamp_secs: now_secs,
+            total_jobs,
+            pressure_score: stats.pressure_score,
+            drop_rate,
+        };
+
+        let recommendation = {
+            let cfg = self.inner.cfg.read().await;
+            let parallelism = cfg.cpu_parallelism;
+            let queue_cap = cfg.cpu_queue_cap;
+            drop(cfg);
+            let mut autoscaler = self.inner.autoscaler.lock().await;
+            autoscaler.observe(obs);
+            autoscaler.recommend(parallelism, queue_cap)
+        };
+
+        if let Some(rec) = recommendation {
+            match rec.direction {
+                ScaleDirection::Up => {
+                    let mut cfg = self.inner.cfg.write().await;
+                    let new_cap = rec.recommended_queue_cap.min(4096);
+                    if new_cap > cfg.cpu_queue_cap {
+                        cfg.cpu_queue_cap = new_cap;
+                        info!(
+                            "autoscaler: scale up cpu_queue_cap={} parallelism={} reason={}",
+                            new_cap, rec.recommended_parallelism, rec.reason
+                        );
+                    }
+                }
+                ScaleDirection::Down => {
+                    let mut cfg = self.inner.cfg.write().await;
+                    let new_cap = rec.recommended_queue_cap.max(16);
+                    if new_cap < cfg.cpu_queue_cap {
+                        cfg.cpu_queue_cap = new_cap;
+                        info!(
+                            "autoscaler: scale down cpu_queue_cap={} parallelism={} reason={}",
+                            new_cap, rec.recommended_parallelism, rec.reason
+                        );
+                    }
+                }
+                ScaleDirection::Hold => {}
+            }
+        }
     }
 }
 
@@ -488,6 +672,7 @@ async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::RouterConfig;
@@ -685,5 +870,128 @@ mod tests {
         for h in handles {
             assert!(h.await.unwrap().is_some());
         }
+    }
+
+    // ===== patch_config new fields =====
+
+    #[tokio::test]
+    async fn test_patch_config_backpressure_busy_threshold() {
+        let router = Router::new(RouterConfig::default());
+        let cfg = router.patch_config(RouterConfigPatch {
+            backpressure_busy_threshold: Some(3),
+            ..RouterConfigPatch::default()
+        }).await;
+        assert_eq!(cfg.backpressure_busy_threshold, 3);
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_batch_max_delay_ms() {
+        let router = Router::new(RouterConfig::default());
+        let cfg = router.patch_config(RouterConfigPatch {
+            batch_max_delay_ms: Some(50),
+            ..RouterConfigPatch::default()
+        }).await;
+        assert_eq!(cfg.batch_max_delay_ms, 50);
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_adaptive_p95_threshold_factor() {
+        let router = Router::new(RouterConfig::default());
+        let cfg = router.patch_config(RouterConfigPatch {
+            adaptive_p95_threshold_factor: Some(2.0),
+            ..RouterConfigPatch::default()
+        }).await;
+        assert!((cfg.adaptive_p95_threshold_factor - 2.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_empty_patch_leaves_defaults() {
+        let router = Router::new(RouterConfig::default());
+        let cfg = router.patch_config(RouterConfigPatch::default()).await;
+        assert_eq!(cfg, RouterConfig::default());
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_all_new_fields_at_once() {
+        let router = Router::new(RouterConfig::default());
+        let cfg = router.patch_config(RouterConfigPatch {
+            backpressure_busy_threshold: Some(2),
+            batch_max_delay_ms: Some(20),
+            adaptive_p95_threshold_factor: Some(1.8),
+            ..RouterConfigPatch::default()
+        }).await;
+        assert_eq!(cfg.backpressure_busy_threshold, 2);
+        assert_eq!(cfg.batch_max_delay_ms, 20);
+        assert!((cfg.adaptive_p95_threshold_factor - 1.8).abs() < 1e-10);
+    }
+
+    // ===== autoscale_tick =====
+
+    #[tokio::test]
+    async fn test_autoscale_tick_runs_without_panic() {
+        // autoscale_tick should be callable on a fresh router with no jobs.
+        let router = Router::new(RouterConfig::default());
+        router.autoscale_tick().await;
+        // Stats should remain consistent after the tick.
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.completed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_autoscale_tick_after_completed_jobs() {
+        let router = Router::new(RouterConfig::default());
+        // Submit some jobs first so the autoscaler sees real load.
+        for i in 0..5 {
+            router.submit(default_job(i, 100, 0.5)).await;
+        }
+        // Tick should not panic with real observation data.
+        router.autoscale_tick().await;
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.completed, 5);
+    }
+
+    // ===== restore_neural_weights =====
+
+    #[tokio::test]
+    async fn test_restore_neural_weights_can_round_trip_snapshot() {
+
+        let router = Router::new(RouterConfig::default());
+
+        // Take a snapshot of the current (untrained) weights.
+        let snap = {
+            let neural = router.inner.neural.lock().await;
+            neural.snapshot()
+        };
+
+        // Restore the same snapshot — should not change behaviour.
+        router.restore_neural_weights(snap.clone()).await;
+
+        // After restore, the router should still work normally.
+        let job = default_job(42, 100, 0.5);
+        let _ = router.submit(job).await;
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.completed + stats.dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn test_restore_neural_weights_with_warm_snapshot() {
+        use crate::neural_router::WeightSnapshot;
+
+        let router = Router::new(RouterConfig::default());
+
+        // Build a synthetic snapshot with non-default weights (5 strategies × 7 features).
+        let warm_snap = WeightSnapshot {
+            weights: [[0.05; 7]; 5],
+            sample_count: 200,
+            total_reward: 150.0,
+        };
+
+        router.restore_neural_weights(warm_snap).await;
+
+        // After restoring a warm snapshot, the router should route successfully.
+        let job = default_job(99, 500, 0.6);
+        let _ = router.submit(job).await;
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.completed + stats.dropped, 1);
     }
 }
