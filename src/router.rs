@@ -30,7 +30,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
 use crate::autoscaler::{Autoscaler, AutoscalerConfig, LoadObservation};
-use crate::config::{RouterConfig, RouterConfigPatch};
+use crate::config::{ConfigError, RouterConfig, RouterConfigPatch};
 use crate::metrics::{latency_summaries, MetricsStore, LatencySummary};
 use crate::neural_router::{NeuralRouter, NeuralRouterConfig, StrategyOutcome, WeightSnapshot};
 use crate::strategies::execute_job;
@@ -115,6 +115,14 @@ struct Inner {
     /// Monotonic instant when this `Router` was created (for uptime tracking).
     started_at: Instant,
 
+    /// EOT-reported external pressure signal (0–1000 milli-scaled).
+    ///
+    /// Pushed by Every-Other-Token's HelixBridge when it detects high drop
+    /// rate, queue saturation, or an open circuit breaker.  Blended into
+    /// the composite pressure score so HelixRouter's routing decisions
+    /// reflect EOT's internal load state.
+    eot_pressure_milli: AtomicU64,
+
     /// Online-learning neural router (epsilon-greedy weight matrix).
     /// Consulted for non-Drop strategy selection once warmed up.
     neural: Mutex<NeuralRouter>,
@@ -159,6 +167,7 @@ impl Router {
             started_at: Instant::now(),
             neural: Mutex::new(NeuralRouter::new(NeuralRouterConfig::default())),
             autoscaler: Mutex::new(Autoscaler::new(AutoscalerConfig::default())),
+            eot_pressure_milli: AtomicU64::new(0),
         });
 
         let inner2 = inner.clone();
@@ -184,21 +193,29 @@ impl Router {
 
     /// Apply a sparse config patch — only overwrite fields that are `Some`.
     ///
-    /// Returns the merged config after applying the patch.
-    pub async fn patch_config(&self, patch: RouterConfigPatch) -> RouterConfig {
+    /// Returns the merged config on success. Returns [`ConfigError`] if the
+    /// resulting config would be invalid (e.g. `inline_threshold >= spawn_threshold`,
+    /// `ema_alpha` outside `(0, 1]`, `cpu_parallelism == 0`). The live config is
+    /// **not modified** when validation fails (atomic read-validate-write).
+    pub async fn patch_config(&self, patch: RouterConfigPatch) -> Result<RouterConfig, ConfigError> {
         let mut cfg = self.inner.cfg.write().await;
-        if let Some(v) = patch.inline_threshold { cfg.inline_threshold = v; }
-        if let Some(v) = patch.spawn_threshold { cfg.spawn_threshold = v; }
-        if let Some(v) = patch.cpu_queue_cap { cfg.cpu_queue_cap = v; }
-        if let Some(v) = patch.cpu_parallelism { cfg.cpu_parallelism = v; }
-        if let Some(v) = patch.backpressure_busy_threshold { cfg.backpressure_busy_threshold = v; }
-        if let Some(v) = patch.batch_max_size { cfg.batch_max_size = v; }
-        if let Some(v) = patch.batch_max_delay_ms { cfg.batch_max_delay_ms = v; }
-        if let Some(v) = patch.ema_alpha { cfg.ema_alpha = v; }
-        if let Some(v) = patch.adaptive_step { cfg.adaptive_step = v; }
-        if let Some(v) = patch.cpu_p95_budget_ms { cfg.cpu_p95_budget_ms = v; }
-        if let Some(v) = patch.adaptive_p95_threshold_factor { cfg.adaptive_p95_threshold_factor = v; }
-        cfg.clone()
+        // Apply the patch to a candidate clone so we can validate before committing.
+        let mut candidate = cfg.clone();
+        if let Some(v) = patch.inline_threshold { candidate.inline_threshold = v; }
+        if let Some(v) = patch.spawn_threshold { candidate.spawn_threshold = v; }
+        if let Some(v) = patch.cpu_queue_cap { candidate.cpu_queue_cap = v; }
+        if let Some(v) = patch.cpu_parallelism { candidate.cpu_parallelism = v; }
+        if let Some(v) = patch.backpressure_busy_threshold { candidate.backpressure_busy_threshold = v; }
+        if let Some(v) = patch.batch_max_size { candidate.batch_max_size = v; }
+        if let Some(v) = patch.batch_max_delay_ms { candidate.batch_max_delay_ms = v; }
+        if let Some(v) = patch.ema_alpha { candidate.ema_alpha = v; }
+        if let Some(v) = patch.adaptive_step { candidate.adaptive_step = v; }
+        if let Some(v) = patch.cpu_p95_budget_ms { candidate.cpu_p95_budget_ms = v; }
+        if let Some(v) = patch.adaptive_p95_threshold_factor { candidate.adaptive_p95_threshold_factor = v; }
+        // Validate before committing — roll back on error.
+        candidate.validate()?;
+        *cfg = candidate.clone();
+        Ok(candidate)
     }
 
     // ===== Stats =====
@@ -206,15 +223,21 @@ impl Router {
     pub async fn stats_snapshot(&self) -> RouterStats {
         let routed = self.inner.routed.lock().await.clone();
         let metrics = self.inner.metrics.lock().await;
-        let pressure = metrics.pressure.score(0.0); // queue_frac polled separately
+        let internal_pressure = metrics.pressure.score(0.0); // queue_frac polled separately
         drop(metrics);
+
+        // Blend in EOT's external pressure so that the pressure_score visible
+        // to callers (Tokio Prompt's HelixPressureProbe, dashboards, etc.)
+        // reflects the full system state including upstream token generation load.
+        let eot = self.inner.eot_pressure_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+        let pressure_score = internal_pressure.max(eot);
 
         RouterStats {
             routed,
             completed: self.inner.completed.load(Ordering::Relaxed),
             dropped: self.inner.dropped.load(Ordering::Relaxed),
             adaptive_spawn_threshold: *self.inner.adaptive_spawn_threshold.lock().await,
-            pressure_score: pressure,
+            pressure_score,
         }
     }
 
@@ -235,13 +258,39 @@ impl Router {
     }
 
     /// Return current composite pressure score in [0.0, 1.0].
+    ///
+    /// Blends the internal compute-queue pressure with the EOT external
+    /// pressure signal (if one has been received via `POST /api/telemetry`).
     #[allow(dead_code)]
     pub async fn pressure(&self) -> f64 {
         let metrics = self.inner.metrics.lock().await;
         let cfg = self.inner.cfg.read().await;
         let cpu_busy = cfg.cpu_parallelism.saturating_sub(self.inner.cpu_slots.available_permits());
         let queue_frac = cpu_busy as f64 / cfg.cpu_parallelism.max(1) as f64;
-        metrics.pressure.score(queue_frac)
+        let internal = metrics.pressure.score(queue_frac);
+        let eot = self.inner.eot_pressure_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+        // Take the max: EOT distress should raise HelixRouter's pressure
+        // even when local compute queues appear healthy.
+        internal.max(eot)
+    }
+
+    /// Inject EOT's external pressure signal (0.0–1.0) into HelixRouter.
+    ///
+    /// Called by the `POST /api/telemetry` handler when Every-Other-Token
+    /// reports its current drop_rate / queue_fill_frac / circuit state.
+    /// The value is blended into the composite pressure score returned by
+    /// `pressure()` and `stats_snapshot()`.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn set_eot_pressure(&self, pressure: f64) {
+        let milli = (pressure.clamp(0.0, 1.0) * 1000.0) as u64;
+        self.inner.eot_pressure_milli.store(milli, Ordering::Relaxed);
+    }
+
+    /// Read the currently injected EOT pressure (0.0–1.0).
+    pub fn eot_pressure(&self) -> f64 {
+        self.inner.eot_pressure_milli.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
     /// Return EMA latency (ms) per strategy for strategies that have been observed.
@@ -880,7 +929,7 @@ mod tests {
         let cfg = router.patch_config(RouterConfigPatch {
             backpressure_busy_threshold: Some(3),
             ..RouterConfigPatch::default()
-        }).await;
+        }).await.expect("valid patch");
         assert_eq!(cfg.backpressure_busy_threshold, 3);
     }
 
@@ -890,7 +939,7 @@ mod tests {
         let cfg = router.patch_config(RouterConfigPatch {
             batch_max_delay_ms: Some(50),
             ..RouterConfigPatch::default()
-        }).await;
+        }).await.expect("valid patch");
         assert_eq!(cfg.batch_max_delay_ms, 50);
     }
 
@@ -900,14 +949,14 @@ mod tests {
         let cfg = router.patch_config(RouterConfigPatch {
             adaptive_p95_threshold_factor: Some(2.0),
             ..RouterConfigPatch::default()
-        }).await;
+        }).await.expect("valid patch");
         assert!((cfg.adaptive_p95_threshold_factor - 2.0).abs() < 1e-10);
     }
 
     #[tokio::test]
     async fn test_patch_config_empty_patch_leaves_defaults() {
         let router = Router::new(RouterConfig::default());
-        let cfg = router.patch_config(RouterConfigPatch::default()).await;
+        let cfg = router.patch_config(RouterConfigPatch::default()).await.expect("valid patch");
         assert_eq!(cfg, RouterConfig::default());
     }
 
@@ -919,10 +968,45 @@ mod tests {
             batch_max_delay_ms: Some(20),
             adaptive_p95_threshold_factor: Some(1.8),
             ..RouterConfigPatch::default()
-        }).await;
+        }).await.expect("valid patch");
         assert_eq!(cfg.backpressure_busy_threshold, 2);
         assert_eq!(cfg.batch_max_delay_ms, 20);
         assert!((cfg.adaptive_p95_threshold_factor - 1.8).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_inline_ge_spawn_returns_err() {
+        let router = Router::new(RouterConfig::default());
+        // inline_threshold >= spawn_threshold is invalid
+        let result = router.patch_config(RouterConfigPatch {
+            inline_threshold: Some(100_000),
+            spawn_threshold: Some(50_000),
+            ..RouterConfigPatch::default()
+        }).await;
+        assert!(result.is_err(), "expected ConfigError for inline >= spawn");
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_invalid_does_not_mutate_live_config() {
+        let router = Router::new(RouterConfig::default());
+        let before = router.config().await;
+        // Try to push an invalid patch.
+        let _ = router.patch_config(RouterConfigPatch {
+            cpu_parallelism: Some(0),
+            ..RouterConfigPatch::default()
+        }).await;
+        let after = router.config().await;
+        assert_eq!(before, after, "live config must not change on invalid patch");
+    }
+
+    #[tokio::test]
+    async fn test_patch_config_ema_alpha_out_of_range_returns_err() {
+        let router = Router::new(RouterConfig::default());
+        let result = router.patch_config(RouterConfigPatch {
+            ema_alpha: Some(0.0),
+            ..RouterConfigPatch::default()
+        }).await;
+        assert!(result.is_err(), "ema_alpha=0 must be rejected");
     }
 
     // ===== autoscale_tick =====

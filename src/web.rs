@@ -18,10 +18,10 @@ use axum::{
     http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response, Sse},
     response::sse::Event,
-    routing::get,
+    routing::{get, post},
     Json, Router as AxumRouter,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -378,7 +378,12 @@ async fn set_config(
 /// PATCH /api/config — apply a partial config update.
 ///
 /// Only fields present in the JSON body are modified; absent fields
-/// retain their current values. Returns the merged config.
+/// retain their current values. Returns the merged config on success.
+///
+/// Returns **422 Unprocessable Entity** if the resulting config would be
+/// invalid (e.g. `inline_threshold >= spawn_threshold`, `ema_alpha` outside
+/// `(0, 1]`, `cpu_parallelism == 0`). The live config is **not modified**
+/// when validation fails.
 ///
 /// This is the endpoint that EOT's HelixBridge should target, since
 /// it sends `RouterConfigPatch` with optional fields rather than a
@@ -386,9 +391,11 @@ async fn set_config(
 async fn patch_config(
     State(router): State<AppState>,
     Json(patch): Json<RouterConfigPatch>,
-) -> impl IntoResponse {
-    let merged = router.patch_config(patch).await;
-    Json(merged)
+) -> Response {
+    match router.patch_config(patch).await {
+        Ok(merged) => Json(merged).into_response(),
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+    }
 }
 
 // ===== Neural router snapshot =====
@@ -566,5 +573,152 @@ mod tests {
     fn test_index_html_is_valid_utf8() {
         // Ensure the HTML is valid UTF-8 (it uses em-dashes which are multi-byte but valid)
         assert!(std::str::from_utf8(INDEX_HTML.as_bytes()).is_ok());
+    }
+
+    // ── Cross-repo schema compatibility tests ────────────────────────────────
+    //
+    // EOT's HelixBridge deserializes /api/stats and /api/neural responses.
+    // These tests pin the exact JSON field names and types so any rename or
+    // structural change here will break the build rather than silently
+    // producing wrong telemetry at runtime.
+
+    /// Verify that `StatsResponse` serialises every field EOT expects.
+    ///
+    /// EOT's `RouterStats` mirrors: completed, dropped,
+    /// adaptive_spawn_threshold, pressure_score, routed_by_strategy,
+    /// latency_by_strategy.
+    #[test]
+    fn test_stats_response_schema_has_all_eot_fields() {
+        let resp = StatsResponse {
+            completed: 100,
+            dropped: 5,
+            adaptive_spawn_threshold: 250,
+            pressure_score: 0.42,
+            routed_by_strategy: vec![
+                CountRow { strategy: Strategy::Inline, count: 80 },
+                CountRow { strategy: Strategy::Drop,   count: 5  },
+            ],
+            latency_by_strategy: vec![LatencyRow {
+                strategy: Strategy::Inline,
+                count: 80,
+                avg_ms: 1.5,
+                ema_ms: 1.4,
+                p95_ms: 4,
+            }],
+        };
+
+        let json = serde_json::to_string(&resp).expect("serialize StatsResponse");
+
+        // Top-level scalar fields
+        assert!(json.contains("\"completed\":100"),              "missing completed");
+        assert!(json.contains("\"dropped\":5"),                  "missing dropped");
+        assert!(json.contains("\"adaptive_spawn_threshold\":250"), "missing adaptive_spawn_threshold");
+        assert!(json.contains("\"pressure_score\":0.42"),        "missing pressure_score");
+
+        // Array fields
+        assert!(json.contains("\"routed_by_strategy\""),         "missing routed_by_strategy");
+        assert!(json.contains("\"latency_by_strategy\""),        "missing latency_by_strategy");
+
+        // routed row fields
+        assert!(json.contains("\"strategy\""),                   "missing strategy in routed row");
+        assert!(json.contains("\"count\""),                      "missing count in routed row");
+
+        // latency row fields
+        assert!(json.contains("\"avg_ms\""),                     "missing avg_ms");
+        assert!(json.contains("\"ema_ms\""),                     "missing ema_ms");
+        assert!(json.contains("\"p95_ms\""),                     "missing p95_ms");
+    }
+
+    /// Verify strategy names serialise as snake_case strings (EOT uses
+    /// `#[serde(rename_all = "snake_case")]` when deserialising).
+    #[test]
+    fn test_stats_response_strategy_names_are_snake_case() {
+        let resp = StatsResponse {
+            completed: 0,
+            dropped: 0,
+            adaptive_spawn_threshold: 0,
+            pressure_score: 0.0,
+            routed_by_strategy: vec![
+                CountRow { strategy: Strategy::Inline,  count: 0 },
+                CountRow { strategy: Strategy::Spawn,   count: 0 },
+                CountRow { strategy: Strategy::CpuPool, count: 0 },
+                CountRow { strategy: Strategy::Batch,   count: 0 },
+                CountRow { strategy: Strategy::Drop,    count: 0 },
+            ],
+            latency_by_strategy: vec![],
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        assert!(json.contains("\"inline\""),   "Strategy::Inline should serialise as \"inline\"");
+        assert!(json.contains("\"spawn\""),    "Strategy::Spawn should serialise as \"spawn\"");
+        assert!(json.contains("\"cpu_pool\""), "Strategy::CpuPool should serialise as \"cpu_pool\"");
+        assert!(json.contains("\"batch\""),    "Strategy::Batch should serialise as \"batch\"");
+        assert!(json.contains("\"drop\""),     "Strategy::Drop should serialise as \"drop\"");
+    }
+
+    /// Verify that `NeuralSnapshot` serialises the fields EOT expects.
+    ///
+    /// EOT's `NeuralRouterState` mirrors: sample_count, avg_reward,
+    /// is_warmed_up, weights (Vec<Vec<f64>> that deserialises from [[f64;7];5]).
+    #[test]
+    fn test_neural_snapshot_schema_has_all_eot_fields() {
+        use crate::router::NeuralSnapshot;
+
+        let snap = NeuralSnapshot {
+            sample_count: 150,
+            avg_reward: 0.82,
+            is_warmed_up: true,
+            weights: [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]; 5],
+        };
+
+        let json = serde_json::to_string(&snap).expect("serialize NeuralSnapshot");
+
+        assert!(json.contains("\"sample_count\":150"),  "missing sample_count");
+        assert!(json.contains("\"avg_reward\":0.82"),   "missing avg_reward");
+        assert!(json.contains("\"is_warmed_up\":true"), "missing is_warmed_up");
+        assert!(json.contains("\"weights\""),           "missing weights");
+    }
+
+    /// Verify that the weights matrix is a nested array parseable as Vec<Vec<f64>>.
+    ///
+    /// EOT deserialises `[[f64;7];5]` into `Vec<Vec<f64>>`.  serde renders
+    /// fixed arrays identically to vecs, so this confirms the wire format
+    /// remains compatible even if the type annotation changes.
+    #[test]
+    fn test_neural_snapshot_weights_deserialise_as_nested_vec() {
+        use crate::router::NeuralSnapshot;
+        use serde_json::Value;
+
+        let snap = NeuralSnapshot {
+            sample_count: 10,
+            avg_reward: 0.5,
+            is_warmed_up: false,
+            weights: [[0.0; 7]; 5],
+        };
+
+        let json = serde_json::to_string(&snap).expect("serialize");
+        let val: Value = serde_json::from_str(&json).expect("parse");
+
+        let weights = val["weights"].as_array().expect("weights should be array");
+        assert_eq!(weights.len(), 5, "outer dim should be 5 (N_STRATEGIES)");
+        for (i, row) in weights.iter().enumerate() {
+            let row_arr = row.as_array().expect("each row should be array");
+            assert_eq!(row_arr.len(), 7, "inner dim of row {i} should be 7 (N_FEATURES)");
+        }
+    }
+
+    /// Verify zero-state StatsResponse (all counters zero) serialises cleanly.
+    #[test]
+    fn test_stats_response_zero_state_serialises() {
+        let resp = StatsResponse {
+            completed: 0,
+            dropped: 0,
+            adaptive_spawn_threshold: 0,
+            pressure_score: 0.0,
+            routed_by_strategy: vec![],
+            latency_by_strategy: vec![],
+        };
+        let json = serde_json::to_string(&resp).expect("serialize zero StatsResponse");
+        assert!(json.contains("\"routed_by_strategy\":[]"));
+        assert!(json.contains("\"latency_by_strategy\":[]"));
     }
 }
