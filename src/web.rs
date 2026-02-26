@@ -41,6 +41,7 @@ pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
         .route("/metrics", get(metrics_prom))
         .route("/api/stats", get(stats_json))
         .route("/api/config", get(get_config).post(set_config).patch(patch_config))
+        .route("/api/telemetry", post(post_eot_telemetry))
         .route("/api/stream/decisions", get(sse_decisions))
         .route("/api/neural", get(get_neural))
         .with_state(shared);
@@ -398,6 +399,37 @@ async fn patch_config(
     }
 }
 
+// ===== EOT telemetry ingest =====
+
+/// Body accepted by `POST /api/telemetry`.
+///
+/// Every-Other-Token posts this when its self-improvement loop detects
+/// elevated pressure so HelixRouter can blend the signal into its own
+/// composite pressure score.
+#[derive(Debug, Clone, Deserialize)]
+struct EotTelemetry {
+    /// Normalised pressure signal from EOT's self-tune loop (0.0–1.0).
+    /// Values outside [0,1] are clamped before storage.
+    pub pressure: f64,
+}
+
+/// POST /api/telemetry — accept a pressure signal from Every-Other-Token.
+///
+/// EOT's HelixBridge calls this endpoint after each self-tune cycle to inject
+/// its observed backpressure into HelixRouter's composite pressure score.
+/// This closes the feedback loop in the other direction: instead of only
+/// HelixRouter pushing config to EOT, EOT can now influence HelixRouter's
+/// routing decisions in real time.
+///
+/// Returns `204 No Content` on success.
+async fn post_eot_telemetry(
+    State(router): State<AppState>,
+    Json(body): Json<EotTelemetry>,
+) -> impl IntoResponse {
+    router.set_eot_pressure(body.pressure);
+    StatusCode::NO_CONTENT
+}
+
 // ===== Neural router snapshot =====
 
 /// GET /api/neural — current state of the online-learning neural router.
@@ -720,5 +752,42 @@ mod tests {
         let json = serde_json::to_string(&resp).expect("serialize zero StatsResponse");
         assert!(json.contains("\"routed_by_strategy\":[]"));
         assert!(json.contains("\"latency_by_strategy\":[]"));
+    }
+
+    // ── EotTelemetry deserialization tests ────────────────────────────────
+
+    #[test]
+    fn test_eot_telemetry_deserializes_pressure() {
+        let json = r#"{"pressure":0.75}"#;
+        let body: EotTelemetry = serde_json::from_str(json).expect("deserialize");
+        assert!((body.pressure - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_eot_telemetry_deserializes_zero() {
+        let json = r#"{"pressure":0.0}"#;
+        let body: EotTelemetry = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(body.pressure, 0.0);
+    }
+
+    #[test]
+    fn test_eot_telemetry_deserializes_one() {
+        let json = r#"{"pressure":1.0}"#;
+        let body: EotTelemetry = serde_json::from_str(json).expect("deserialize");
+        assert!((body.pressure - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_eot_telemetry_ignores_extra_fields() {
+        let json = r#"{"pressure":0.5,"drop_rate":0.1,"extra":"ignored"}"#;
+        let result = serde_json::from_str::<EotTelemetry>(json);
+        assert!(result.is_ok(), "extra fields should be ignored: {result:?}");
+    }
+
+    #[test]
+    fn test_eot_telemetry_fails_on_missing_pressure() {
+        let json = r#"{"drop_rate":0.1}"#;
+        let result = serde_json::from_str::<EotTelemetry>(json);
+        assert!(result.is_err(), "missing pressure should fail deserialization");
     }
 }

@@ -229,7 +229,7 @@ impl Router {
         // Blend in EOT's external pressure so that the pressure_score visible
         // to callers (Tokio Prompt's HelixPressureProbe, dashboards, etc.)
         // reflects the full system state including upstream token generation load.
-        let eot = self.inner.eot_pressure_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+        let eot = self.eot_pressure();
         let pressure_score = internal_pressure.max(eot);
 
         RouterStats {
@@ -268,10 +268,11 @@ impl Router {
         let cpu_busy = cfg.cpu_parallelism.saturating_sub(self.inner.cpu_slots.available_permits());
         let queue_frac = cpu_busy as f64 / cfg.cpu_parallelism.max(1) as f64;
         let internal = metrics.pressure.score(queue_frac);
-        let eot = self.inner.eot_pressure_milli.load(Ordering::Relaxed) as f64 / 1000.0;
         // Take the max: EOT distress should raise HelixRouter's pressure
         // even when local compute queues appear healthy.
-        internal.max(eot)
+        drop(metrics);
+        drop(cfg);
+        internal.max(self.eot_pressure())
     }
 
     /// Inject EOT's external pressure signal (0.0–1.0) into HelixRouter.
@@ -1077,5 +1078,57 @@ mod tests {
         let _ = router.submit(job).await;
         let stats = router.stats_snapshot().await;
         assert_eq!(stats.completed + stats.dropped, 1);
+    }
+
+    // ── EOT pressure injection ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_eot_pressure_stores_and_reads_back() {
+        let router = Router::new(RouterConfig::default());
+        router.set_eot_pressure(0.75);
+        let got = router.eot_pressure();
+        // Stored as millis so precision is ~0.001; accept small rounding.
+        assert!((got - 0.75).abs() < 0.002, "eot_pressure={got}");
+    }
+
+    #[tokio::test]
+    async fn test_set_eot_pressure_clamps_above_one() {
+        let router = Router::new(RouterConfig::default());
+        router.set_eot_pressure(2.5);
+        assert!((router.eot_pressure() - 1.0).abs() < 0.002);
+    }
+
+    #[tokio::test]
+    async fn test_set_eot_pressure_clamps_below_zero() {
+        let router = Router::new(RouterConfig::default());
+        router.set_eot_pressure(-0.5);
+        assert!(router.eot_pressure().abs() < 0.002);
+    }
+
+    #[tokio::test]
+    async fn test_eot_pressure_zero_by_default() {
+        let router = Router::new(RouterConfig::default());
+        assert_eq!(router.eot_pressure(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_eot_pressure_blended_into_stats_snapshot() {
+        // When EOT pressure is high it should surface in pressure_score.
+        let router = Router::new(RouterConfig::default());
+        router.set_eot_pressure(0.99);
+        let snap = router.stats_snapshot().await;
+        assert!(
+            snap.pressure_score >= 0.98,
+            "pressure_score should reflect EOT pressure: {}",
+            snap.pressure_score
+        );
+    }
+
+    #[tokio::test]
+    async fn test_eot_pressure_overwrite_replaces_previous() {
+        let router = Router::new(RouterConfig::default());
+        router.set_eot_pressure(0.5);
+        router.set_eot_pressure(0.1);
+        assert!((router.eot_pressure() - 0.1).abs() < 0.002);
     }
 }
