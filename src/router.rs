@@ -497,10 +497,16 @@ impl Router {
                 return; // not enough data
             }
             let p95 = agg.p95_ms;
-            if p95 > cfg.cpu_p95_budget_ms {
+            // Use adaptive_p95_threshold_factor so the config field actually controls
+            // when adaptation triggers (e.g. factor=1.5 means raise only if p95 > 1.5×budget).
+            let trigger_ms = (cfg.cpu_p95_budget_ms as f64 * cfg.adaptive_p95_threshold_factor) as u64;
+            if p95 > trigger_ms {
                 drop(metrics);
                 let mut threshold = self.inner.adaptive_spawn_threshold.lock().await;
-                let new_val = (*threshold + *threshold / 10).min(cfg.spawn_threshold.saturating_mul(10));
+                // Use adaptive_step so the config field controls how much the threshold rises.
+                let step = cfg.adaptive_step.clamp(0.0, 1.0);
+                let new_val = ((*threshold as f64) * (1.0 + step)) as u64;
+                let new_val = new_val.min(cfg.spawn_threshold.saturating_mul(10));
                 *threshold = new_val;
                 info!("adaptive: raised spawn_threshold to {}", *threshold);
             }

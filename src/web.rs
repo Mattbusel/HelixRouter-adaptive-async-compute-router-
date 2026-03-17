@@ -371,9 +371,16 @@ async fn get_config(State(router): State<AppState>) -> impl IntoResponse {
 async fn set_config(
     State(router): State<AppState>,
     Json(cfg): Json<RouterConfig>,
-) -> impl IntoResponse {
+) -> Response {
+    // Validate before committing — mirrors the safety check in patch_config.
+    // Without this, callers could POST inline_threshold >= spawn_threshold,
+    // ema_alpha=0, or cpu_parallelism=0, causing silent misbehaviour or
+    // division-by-zero in pressure_score.
+    if let Err(e) = cfg.validate() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
+    }
     router.set_config(cfg).await;
-    StatusCode::NO_CONTENT
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// PATCH /api/config — apply a partial config update.
