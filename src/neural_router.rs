@@ -69,6 +69,11 @@ pub struct NeuralRouterConfig {
     pub drop_pressure_threshold: f64,
     /// Minimum number of recorded outcomes before weight updates begin.
     pub min_samples_before_learning: usize,
+    /// Per-100-sample epsilon decay rate (0.0 = no decay).
+    /// Applied as `epsilon *= 1.0 - epsilon_decay` every 100 recorded outcomes,
+    /// clamped to a floor of 0.01 so some exploration is always retained.
+    /// A value of 0.05 reduces epsilon by 5% per 100 samples.
+    pub epsilon_decay: f64,
 }
 
 impl Default for NeuralRouterConfig {
@@ -78,6 +83,7 @@ impl Default for NeuralRouterConfig {
             epsilon: 0.10,
             drop_pressure_threshold: 0.80,
             min_samples_before_learning: 10,
+            epsilon_decay: 0.0,
         }
     }
 }
@@ -365,6 +371,13 @@ impl NeuralRouter {
 
         self.total_reward += reward;
         self.sample_count += 1;
+
+        // Epsilon decay: every 100 samples reduce exploration rate by the
+        // configured fraction, floored at 0.01 so some exploration is retained.
+        if self.config.epsilon_decay > 0.0 && self.sample_count % 100 == 0 {
+            self.config.epsilon = (self.config.epsilon * (1.0 - self.config.epsilon_decay))
+                .max(0.01);
+        }
 
         // Honour the warm-up period: skip weight updates until we have seen
         // enough samples to form a reliable gradient direction.
@@ -1298,5 +1311,70 @@ mod tests {
         });
         router.restore(snap);
         assert!(router.is_warmed_up(), "restored 100 samples > threshold 10: should be warmed up");
+    }
+
+    // ── Epsilon decay ──────────────────────────────────────────────────────
+
+    fn make_outcome(strategy: Strategy) -> StrategyOutcome {
+        StrategyOutcome { strategy, latency_ms: 10, budget_ms: 100, dropped: false }
+    }
+
+    fn make_job_for_decay() -> Job {
+        Job { id: 0, kind: JobKind::HashMix, inputs: vec![], compute_cost: 100, scaling_potential: 0.5, latency_budget_ms: 200 }
+    }
+
+    #[test]
+    fn test_epsilon_decays_after_100_samples() {
+        let initial_epsilon = 0.50;
+        let decay = 0.10; // 10% per 100 samples
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            epsilon: initial_epsilon,
+            epsilon_decay: decay,
+            min_samples_before_learning: 1,
+            ..Default::default()
+        });
+        let job = make_job_for_decay();
+        // Record exactly 100 outcomes
+        for _ in 0..100 {
+            router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
+        }
+        // epsilon should be ~0.45 (0.50 * 0.90)
+        let expected = initial_epsilon * (1.0 - decay);
+        assert!(
+            (router.config.epsilon - expected).abs() < 1e-10,
+            "expected epsilon ≈ {:.4}, got {:.4}",
+            expected,
+            router.config.epsilon
+        );
+    }
+
+    #[test]
+    fn test_epsilon_decay_floors_at_0_01() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            epsilon: 0.02,
+            epsilon_decay: 0.99, // aggressive: 99% per 100 samples
+            min_samples_before_learning: 1,
+            ..Default::default()
+        });
+        let job = make_job_for_decay();
+        for _ in 0..100 {
+            router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
+        }
+        assert!(router.config.epsilon >= 0.01, "epsilon must not go below 0.01 floor");
+    }
+
+    #[test]
+    fn test_no_decay_when_epsilon_decay_zero() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            epsilon: 0.50,
+            epsilon_decay: 0.0,
+            min_samples_before_learning: 1,
+            ..Default::default()
+        });
+        let job = make_job_for_decay();
+        for _ in 0..200 {
+            router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
+        }
+        assert!((router.config.epsilon - 0.50).abs() < 1e-10, "epsilon should not change with decay=0");
     }
 }
