@@ -654,7 +654,10 @@ pub fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strate
         return Strategy::Inline;
     }
 
-    if job.compute_cost <= cfg.spawn_threshold {
+    // Use strict `<` so a job whose cost equals spawn_threshold falls through
+    // to CpuPool/Batch.  Using `<=` sent max-cost-for-spawn jobs to Spawn,
+    // the wrong strategy for jobs at the upper boundary.
+    if job.compute_cost < cfg.spawn_threshold {
         return Strategy::Spawn;
     }
 
