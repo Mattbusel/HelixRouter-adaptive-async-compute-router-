@@ -1,6 +1,6 @@
 [package]
 name = "helixrouter"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.81"
 description = "Adaptive async compute routing engine: per-job strategy selection (inline/spawn/pool/batch/drop) driven by live pressure, EMA latency, and online-learned quality estimates."
