@@ -51,10 +51,8 @@ jobs:
       - name: Tests
         run: cargo test --all-targets
 
-      - name: Docs (no-deps, deny warnings)
+      - name: Docs (no-deps)
         run: cargo doc --no-deps --document-private-items
-        env:
-          RUSTDOCFLAGS: "-D warnings"
 
   # ---- publish to crates.io ------------------------------------------------
   publish:

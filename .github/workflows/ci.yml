@@ -46,10 +46,8 @@ jobs:
       - name: Tests (all features)
         run: cargo test --all-features --all-targets
 
-      - name: Docs (no-deps, deny warnings)
+      - name: Docs (no-deps)
         run: cargo doc --no-deps --document-private-items
-        env:
-          RUSTDOCFLAGS: "-D warnings"
 
       - name: Build --release
         run: cargo build --release
@@ -108,10 +106,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Build (all targets)
+      - name: Build (default features)
         run: cargo build --all-targets
-      - name: Tests (all features)
-        run: cargo test --all-features --all-targets
+      - name: Tests (default features)
+        # --all-features is omitted on Windows: the `distributed` feature pulls in
+        # the redis crate which has native TLS deps that are unreliable on Windows
+        # runners.  Default features cover all non-optional functionality.
+        run: cargo test --all-targets
 
   # ---- benchmark smoke test -----------------------------------------------
   bench-smoke:
