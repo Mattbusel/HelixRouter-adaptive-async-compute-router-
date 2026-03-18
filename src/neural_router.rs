@@ -481,6 +481,37 @@ impl NeuralRouter {
         self.sample_count = snap.sample_count;
         self.total_reward = snap.total_reward;
     }
+
+    /// Pre-seed weights from offline heuristic knowledge to eliminate cold-start lag.
+    ///
+    /// The priors encode the known routing rules so the router is immediately
+    /// useful rather than needing `min_samples_before_learning` exploratory jobs.
+    /// Gradient updates from real outcomes will correct the priors over time.
+    ///
+    /// Feature vector order:
+    /// `[cost_norm, is_hashmix, is_primecount, is_montecarlo, scaling_potential, budget_norm, pressure]`
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn warm_start_from_heuristics(&mut self) {
+        // Inline: prefer low cost and generous budget; penalize under pressure.
+        self.weights[IDX_INLINE]  = [-2.0,  0.5,  0.0,  0.0,  0.0,  0.5, -1.0];
+        // Spawn: mid-range cost suits Spawn.
+        self.weights[IDX_SPAWN]   = [ 0.5,  0.3,  0.3,  0.0,  0.0,  0.3, -0.5];
+        // CpuPool: high cost, low scaling potential.
+        self.weights[IDX_CPUPOOL] = [ 1.5,  0.0,  0.5,  0.5, -1.0,  0.0, -0.5];
+        // Batch: high cost AND high scaling potential (moderate weight to avoid over-routing).
+        // Using 0.8 not 2.0 so low-cost high-scaling jobs still prefer Inline/Spawn.
+        self.weights[IDX_BATCH]   = [ 1.0,  0.0,  0.0,  0.3,  0.8,  0.0,  0.0];
+        // Drop: only under extreme pressure; strongly penalized otherwise.
+        self.weights[IDX_DROP]    = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0,  2.0];
+
+        // Advance sample_count past the warm-up gate so the router is consulted
+        // from the first real job rather than after min_samples_before_learning.
+        if self.sample_count < self.config.min_samples_before_learning as u64 {
+            self.sample_count = self.config.min_samples_before_learning as u64;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,5 +1407,85 @@ mod tests {
             router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
         }
         assert!((router.config.epsilon - 0.50).abs() < 1e-10, "epsilon should not change with decay=0");
+    }
+
+    // -----------------------------------------------------------------------
+    // warm_start_from_heuristics tests (improvement #5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_warm_start_sets_is_warmed_up() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig::default());
+        assert!(!router.is_warmed_up(), "should not be warmed up before warm_start");
+        router.warm_start_from_heuristics();
+        assert!(router.is_warmed_up(), "should be warmed up after warm_start");
+    }
+
+    #[test]
+    fn test_warm_start_sample_count_at_least_min_samples() {
+        let cfg = NeuralRouterConfig { min_samples_before_learning: 50, ..Default::default() };
+        let mut router = NeuralRouter::new(cfg.clone());
+        router.warm_start_from_heuristics();
+        assert!(
+            router.sample_count() >= cfg.min_samples_before_learning as u64,
+            "sample_count={} should be >= min_samples={}",
+            router.sample_count(),
+            cfg.min_samples_before_learning
+        );
+    }
+
+    #[test]
+    fn test_warm_start_prefers_inline_for_low_cost_job() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            epsilon: 0.0, // deterministic
+            ..Default::default()
+        });
+        router.warm_start_from_heuristics();
+        // Low cost, HashMix, no pressure → Inline should score highest
+        let job = make_job(JobKind::HashMix, 500, 0.3, 50);
+        let choice = router.choose(&job, 0.0);
+        assert_eq!(choice, Strategy::Inline, "warm-started router should prefer Inline for low-cost job");
+    }
+
+    #[test]
+    fn test_warm_start_prefers_batch_for_high_scaling() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            epsilon: 0.0,
+            drop_pressure_threshold: 1.0, // disable Drop
+            ..Default::default()
+        });
+        router.warm_start_from_heuristics();
+        // High scaling potential → Batch should score highest
+        let job = make_job(JobKind::MonteCarloRisk, 200_000, 0.95, 50);
+        let choice = router.choose(&job, 0.0);
+        assert_eq!(choice, Strategy::Batch, "warm-started router should prefer Batch for high scaling_potential");
+    }
+
+    #[test]
+    fn test_warm_start_does_not_lower_existing_sample_count() {
+        let cfg = NeuralRouterConfig { min_samples_before_learning: 10, ..Default::default() };
+        let mut router = NeuralRouter::new(cfg);
+        // Manually advance past warm-up
+        let job = make_job(JobKind::HashMix, 100, 0.5, 50);
+        for _ in 0..20 {
+            router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
+        }
+        let before = router.sample_count();
+        router.warm_start_from_heuristics();
+        assert_eq!(router.sample_count(), before, "warm_start should not lower an already-high sample_count");
+    }
+
+    #[test]
+    fn test_warm_start_weight_matrix_shape_intact() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig::default());
+        router.warm_start_from_heuristics();
+        let w = router.weights();
+        assert_eq!(w.len(), 5, "5 strategies");
+        for row in w.iter() {
+            assert_eq!(row.len(), 7, "7 features per strategy");
+            for &v in row.iter() {
+                assert!(v.is_finite(), "weight should be finite after warm_start");
+            }
+        }
     }
 }

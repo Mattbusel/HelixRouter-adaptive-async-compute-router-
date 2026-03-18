@@ -316,7 +316,11 @@ struct LatencyRow {
     count: u64,
     avg_ms: f64,
     ema_ms: f64,
+    p50_ms: u64,
     p95_ms: u64,
+    p99_ms: u64,
+    min_ms: u64,
+    max_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -348,7 +352,11 @@ async fn stats_json(State(router): State<AppState>) -> impl IntoResponse {
             count: s.count,
             avg_ms: s.avg_ms,
             ema_ms: s.ema_ms,
+            p50_ms: s.p50_ms,
             p95_ms: s.p95_ms,
+            p99_ms: s.p99_ms,
+            min_ms: s.min_ms,
+            max_ms: s.max_ms,
         })
         .collect();
 
@@ -642,7 +650,11 @@ mod tests {
                 count: 80,
                 avg_ms: 1.5,
                 ema_ms: 1.4,
+                p50_ms: 1,
                 p95_ms: 4,
+                p99_ms: 4,
+                min_ms: 1,
+                max_ms: 5,
             }],
         };
 
@@ -665,7 +677,11 @@ mod tests {
         // latency row fields
         assert!(json.contains("\"avg_ms\""),                     "missing avg_ms");
         assert!(json.contains("\"ema_ms\""),                     "missing ema_ms");
+        assert!(json.contains("\"p50_ms\""),                     "missing p50_ms");
         assert!(json.contains("\"p95_ms\""),                     "missing p95_ms");
+        assert!(json.contains("\"p99_ms\""),                     "missing p99_ms");
+        assert!(json.contains("\"min_ms\""),                     "missing min_ms");
+        assert!(json.contains("\"max_ms\""),                     "missing max_ms");
     }
 
     /// Verify strategy names serialise as snake_case strings (EOT uses

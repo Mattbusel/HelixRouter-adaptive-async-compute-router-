@@ -28,6 +28,10 @@ impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterConfig {
+    /// Schema version — increment when breaking fields are added.
+    /// Old binaries that ignore unknown fields will default this to 1 via serde.
+    #[serde(default = "default_config_version")]
+    pub version: u32,
     pub inline_threshold: u64,
     pub spawn_threshold: u64,
     pub cpu_queue_cap: usize,
@@ -49,6 +53,7 @@ pub struct RouterConfig {
     pub adaptive_p95_threshold_factor: f64,
 }
 
+pub fn default_config_version() -> u32 { 1 }
 pub fn default_ema_alpha() -> f64 { 0.15 }
 pub fn default_adaptive_step() -> f64 { 0.10 }
 pub fn default_cpu_p95_budget_ms() -> u64 { 200 }
@@ -57,6 +62,7 @@ pub fn default_adaptive_p95_threshold_factor() -> f64 { 1.5 }
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
+            version: default_config_version(),
             inline_threshold: 8_000,
             spawn_threshold: 60_000,
             cpu_queue_cap: 512,
@@ -113,6 +119,9 @@ pub struct RouterConfigPatch {
     /// threshold raising triggers (e.g. 1.5 × cpu_p95_budget_ms).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adaptive_p95_threshold_factor: Option<f64>,
+    /// Override config version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 impl RouterConfig {
@@ -155,6 +164,13 @@ impl RouterConfig {
             return Err(ConfigError(format!(
                 "adaptive_step must be in (0, 1], got {}",
                 self.adaptive_step
+            )));
+        }
+        // Cross-field consistency: queue must be able to hold at least one job per worker.
+        if self.cpu_queue_cap < self.cpu_parallelism {
+            return Err(ConfigError(format!(
+                "cpu_queue_cap ({}) must be >= cpu_parallelism ({}) to avoid immediate queue overflow",
+                self.cpu_queue_cap, self.cpu_parallelism
             )));
         }
         Ok(())
@@ -399,6 +415,7 @@ mod tests {
     #[test]
     fn test_validate_edge_values() {
         let cfg = RouterConfig {
+            version: 1,
             inline_threshold: 1,
             spawn_threshold: 2,
             cpu_queue_cap: 1,
@@ -422,6 +439,45 @@ mod tests {
         assert_eq!(cfg.cpu_parallelism, 8);
         assert_eq!(cfg.cpu_p95_budget_ms, 200);
         assert!((cfg.adaptive_p95_threshold_factor - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_default_config_version_is_one() {
+        let cfg = RouterConfig::default();
+        assert_eq!(cfg.version, 1);
+    }
+
+    #[test]
+    fn test_config_version_roundtrips_json() {
+        let mut cfg = RouterConfig::default();
+        cfg.version = 2;
+        let j = serde_json::to_string(&cfg).unwrap();
+        let back: RouterConfig = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.version, 2);
+    }
+
+    #[test]
+    fn test_config_missing_version_defaults_to_one() {
+        let minimal = r#"{"inline_threshold":1000,"spawn_threshold":5000,"cpu_queue_cap":64,"cpu_parallelism":4,"backpressure_busy_threshold":3,"batch_max_size":4,"batch_max_delay_ms":5}"#;
+        let cfg: RouterConfig = serde_json::from_str(minimal).unwrap();
+        assert_eq!(cfg.version, 1);
+    }
+
+    #[test]
+    fn test_queue_cap_less_than_parallelism_is_invalid() {
+        let mut cfg = RouterConfig::default();
+        cfg.cpu_queue_cap = 4;
+        cfg.cpu_parallelism = 8;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.0.contains("cpu_queue_cap"), "err: {}", err.0);
+    }
+
+    #[test]
+    fn test_queue_cap_equal_to_parallelism_is_valid() {
+        let mut cfg = RouterConfig::default();
+        cfg.cpu_queue_cap = 8;
+        cfg.cpu_parallelism = 8;
+        assert!(cfg.validate().is_ok());
     }
 
     // ===== ConfigError tests =====

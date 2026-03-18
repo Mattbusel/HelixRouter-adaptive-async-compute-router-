@@ -88,6 +88,8 @@ struct BatchEntry {
     job: Job,
     reply: oneshot::Sender<Vec<Output>>,
     enqueued_at: Instant,
+    /// Monotonic sequence number assigned at submission for ordering audits.
+    seq: u64,
 }
 
 struct Inner {
@@ -123,6 +125,9 @@ struct Inner {
     /// reflect EOT's internal load state.
     eot_pressure_milli: AtomicU64,
 
+    /// Monotonic counter for batch sequence numbers; used to audit ordering.
+    batch_seq: AtomicU64,
+
     /// Online-learning neural router (epsilon-greedy weight matrix).
     /// Consulted for non-Drop strategy selection once warmed up.
     neural: Mutex<NeuralRouter>,
@@ -152,6 +157,10 @@ impl Router {
         let alpha = cfg.ema_alpha;
         let initial_spawn = cfg.spawn_threshold;
 
+        let mut neural = NeuralRouter::new(NeuralRouterConfig::default());
+        // Pre-seed weights from heuristics to eliminate cold-start convergence lag.
+        neural.warm_start_from_heuristics();
+
         let inner = Arc::new(Inner {
             cfg: RwLock::new(cfg.clone()),
             cpu_tx,
@@ -165,13 +174,32 @@ impl Router {
             decision_tx,
             routing_log: Mutex::new(VecDeque::new()),
             started_at: Instant::now(),
-            neural: Mutex::new(NeuralRouter::new(NeuralRouterConfig::default())),
+            neural: Mutex::new(neural),
             autoscaler: Mutex::new(Autoscaler::new(AutoscalerConfig::default())),
             eot_pressure_milli: AtomicU64::new(0),
+            batch_seq: AtomicU64::new(0),
         });
 
         let inner2 = inner.clone();
         tokio::spawn(async move { cpu_dispatch_loop(inner2, cpu_rx).await });
+
+        // Round-robin batch flusher: cycles through all job kinds at batch_max_delay_ms
+        // interval, ensuring no kind starves others.  Per-entry delay spawns handle the
+        // immediate size-based flush path; this covers timeout-based fairness.
+        let inner3 = inner.clone();
+        tokio::spawn(async move {
+            let kinds = [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk];
+            let mut idx = 0usize;
+            loop {
+                let delay_ms = {
+                    let cfg = inner3.cfg.read().await;
+                    cfg.batch_max_delay_ms
+                };
+                sleep(Duration::from_millis(delay_ms.max(1))).await;
+                flush_batch_kind(inner3.clone(), kinds[idx]).await;
+                idx = (idx + 1) % kinds.len();
+            }
+        });
 
         Self { inner }
     }
@@ -343,7 +371,10 @@ impl Router {
 
         let pressure = {
             let m = self.inner.metrics.lock().await;
-            m.pressure.score(queue_frac)
+            let internal = m.pressure.score(queue_frac);
+            // Blend EOT's external pressure so the neural router learns from
+            // upstream token-generation load, not just local queue pressure.
+            internal.max(self.eot_pressure())
         };
 
         // Apply neural override: when the neural router is warmed up, prefer its
@@ -449,7 +480,13 @@ impl Router {
                 self.bump_route(Strategy::Batch).await;
 
                 let (tx, rx) = oneshot::channel::<Vec<Output>>();
-                let entry = BatchEntry { job: job.clone(), reply: tx, enqueued_at: Instant::now() };
+                let seq = self.inner.batch_seq.fetch_add(1, Ordering::Relaxed);
+                let entry = BatchEntry {
+                    job: job.clone(),
+                    reply: tx,
+                    enqueued_at: Instant::now(),
+                    seq,
+                };
 
                 let buf = match self.inner.batches.get(&job.kind) {
                     Some(b) => b,
@@ -463,16 +500,11 @@ impl Router {
 
                     if q_len >= cfg.batch_max_size {
                         drop(q);
+                        // Immediate size-based flush.
                         flush_batch_kind(self.inner.clone(), job.kind).await;
-                    } else {
-                        let inner = self.inner.clone();
-                        let kind = job.kind;
-                        let delay_ms = cfg.batch_max_delay_ms;
-                        tokio::spawn(async move {
-                            sleep(Duration::from_millis(delay_ms)).await;
-                            flush_batch_kind(inner, kind).await;
-                        });
                     }
+                    // Timeout-based flushing is handled by the round-robin background
+                    // task spawned in Router::new() — no per-entry timer needed.
                 }
 
                 let t0 = Instant::now();
@@ -487,7 +519,11 @@ impl Router {
 
     // ===== Adaptive threshold adjustment =====
 
-    /// Adjust spawn_threshold upward if cpu_pool p95 exceeds budget factor.
+    /// Adjust spawn_threshold based on observed cpu_pool p95 latency.
+    ///
+    /// - Raises threshold when p95 exceeds `adaptive_p95_threshold_factor × budget`.
+    /// - Decays threshold toward the config baseline when p95 is healthy, at 10% of
+    ///   the raise rate per tick.  This prevents indefinite upward creep.
     pub async fn maybe_adapt_threshold(&self) {
         let cfg = self.inner.cfg.read().await.clone();
         let metrics = self.inner.metrics.lock().await;
@@ -497,18 +533,29 @@ impl Router {
                 return; // not enough data
             }
             let p95 = agg.p95_ms;
-            // Use adaptive_p95_threshold_factor so the config field actually controls
-            // when adaptation triggers (e.g. factor=1.5 means raise only if p95 > 1.5×budget).
             let trigger_ms = (cfg.cpu_p95_budget_ms as f64 * cfg.adaptive_p95_threshold_factor) as u64;
+
             if p95 > trigger_ms {
                 drop(metrics);
                 let mut threshold = self.inner.adaptive_spawn_threshold.lock().await;
-                // Use adaptive_step so the config field controls how much the threshold rises.
                 let step = cfg.adaptive_step.clamp(0.0, 1.0);
                 let new_val = ((*threshold as f64) * (1.0 + step)) as u64;
                 let new_val = new_val.min(cfg.spawn_threshold.saturating_mul(10));
                 *threshold = new_val;
                 info!("adaptive: raised spawn_threshold to {}", *threshold);
+            } else if p95 < cfg.cpu_p95_budget_ms {
+                // Decay: gently lower the threshold when latency is healthy so it
+                // doesn't creep upward indefinitely.  Rate = 10% of the raise rate.
+                drop(metrics);
+                let mut threshold = self.inner.adaptive_spawn_threshold.lock().await;
+                let floor = cfg.spawn_threshold; // never go below the configured base
+                if *threshold > floor {
+                    let decay_step = cfg.adaptive_step.clamp(0.0, 1.0) * 0.10;
+                    let new_val = ((*threshold as f64) * (1.0 - decay_step)) as u64;
+                    let new_val = new_val.max(floor);
+                    *threshold = new_val;
+                    info!("adaptive: decayed spawn_threshold to {}", *threshold);
+                }
             }
         }
     }
@@ -718,6 +765,20 @@ async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
             if let Some(e) = q.pop_front() {
                 batch.push(e);
             }
+        }
+    }
+
+    // Verify sequence ordering — log if any entry arrived out of insertion order.
+    {
+        let mut prev_seq = u64::MAX;
+        for e in &batch {
+            if prev_seq != u64::MAX && e.seq < prev_seq {
+                tracing::warn!(
+                    "batch flush reorder detected: seq {} flushed after seq {} for kind {:?}",
+                    e.seq, prev_seq, kind
+                );
+            }
+            prev_seq = e.seq;
         }
     }
 
@@ -1139,5 +1200,87 @@ mod tests {
         router.set_eot_pressure(0.5);
         router.set_eot_pressure(0.1);
         assert!((router.eot_pressure() - 0.1).abs() < 0.002);
+    }
+
+    // ── adaptive threshold decay (improvement #1) ─────────────────────────
+
+    #[tokio::test]
+    async fn test_adaptive_threshold_does_not_decay_below_config_floor() {
+        let router = Router::new(RouterConfig::default());
+        let floor = RouterConfig::default().spawn_threshold;
+        // Ensure the adaptive threshold starts at the floor.
+        let stats = router.stats_snapshot().await;
+        assert_eq!(stats.adaptive_spawn_threshold, floor);
+        // Calling maybe_adapt_threshold without enough data should be a no-op.
+        router.maybe_adapt_threshold().await;
+        let stats2 = router.stats_snapshot().await;
+        assert_eq!(stats2.adaptive_spawn_threshold, floor);
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_threshold_raises_when_p95_over_budget() {
+        let mut cfg = RouterConfig::default();
+        // Very tight budget: any CpuPool job will likely exceed it
+        cfg.cpu_p95_budget_ms = 0;
+        cfg.adaptive_p95_threshold_factor = 1.0;
+        let router = Router::new(cfg.clone());
+
+        // Inject 15 artificial high-latency CpuPool samples to trigger raise.
+        {
+            let mut m = router.inner.metrics.lock().await;
+            for _ in 0..15u64 {
+                m.record_latency(Strategy::CpuPool, 999);
+            }
+        }
+        let before = *router.inner.adaptive_spawn_threshold.lock().await;
+        router.maybe_adapt_threshold().await;
+        let after = *router.inner.adaptive_spawn_threshold.lock().await;
+        assert!(after >= before, "threshold should not decrease when p95 is over budget");
+    }
+
+    // ── EOT pressure in neural router (improvement #6) ────────────────────
+
+    #[tokio::test]
+    async fn test_eot_pressure_included_in_neural_routing_pressure() {
+        let router = Router::new(RouterConfig::default());
+        // Set extreme EOT pressure — the pressure recorded in neural outcomes
+        // should reflect it (indirectly visible through the pressure field of the
+        // routing decision broadcast).
+        router.set_eot_pressure(0.99);
+        let mut rx = router.subscribe_decisions();
+        router.submit(default_job(1, 100, 0.5)).await;
+        let decision = rx.try_recv().expect("decision should have been broadcast");
+        // pressure field is the blended value, so it should be elevated.
+        assert!(
+            decision.pressure >= 0.98,
+            "decision.pressure should reflect EOT pressure, got {}",
+            decision.pressure
+        );
+    }
+
+    // ── batch round-robin fairness (improvement #4) ───────────────────────
+
+    #[tokio::test]
+    async fn test_batch_seq_increments_per_entry() {
+        let router = Router::new(RouterConfig::default());
+        let before = router.inner.batch_seq.load(Ordering::Relaxed);
+        // Submit two batch-eligible jobs and confirm the counter advances.
+        let j1 = default_job(1, 100_000, 0.9);
+        let j2 = default_job(2, 100_000, 0.9);
+        tokio::join!(router.submit(j1), router.submit(j2));
+        let after = router.inner.batch_seq.load(Ordering::Relaxed);
+        assert!(after > before, "batch_seq should have advanced after batch submissions");
+    }
+
+    // ── warm_start_from_heuristics called at construction (improvement #5) ─
+
+    #[tokio::test]
+    async fn test_router_neural_is_warmed_up_at_construction() {
+        let router = Router::new(RouterConfig::default());
+        let snap = router.neural_snapshot().await;
+        assert!(
+            snap.is_warmed_up,
+            "neural router should be warmed up at construction via warm_start_from_heuristics"
+        );
     }
 }

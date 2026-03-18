@@ -253,10 +253,18 @@ fn test_prometheus_text_latency_p95_included() {
         count: 5,
         avg_ms: 3.14,
         ema_ms: 3.0,
+        p50_ms: 3,
         p95_ms: 10,
+        p99_ms: 10,
+        min_ms: 1,
+        max_ms: 15,
     }];
     let text = prometheus_text(0, 0, &HashMap::new(), &sums);
     assert!(text.contains("helix_latency_p95_ms{strategy="));
+    assert!(text.contains("helix_latency_p50_ms{strategy="));
+    assert!(text.contains("helix_latency_p99_ms{strategy="));
+    assert!(text.contains("helix_latency_min_ms{strategy="));
+    assert!(text.contains("helix_latency_max_ms{strategy="));
 }
 
 #[test]

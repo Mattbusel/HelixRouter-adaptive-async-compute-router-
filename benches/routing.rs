@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use helixrouter::{
     config::RouterConfig,
-    router::choose_strategy,
+    router::{choose_strategy, Router},
     strategies::{execute_job, hashmix, primecount},
     types::{Job, JobKind},
 };
@@ -99,6 +99,62 @@ fn bench_router_submit_inline(c: &mut Criterion) {
     });
 }
 
+// ---- scaling sweep: concurrent submit at 10 / 100 / 500 concurrent jobs ----
+
+fn bench_router_scaling_sweep(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("router/scaling_sweep");
+
+    for &concurrency in &[10usize, 100, 500] {
+        group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(concurrency),
+            &concurrency,
+            |b, &n| {
+                let router = rt.block_on(async { Router::new(RouterConfig::default()) });
+                b.iter(|| {
+                    rt.block_on(async {
+                        let mut handles = Vec::with_capacity(n);
+                        for i in 0..n as u64 {
+                            let r = router.clone();
+                            handles.push(tokio::spawn(async move {
+                                black_box(r.submit(make_job(i, 100, 0.5)).await)
+                            }));
+                        }
+                        for h in handles {
+                            let _ = h.await;
+                        }
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---- choose_strategy scaling sweep (pure CPU, no async) ----
+
+fn bench_choose_strategy_scaling(c: &mut Criterion) {
+    let cfg = RouterConfig::default();
+    let mut group = c.benchmark_group("choose_strategy/batch_size");
+
+    for &n in &[100usize, 1_000, 10_000] {
+        group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(n),
+            &n,
+            |b, &n| {
+                let jobs: Vec<_> = (0..n as u64).map(|i| make_job(i, 100 + i % 500_000, 0.5)).collect();
+                b.iter(|| {
+                    for job in &jobs {
+                        black_box(helixrouter::router::choose_strategy(&cfg, job, 0));
+                    }
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_choose_strategy_inline,
@@ -110,5 +166,7 @@ criterion_group!(
     bench_primecount_min,
     bench_execute_job_dispatch,
     bench_router_submit_inline,
+    bench_router_scaling_sweep,
+    bench_choose_strategy_scaling,
 );
 criterion_main!(benches);

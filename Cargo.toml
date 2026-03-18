@@ -13,6 +13,10 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# `distributed` is a PLANNED feature for multi-node coordination via Redis.
+# Status: NOT IMPLEMENTED — the flag compiles but no distributed logic exists yet.
+# Enabling it adds the `redis` dependency but provides no additional functionality.
+# Do not use in production until multi-node support is implemented.
 distributed = ["redis"]
 
 [dependencies]

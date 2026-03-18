@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(powershell -Command \"Get-PSDrive R | Select-Object Name,Used,Free\")",
+      "Bash(powershell -Command \"Get-ChildItem R:\\\\workspaces -Recurse -File | Sort-Object Length -Descending | Select-Object -First 20 FullName,Length\")",
+      "Bash(cargo test:*)",
+      "Bash(powershell -Command \"Get-ChildItem R:\\\\workspaces -Recurse -File | Sort-Object Length -Descending | Select-Object -First 10 FullName,Length\")",
+      "Bash(powershell -Command \"\n\\\\$target = 'R:\\\\workspaces\\\\HelixRouter-adaptive-async-compute-router-\\\\target'\nif \\(Test-Path \\\\$target\\) {\n    Remove-Item -Recurse -Force \\\\$target\n    Write-Host 'Removed target dir'\n} else {\n    Write-Host 'No target dir found'\n}\nGet-PSDrive R | Select-Object Name,Used,Free\n\")",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" cargo test)",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" cargo test --test sse_tests)",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" cargo test test_warm_start_prefers_inline_for_low_cost_job test_latency_agg_circular_buffer_overwrites test_router_routed_map_includes_inline -- --nocapture)",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" cargo test -- test_warm_start_prefers_inline test_latency_agg_circular_buffer test_router_routed_map_includes_inline --nocapture)",
+      "Bash(powershell -Command \"Remove-Item -Recurse -Force 'R:\\\\tmp\\\\cargo-build' -ErrorAction SilentlyContinue; Get-PSDrive R | Select-Object Name,Used,Free\")",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test)",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test config_tests test_edge_case_cpu_queue_cap_one_valid -- --nocapture)",
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test integration test_config_reload_affects_routing -- --nocapture)"
+    ]
+  }
+}

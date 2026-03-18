@@ -225,7 +225,9 @@ fn test_default_field_cpu_parallelism() {
 #[test]
 fn test_edge_case_cpu_queue_cap_one_valid() {
     let mut cfg = RouterConfig::default();
+    // queue_cap must be >= parallelism; set both to 1 for the minimum-valid case.
     cfg.cpu_queue_cap = 1;
+    cfg.cpu_parallelism = 1;
     assert!(cfg.validate().is_ok());
 }
 

@@ -140,11 +140,14 @@ async fn test_config_reload_affects_routing() {
     new_cfg.inline_threshold = 50_000;
     router.set_config(new_cfg).await;
 
-    let job = make_job(1, JobKind::HashMix, 40_000, 0.5);
+    // Use scaling_potential=0.0 so the neural router (warm-started via heuristics)
+    // doesn't override to Batch — Batch requires high scaling potential.
+    let job = make_job(1, JobKind::HashMix, 40_000, 0.0);
     let out = router.submit(job).await;
     assert!(out.is_some());
 
     let stats = router.stats_snapshot().await;
+    // With inline_threshold=50k and scaling=0.0, the job should route Inline.
     assert!(stats.routed.get(&Strategy::Inline).copied().unwrap_or(0) >= 1);
 }
 

@@ -114,6 +114,12 @@ pub struct AutoscaleRecommendation {
 pub struct Autoscaler {
     config: AutoscalerConfig,
     observations: VecDeque<LoadObservation>,
+    /// EMA of job rate — smooths noisy inter-sample rates before feeding OLS.
+    /// Alpha = 0.20 (configurable via `rate_ema_alpha`).
+    rate_ema: f64,
+    /// Standard deviation of the last window of rates — used to make the
+    /// prediction horizon dynamic: high variance → shorter horizon.
+    rate_variance: f64,
 }
 
 impl Autoscaler {
@@ -123,6 +129,8 @@ impl Autoscaler {
         Self {
             config,
             observations: VecDeque::with_capacity(cap),
+            rate_ema: 0.0,
+            rate_variance: 0.0,
         }
     }
 
@@ -131,13 +139,64 @@ impl Autoscaler {
     /// If the buffer is already at capacity the oldest entry is evicted first,
     /// guaranteeing that the buffer never exceeds `ring_buffer_cap` entries.
     ///
+    /// Also updates the rate EMA and variance estimate used by `predict_rate`
+    /// to smooth bursty observations before fitting the linear trend.
+    ///
     /// # Arguments
     /// * `obs` — The observation to record.
     pub fn observe(&mut self, obs: LoadObservation) {
+        // Update rate EMA from the inter-sample delta before pushing the observation.
+        const RATE_EMA_ALPHA: f64 = 0.20;
+        if let Some(prev) = self.observations.back() {
+            let dt = obs.timestamp_secs.saturating_sub(prev.timestamp_secs);
+            if dt > 0 {
+                let dj = obs.total_jobs.saturating_sub(prev.total_jobs);
+                let instant_rate = dj as f64 / dt as f64;
+                if self.rate_ema == 0.0 {
+                    self.rate_ema = instant_rate;
+                    self.rate_variance = 0.0;
+                } else {
+                    let diff = instant_rate - self.rate_ema;
+                    self.rate_ema = RATE_EMA_ALPHA * instant_rate + (1.0 - RATE_EMA_ALPHA) * self.rate_ema;
+                    // Welford-style EMA variance update.
+                    self.rate_variance = (1.0 - RATE_EMA_ALPHA) * (self.rate_variance + RATE_EMA_ALPHA * diff * diff);
+                }
+            }
+        }
+
         if self.observations.len() == self.config.ring_buffer_cap {
             self.observations.pop_front();
         }
         self.observations.push_back(obs);
+    }
+
+    /// Return the current smoothed (EMA) job rate estimate in jobs/sec.
+    #[allow(dead_code)]
+    pub fn smoothed_rate(&self) -> f64 {
+        self.rate_ema
+    }
+
+    /// Return the EMA variance of the job rate (higher = more volatile load).
+    #[allow(dead_code)]
+    pub fn rate_variance(&self) -> f64 {
+        self.rate_variance
+    }
+
+    /// Dynamic prediction horizon: shorter when load is volatile (high variance).
+    ///
+    /// Ranges from `predict_horizon_secs / 2` (high variance) to
+    /// `predict_horizon_secs` (stable load).
+    fn effective_horizon_secs(&self) -> f64 {
+        let base = self.config.predict_horizon_secs as f64;
+        // Standard deviation as a fraction of the mean rate (CV).
+        let cv = if self.rate_ema > 0.0 {
+            self.rate_variance.sqrt() / self.rate_ema
+        } else {
+            0.0
+        };
+        // High CV (> 1.0) → halve the horizon; low CV → full horizon.
+        let factor = (1.0 - cv.min(1.0) * 0.5).max(0.5);
+        base * factor
     }
 
     /// Return the number of observations currently in the ring buffer.
@@ -216,11 +275,11 @@ impl Autoscaler {
             (intercept, slope)
         };
 
-        // Predict at: last observation's elapsed time + horizon.
+        // Predict at: last observation's elapsed time + dynamic horizon.
         let last_elapsed = self.observations[self.observations.len() - 1]
             .timestamp_secs
             .saturating_sub(first_ts) as f64;
-        let predict_at = last_elapsed + self.config.predict_horizon_secs as f64;
+        let predict_at = last_elapsed + self.effective_horizon_secs();
 
         let predicted = a + b * predict_at;
 
@@ -1036,5 +1095,51 @@ mod tests {
         // No observations yet — predict_rate() should return 0.0
         let rate = a.predict_rate();
         assert_eq!(rate, 0.0, "predicted_rate with no observations should be 0.0");
+    }
+
+    // ------------------------------------------------------------------
+    // EMA smoothing / dynamic horizon tests (improvement #7)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn smoothed_rate_zero_before_any_observations() {
+        let a = default_autoscaler();
+        assert_eq!(a.smoothed_rate(), 0.0);
+    }
+
+    #[test]
+    fn smoothed_rate_positive_after_increasing_observations() {
+        let mut a = default_autoscaler();
+        feed_increasing(&mut a, 10, 30);
+        assert!(a.smoothed_rate() > 0.0, "EMA rate should be positive after load");
+    }
+
+    #[test]
+    fn rate_variance_zero_before_second_observation() {
+        let mut a = default_autoscaler();
+        a.observe(obs(0, 0, 0.0, 0.0));
+        assert_eq!(a.rate_variance(), 0.0);
+    }
+
+    #[test]
+    fn rate_variance_grows_with_bursty_load() {
+        let mut a = default_autoscaler();
+        // Alternate between high and low rates to create variance
+        for i in 0..20u64 {
+            let jobs = if i % 2 == 0 { i * 1 } else { i * 100 };
+            a.observe(obs(i, jobs, 0.5, 0.0));
+        }
+        assert!(a.rate_variance() > 0.0, "Bursty load should produce non-zero variance");
+    }
+
+    #[test]
+    fn effective_horizon_stable_load_uses_full_horizon() {
+        let mut a = default_autoscaler();
+        // Perfectly stable load (all same rate) → CV = 0 → full horizon
+        feed_increasing(&mut a, 10, 50);
+        let horizon = a.effective_horizon_secs();
+        let base = a.config.predict_horizon_secs as f64;
+        // With low variance the horizon should be close to the base
+        assert!(horizon >= base * 0.8, "stable load horizon={horizon} expected ~= {base}");
     }
 }
