@@ -11,6 +11,60 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.2] — 2026-03-18
+
+### Summary
+
+Second production-readiness hardening pass. No breaking API changes.
+
+### Added
+
+- **`tests/coverage_gaps.rs`** — 39 new targeted tests covering gaps identified in the
+  production-readiness audit:
+  - *Router*: `choose_strategy` returns `Drop` at exactly `backpressure_busy_threshold`
+    (both low-scaling and high-scaling variants), one-below-threshold routes normally,
+    load-limit saturation test verifying `completed + dropped == submitted`.
+  - *Autoscaler*: pressure at exactly the high-water mark (`ScaleUp`), exactly the
+    low-water mark (`ScaleDown`), between marks (`Hold`), and hysteresis after a
+    pressure drop (no immediate re-oscillation to `ScaleUp`).
+  - *Config*: all individual invalid-value paths (`ema_alpha=0`, `cpu_parallelism=0`,
+    `inline_threshold=0`, `spawn_threshold=0`, `batch_max_size=0`,
+    `inline_threshold==spawn_threshold`, `cpu_queue_cap < cpu_parallelism`,
+    `adaptive_step > 1.0`); missing required field deserialization failure; valid
+    boundary values (`ema_alpha=1.0`, `adaptive_step=1.0`).
+  - *Config hot-reload*: `patch_config` rejects invalid patches atomically (live config
+    unchanged), accepts valid patches and returns merged config.
+  - *Neural router*: all-zero job (zero cost, zero inputs) produces valid strategy and
+    a feature vector fully within `[0, 1]`; saturated inputs (`u64::MAX`) remain finite;
+    `pressure=0.0` maps to feature `0.0`, `pressure=1.0` maps to `1.0`; `record_outcome`
+    with zero-cost job and zero budget never panics; `choose()` at exactly the
+    `drop_pressure_threshold` returns a valid strategy.
+  - *Strategies*: explicit assertions that all five variants (`Inline`, `Spawn`,
+    `CpuPool`, `Batch`, `Drop`) are reachable from `choose_strategy` with documented
+    input ranges; one test per variant.
+  - *Web*: `neural_snapshot` serialises all EOT-required fields; zero-state
+    `stats_snapshot` has sensible values; `patch_config` with invalid body leaves config
+    unchanged; valid body updates only the specified field.
+
+### Changed
+
+- **`src/neural_router.rs`** — Added `#[allow(dead_code)]` with explanatory doc comment
+  to `NeuralRouter::feature_vector`. The function is a stable public API used in tests
+  and by external callers; internal call-sites use the private `feature_vector_normalized`
+  variant. The suppression avoids a misleading compiler warning while preserving the
+  public contract.
+
+- **`src/metrics.rs`** — Added `#[allow(dead_code)]` with explanatory doc comments to
+  `calc_percentile`, `calc_p95`, and `prometheus_text`. All three are stable public
+  utilities; internal code uses `LatencyAgg` (rolling accumulator) and
+  `prometheus_text_with_neural` (production handler). Suppressions keep the public API
+  clean without removing useful helpers.
+
+- **`src/autoscaler.rs`** — Removed spurious `mut` from a test variable (`let mut a`
+  that was never mutated after construction) to silence a compiler warning.
+
+---
+
 ## [1.0.1] — 2026-03-18
 
 ### Summary
