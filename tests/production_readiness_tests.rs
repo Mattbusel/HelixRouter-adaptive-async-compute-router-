@@ -560,10 +560,10 @@ async fn backpressure_stats_dropped_count_is_consistent() {
         });
     }
 
-    let mut completed_count = 0_usize;
+    let mut _completed_count = 0_usize;
     while let Some(result) = join_set.join_next().await {
         if result.map(|o| o.is_some()).unwrap_or(false) {
-            completed_count += 1;
+            _completed_count += 1;
         }
     }
 
