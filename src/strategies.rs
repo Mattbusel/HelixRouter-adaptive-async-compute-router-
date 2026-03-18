@@ -73,6 +73,12 @@ pub fn primecount(job: &Job) -> Output {
     }
     Output::U64(is_prime.iter().filter(|&&b| b).count() as u64)
 }
+/// Monte-Carlo Value-at-Risk simulation kernel.
+///
+/// Runs `sims = (compute_cost / 200).clamp(5_000, 50_000)` simulations using
+/// an xorshift64 PRNG seeded by `job.id`. Returns the 5th-percentile portfolio
+/// return as `Output::F64` (negative = loss). Inputs shift the mean and
+/// volatility of the synthetic return distribution.
 fn montecarlo_risk(job: &Job) -> Output {
     let sims = (job.compute_cost / 200).clamp(5_000, 50_000) as usize;
     let mut seed = 0x1234_5678_9abc_def0u64 ^ job.id;
