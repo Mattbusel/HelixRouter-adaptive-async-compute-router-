@@ -139,18 +139,16 @@ fn bench_choose_strategy_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("choose_strategy/batch_size");
 
     for &n in &[100usize, 1_000, 10_000] {
-        group.bench_with_input(
-            criterion::BenchmarkId::from_parameter(n),
-            &n,
-            |b, &n| {
-                let jobs: Vec<_> = (0..n as u64).map(|i| make_job(i, 100 + i % 500_000, 0.5)).collect();
-                b.iter(|| {
-                    for job in &jobs {
-                        black_box(helixrouter::router::choose_strategy(&cfg, job, 0));
-                    }
-                });
-            },
-        );
+        group.bench_with_input(criterion::BenchmarkId::from_parameter(n), &n, |b, &n| {
+            let jobs: Vec<_> = (0..n as u64)
+                .map(|i| make_job(i, 100 + i % 500_000, 0.5))
+                .collect();
+            b.iter(|| {
+                for job in &jobs {
+                    black_box(helixrouter::router::choose_strategy(&cfg, job, 0));
+                }
+            });
+        });
     }
     group.finish();
 }
