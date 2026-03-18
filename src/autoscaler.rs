@@ -268,7 +268,9 @@ impl Autoscaler {
 
         let (a, b) = if denom.abs() < f64::EPSILON {
             // All X values identical — return the mean rate (flat trend).
-            (sum_y / n, 0.0)
+            let mean = sum_y / n;
+            // Guard against NaN when all Y values are also identical edge-case.
+            if mean.is_finite() { (mean, 0.0) } else { return self.rate_ema.max(0.0); }
         } else {
             let slope = (n * sum_xy - sum_x * sum_y) / denom;
             let intercept = (sum_y - slope * sum_x) / n;
@@ -283,12 +285,13 @@ impl Autoscaler {
 
         let predicted = a + b * predict_at;
 
-        // Rates cannot be negative.
-        if predicted < 0.0 {
-            0.0
-        } else {
-            predicted
+        // Guard against NaN/Inf from degenerate OLS inputs; fall back to EMA.
+        if !predicted.is_finite() {
+            return self.rate_ema.max(0.0);
         }
+
+        // Rates cannot be negative.
+        predicted.max(0.0)
     }
 
     /// Recommend a scaling action given the current resource configuration.

@@ -14,7 +14,8 @@
       "Bash(powershell -Command \"Remove-Item -Recurse -Force 'R:\\\\tmp\\\\cargo-build' -ErrorAction SilentlyContinue; Get-PSDrive R | Select-Object Name,Used,Free\")",
       "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test)",
       "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test config_tests test_edge_case_cpu_queue_cap_one_valid -- --nocapture)",
-      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test integration test_config_reload_affects_routing -- --nocapture)"
+      "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test integration test_config_reload_affects_routing -- --nocapture)",
+      "Bash(CARGO_TARGET_DIR=C:/cargo-targets/helixrouter TMPDIR=C:/tmp cargo test)"
     ]
   }
 }

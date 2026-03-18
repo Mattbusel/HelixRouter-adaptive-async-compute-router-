@@ -49,11 +49,12 @@ impl LatencyAgg {
             if ms > self.max_ms { self.max_ms = ms; }
         }
 
-        // Recompute percentiles from the rolling window
-        let slice: Vec<u64> = self.samples_ms.iter().copied().collect();
-        self.p50_ms = calc_percentile(&slice, 0.50);
-        self.p95_ms = calc_percentile(&slice, 0.95);
-        self.p99_ms = calc_percentile(&slice, 0.99);
+        // Recompute all three percentiles from a single sort pass (was 3 × O(n log n)).
+        let mut sorted: Vec<u64> = self.samples_ms.iter().copied().collect();
+        sorted.sort_unstable();
+        self.p50_ms = percentile_from_sorted(&sorted, 0.50);
+        self.p95_ms = percentile_from_sorted(&sorted, 0.95);
+        self.p99_ms = percentile_from_sorted(&sorted, 0.99);
     }
 
     pub fn avg_ms(&self) -> f64 {
@@ -65,14 +66,21 @@ impl LatencyAgg {
 // Percentile helpers
 // ---------------------------------------------------------------------------
 
-/// Generic percentile calculation over a slice of samples at quantile `q ∈ (0,1]`.
+/// Compute a percentile from an **already-sorted** slice.  Does not sort.
+/// Returns 0 for an empty slice.  `q` is in (0, 1].
+pub fn percentile_from_sorted(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() { return 0; }
+    let idx = ((sorted.len() as f64) * q).ceil() as usize;
+    let idx = idx.saturating_sub(1).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+/// Generic percentile calculation over an **unsorted** slice at quantile `q ∈ (0,1]`.
 pub fn calc_percentile(samples: &[u64], q: f64) -> u64 {
     if samples.is_empty() { return 0; }
     let mut tmp = samples.to_vec();
     tmp.sort_unstable();
-    let idx = ((tmp.len() as f64) * q).ceil() as usize;
-    let idx = idx.saturating_sub(1).min(tmp.len() - 1);
-    tmp[idx]
+    percentile_from_sorted(&tmp, q)
 }
 
 /// Convenience wrapper kept for callers that previously used `calc_p95`.
@@ -95,42 +103,6 @@ pub struct LatencySummary {
     pub p99_ms: u64,
     pub min_ms: u64,
     pub max_ms: u64,
-}
-
-// ---------------------------------------------------------------------------
-// CostPredictor
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub struct CostPredictor {
-    pub samples: Vec<(u64, f64)>,
-    pub cost_ratio_ema: f64,
-}
-
-#[allow(dead_code)]
-impl CostPredictor {
-    pub fn record(&mut self, estimated_cost: u64, actual_ms: f64, alpha: f64) {
-        if estimated_cost == 0 { return; }
-        let ratio = actual_ms / estimated_cost as f64;
-        if self.samples.is_empty() {
-            self.cost_ratio_ema = ratio;
-        } else {
-            self.cost_ratio_ema = alpha * ratio + (1.0 - alpha) * self.cost_ratio_ema;
-        }
-        self.samples.push((estimated_cost, actual_ms));
-        if self.samples.len() > 256 {
-            self.samples.remove(0);
-        }
-    }
-
-    pub fn predict_ms(&self, estimated_cost: u64) -> f64 {
-        if self.cost_ratio_ema == 0.0 {
-            estimated_cost as f64 / 10_000.0
-        } else {
-            estimated_cost as f64 * self.cost_ratio_ema
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,11 +129,29 @@ pub fn pressure_score(
 // prometheus_text
 // ---------------------------------------------------------------------------
 
+/// Neural learning quality snapshot for Prometheus export.
+#[derive(Debug, Clone, Default)]
+pub struct NeuralMetrics {
+    pub sample_count: u64,
+    pub avg_reward: f64,
+    pub epsilon: f64,
+}
+
 pub fn prometheus_text(
     completed: u64,
     dropped: u64,
     routed: &HashMap<Strategy, u64>,
     latency_summaries: &[LatencySummary],
+) -> String {
+    prometheus_text_with_neural(completed, dropped, routed, latency_summaries, None)
+}
+
+pub fn prometheus_text_with_neural(
+    completed: u64,
+    dropped: u64,
+    routed: &HashMap<Strategy, u64>,
+    latency_summaries: &[LatencySummary],
+    neural: Option<&NeuralMetrics>,
 ) -> String {
     let mut out = String::new();
     out.push_str("# TYPE helix_completed counter\n");
@@ -189,6 +179,15 @@ pub fn prometheus_text(
         out.push_str(&format!("helix_latency_ema_ms{{strategy=\"{strat}\"}} {:.3}\n", s.ema_ms));
         out.push_str(&format!("helix_latency_min_ms{{strategy=\"{strat}\"}} {}\n", s.min_ms));
         out.push_str(&format!("helix_latency_max_ms{{strategy=\"{strat}\"}} {}\n", s.max_ms));
+    }
+    // Neural learning quality metrics
+    if let Some(n) = neural {
+        out.push_str("# TYPE helix_neural_sample_count counter\n");
+        out.push_str(&format!("helix_neural_sample_count {}\n", n.sample_count));
+        out.push_str("# TYPE helix_neural_avg_reward gauge\n");
+        out.push_str(&format!("helix_neural_avg_reward {:.6}\n", n.avg_reward));
+        out.push_str("# TYPE helix_neural_epsilon gauge\n");
+        out.push_str(&format!("helix_neural_epsilon {:.6}\n", n.epsilon));
     }
     out
 }
@@ -221,9 +220,14 @@ impl PressureTracker {
     }
 
     /// Composite pressure score in [0, 1].
+    ///
+    /// Weights: 40% queue depth, 30% drop rate, 20% latency trend, 10% queue EMA trend.
+    /// The former implementation double-counted queue_frac at 70% total; this version
+    /// uses `current_queue_frac` (or its EMA when unavailable) once at 40% weight,
+    /// and adds the EMA as a 10% smoothing signal.
     pub fn score(&self, current_queue_frac: f64) -> f64 {
         let qf = if current_queue_frac > 0.0 { current_queue_frac } else { self.queue_frac_ema };
-        (0.40 * qf + 0.30 * self.queue_frac_ema + 0.20 * self.drop_rate_ema + 0.10 * self.lat_frac_ema)
+        (0.40 * qf + 0.30 * self.drop_rate_ema + 0.20 * self.lat_frac_ema + 0.10 * self.queue_frac_ema)
             .clamp(0.0, 1.0)
     }
 }
@@ -439,35 +443,6 @@ mod tests {
         let v: Vec<u64> = (1..=100).collect();
         let p99 = calc_percentile(&v, 0.99);
         assert_eq!(p99, 99);
-    }
-
-    #[test]
-    fn test_cost_predictor_initial_predict() {
-        let p = CostPredictor::default();
-        let ms = p.predict_ms(10_000);
-        assert!((ms - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cost_predictor_record_updates_ema() {
-        let mut p = CostPredictor::default();
-        p.record(1000, 5.0, 1.0);
-        assert!((p.cost_ratio_ema - 0.005).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_cost_predictor_predict_uses_ema() {
-        let mut p = CostPredictor::default();
-        p.record(1000, 2.0, 1.0);
-        let pred = p.predict_ms(5000);
-        assert!((pred - 10.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cost_predictor_zero_cost_ignored() {
-        let mut p = CostPredictor::default();
-        p.record(0, 99.0, 1.0);
-        assert_eq!(p.samples.len(), 0);
     }
 
     #[test]

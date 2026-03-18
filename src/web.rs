@@ -26,7 +26,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::config::{RouterConfig, RouterConfigPatch};
-use crate::metrics::prometheus_text;
+use crate::metrics::{prometheus_text_with_neural, NeuralMetrics};
 use crate::router::Router;
 use crate::types::Strategy;
 
@@ -461,7 +461,13 @@ async fn get_neural(State(router): State<AppState>) -> impl IntoResponse {
 async fn metrics_prom(State(router): State<AppState>) -> Response {
     let snap = router.stats_snapshot().await;
     let summaries = router.latency_report().await;
-    let text = prometheus_text(snap.completed, snap.dropped, &snap.routed, &summaries);
+    let neural_snap = router.neural_snapshot().await;
+    let neural_metrics = NeuralMetrics {
+        sample_count: neural_snap.sample_count,
+        avg_reward: neural_snap.avg_reward,
+        epsilon: neural_snap.epsilon,
+    };
+    let text = prometheus_text_with_neural(snap.completed, snap.dropped, &snap.routed, &summaries, Some(&neural_metrics));
 
     let mut resp = (StatusCode::OK, text).into_response();
     resp.headers_mut().insert(
@@ -723,6 +729,7 @@ mod tests {
             avg_reward: 0.82,
             is_warmed_up: true,
             weights: [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]; 5],
+            epsilon: 0.10,
         };
 
         let json = serde_json::to_string(&snap).expect("serialize NeuralSnapshot");
@@ -748,6 +755,7 @@ mod tests {
             avg_reward: 0.5,
             is_warmed_up: false,
             weights: [[0.0; 7]; 5],
+            epsilon: 0.10,
         };
 
         let json = serde_json::to_string(&snap).expect("serialize");

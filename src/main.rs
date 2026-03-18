@@ -152,6 +152,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Sim finished. UI still running at http://{addr}. Ctrl+C to exit.");
     tokio::signal::ctrl_c().await?;
+
+    println!("Shutting down gracefully...");
+    // Signal background tasks (CPU dispatcher, batch flusher) to stop.
+    router.shutdown();
+
+    // Persist neural router weights so the next startup avoids cold-start lag.
+    let weights_path = std::env::var("HELIX_WEIGHTS_PATH")
+        .unwrap_or_else(|_| "helix_weights.json".to_string());
+    let snap = router.neural_snapshot().await;
+    match serde_json::to_string_pretty(&snap) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&weights_path, &json) {
+                tracing::warn!("failed to save neural weights to {weights_path}: {e}");
+            } else {
+                println!("Neural weights saved to {weights_path}");
+            }
+        }
+        Err(e) => tracing::warn!("failed to serialize neural weights: {e}"),
+    }
+
     println!("bye");
     Ok(())
 }

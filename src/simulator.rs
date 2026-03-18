@@ -1,4 +1,18 @@
-//! Workload simulator -- generates heterogeneous Job streams.
+//! # Module: simulator
+//!
+//! ## Responsibility
+//! Synthetic workload generator that produces a heterogeneous stream of `Job`
+//! values for benchmarking and integration testing.  Uses a seeded PRNG so
+//! test runs are deterministic and reproducible.
+//!
+//! ## Guarantees
+//! - Reproducible: same `seed` always produces the same job sequence.
+//! - Bounded: generated jobs have valid `scaling_potential ∈ [0, 1]`,
+//!   non-empty `inputs`, and `latency_budget_ms >= 5`.
+//!
+//! ## NOT Responsible For
+//! - Routing or execution (see: router.rs, strategies.rs)
+//! - HTTP simulation or load generation (use the CLI or integration tests)
 
 use crate::types::{Job, JobKind};
 use rand::{rngs::StdRng, Rng, SeedableRng};

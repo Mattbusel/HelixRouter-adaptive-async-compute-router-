@@ -51,6 +51,8 @@ pub struct NeuralSnapshot {
     pub is_warmed_up: bool,
     /// Full weight matrix `[strategy][feature]` — 5×7 f64 array.
     pub weights: [[f64; 7]; 5],
+    /// Current exploration rate (epsilon) — decreases as the router learns.
+    pub epsilon: f64,
 }
 
 // ===== RoutingDecision (live feed) =====
@@ -135,6 +137,9 @@ struct Inner {
     /// Predictive autoscaler: linear trend fit over load observations.
     /// Call `autoscale_tick()` periodically to feed observations.
     autoscaler: Mutex<Autoscaler>,
+
+    /// Shutdown signal: send `()` to stop all background tasks gracefully.
+    shutdown_tx: broadcast::Sender<()>,
 }
 
 // ===== Router =====
@@ -148,6 +153,7 @@ impl Router {
     pub fn new(cfg: RouterConfig) -> Self {
         let (cpu_tx, cpu_rx) = mpsc::channel::<CpuWork>(cfg.cpu_queue_cap);
         let (decision_tx, _) = broadcast::channel::<RoutingDecision>(256);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
         let mut batches: HashMap<JobKind, Mutex<VecDeque<BatchEntry>>> = HashMap::new();
         batches.insert(JobKind::HashMix, Mutex::new(VecDeque::new()));
@@ -178,15 +184,18 @@ impl Router {
             autoscaler: Mutex::new(Autoscaler::new(AutoscalerConfig::default())),
             eot_pressure_milli: AtomicU64::new(0),
             batch_seq: AtomicU64::new(0),
+            shutdown_tx,
         });
 
         let inner2 = inner.clone();
-        tokio::spawn(async move { cpu_dispatch_loop(inner2, cpu_rx).await });
+        let cpu_shutdown = inner.shutdown_tx.subscribe();
+        tokio::spawn(async move { cpu_dispatch_loop(inner2, cpu_rx, cpu_shutdown).await });
 
         // Round-robin batch flusher: cycles through all job kinds at batch_max_delay_ms
         // interval, ensuring no kind starves others.  Per-entry delay spawns handle the
         // immediate size-based flush path; this covers timeout-based fairness.
         let inner3 = inner.clone();
+        let mut batch_shutdown = inner.shutdown_tx.subscribe();
         tokio::spawn(async move {
             let kinds = [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk];
             let mut idx = 0usize;
@@ -195,10 +204,14 @@ impl Router {
                     let cfg = inner3.cfg.read().await;
                     cfg.batch_max_delay_ms
                 };
-                sleep(Duration::from_millis(delay_ms.max(1))).await;
+                tokio::select! {
+                    _ = batch_shutdown.recv() => break,
+                    _ = sleep(Duration::from_millis(delay_ms.max(1))) => {}
+                }
                 flush_batch_kind(inner3.clone(), kinds[idx]).await;
                 idx = (idx + 1) % kinds.len();
             }
+            info!("batch flusher exiting");
         });
 
         Self { inner }
@@ -606,6 +619,7 @@ impl Router {
             avg_reward: neural.avg_reward(),
             is_warmed_up: neural.is_warmed_up(),
             weights: *neural.weights(),
+            epsilon: neural.epsilon(),
         }
     }
 
@@ -624,6 +638,14 @@ impl Router {
     /// Call this periodically (e.g. every 10 seconds) from a background task.
     /// When the autoscaler recommends scaling up, the `cpu_queue_cap` is
     /// increased; when it recommends scaling down, it is decreased.
+    /// Signal all background tasks (CPU dispatcher, batch flusher) to stop.
+    ///
+    /// Call this before dropping the router on a clean shutdown path to avoid
+    /// tasks leaking until the process exits.  Safe to call multiple times.
+    pub fn shutdown(&self) {
+        let _ = self.inner.shutdown_tx.send(());
+    }
+
     pub async fn autoscale_tick(&self) {
         use crate::autoscaler::ScaleDirection;
 
@@ -717,14 +739,18 @@ pub fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strate
 
 // ===== CPU dispatch loop =====
 
-async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>) {
+async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>, mut shutdown: broadcast::Receiver<()>) {
     info!("cpu dispatcher started");
 
-    while let Some(work) = rx.recv().await {
-        let permit = match inner.cpu_slots.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break,
+    loop {
+        let work = tokio::select! {
+            _ = shutdown.recv() => break,
+            w = rx.recv() => match w { Some(w) => w, None => break },
         };
+
+        // acquire_owned returns Err only when the semaphore is closed (i.e. Inner
+        // is being dropped).  Treat this as a graceful shutdown signal.
+        let Ok(permit) = inner.cpu_slots.clone().acquire_owned().await else { break };
 
         let inner2 = inner.clone();
         tokio::spawn(async move {

@@ -1,4 +1,18 @@
-//! Pure computation strategies -- no async, no I/O.
+//! # Module: strategies
+//!
+//! ## Responsibility
+//! Pure computation kernels for each supported job kind.  No async, no I/O,
+//! no side-effects — only deterministic CPU-bound work.
+//!
+//! ## Guarantees
+//! - All functions are `Send + Sync` and safe to call from `spawn_blocking`.
+//! - No panics: all execution paths are bounded and use wrapping arithmetic.
+//! - Output is deterministic: same `Job` inputs always produce the same `Output`.
+//!
+//! ## NOT Responsible For
+//! - Routing decisions (see: router.rs)
+//! - Concurrency or backpressure (see: router.rs)
+//! - Metrics recording (caller's responsibility)
 
 use crate::types::{Job, JobKind, Output};
 

@@ -219,15 +219,21 @@ pub async fn watch_config(
     config_lock: Arc<RwLock<RouterConfig>>,
     interval: Duration,
 ) {
+    let mut last_mtime: Option<std::time::SystemTime> = None;
     let mut last_content = String::new();
     loop {
         tokio::time::sleep(interval).await;
+        let mtime = tokio::fs::metadata(&path).await
+            .ok()
+            .and_then(|m| m.modified().ok());
+        if mtime.is_some() && mtime == last_mtime { continue; }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if content == last_content { continue; }
+        if content == last_content { last_mtime = mtime; continue; }
         last_content = content.clone();
+        last_mtime = mtime;
         match serde_json::from_str::<RouterConfig>(&content) {
             Ok(new_cfg) => match new_cfg.validate() {
                 Ok(()) => {
@@ -266,17 +272,27 @@ where
     F: Fn(RouterConfig) + Send + 'static,
 {
     tokio::spawn(async move {
+        let mut last_mtime: Option<std::time::SystemTime> = None;
         let mut last_content = String::new();
         loop {
             tokio::time::sleep(interval).await;
+            // Check mtime first to skip the file read when nothing has changed.
+            let mtime = tokio::fs::metadata(&path).await
+                .ok()
+                .and_then(|m| m.modified().ok());
+            if mtime.is_some() && mtime == last_mtime {
+                continue;
+            }
             let content = match tokio::fs::read_to_string(&path).await {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             if content == last_content {
+                last_mtime = mtime;
                 continue;
             }
             last_content = content.clone();
+            last_mtime = mtime;
             match serde_json::from_str::<RouterConfig>(&content) {
                 Ok(new_cfg) => match new_cfg.validate() {
                     Ok(()) => {

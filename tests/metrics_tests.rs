@@ -1,7 +1,7 @@
 /// Comprehensive tests for the metrics module.
 use std::collections::HashMap;
 use helixrouter::{
-    metrics::{latency_summaries, prometheus_text, CostPredictor, LatencyAgg, LatencySummary, MetricsStore, PressureTracker},
+    metrics::{latency_summaries, prometheus_text, LatencyAgg, LatencySummary, MetricsStore, PressureTracker},
     types::Strategy,
 };
 
@@ -76,47 +76,6 @@ fn test_latency_agg_ema_smooths_correctly() {
     agg.record(100, 0.5);
     agg.record(0, 0.5);
     assert!((agg.ema_ms - 50.0).abs() < 1e-9);
-}
-
-// ===== CostPredictor =====
-
-#[test]
-fn test_cost_predictor_predict_default_before_record() {
-    let p = CostPredictor::default();
-    // Default fallback: estimated_cost / 10_000
-    let ms = p.predict_ms(10_000);
-    assert!((ms - 1.0).abs() < 1e-6);
-}
-
-#[test]
-fn test_cost_predictor_record_updates_ema() {
-    let mut p = CostPredictor::default();
-    p.record(1000, 5.0, 1.0);
-    assert!((p.cost_ratio_ema - 0.005).abs() < 1e-9);
-}
-
-#[test]
-fn test_cost_predictor_predict_uses_ema() {
-    let mut p = CostPredictor::default();
-    p.record(1000, 2.0, 1.0);
-    let pred = p.predict_ms(5000);
-    assert!((pred - 10.0).abs() < 1e-6);
-}
-
-#[test]
-fn test_cost_predictor_zero_cost_ignored() {
-    let mut p = CostPredictor::default();
-    p.record(0, 99.0, 1.0);
-    assert_eq!(p.samples.len(), 0);
-}
-
-#[test]
-fn test_cost_predictor_samples_capped_at_256() {
-    let mut p = CostPredictor::default();
-    for i in 1..=300u64 {
-        p.record(i, i as f64, 0.15);
-    }
-    assert!(p.samples.len() <= 256);
 }
 
 // ===== PressureTracker =====

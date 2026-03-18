@@ -74,6 +74,12 @@ pub struct NeuralRouterConfig {
     /// clamped to a floor of 0.01 so some exploration is always retained.
     /// A value of 0.05 reduces epsilon by 5% per 100 samples.
     pub epsilon_decay: f64,
+    /// Maximum compute cost used for feature normalization (cost_norm = cost / max_compute_cost).
+    /// Adjust when workloads exceed the default 1,000,000 cost units.
+    pub max_compute_cost: f64,
+    /// Maximum latency budget used for feature normalization (budget_norm = budget / max_latency_budget_ms).
+    /// Adjust when jobs use budgets beyond the default 5,000 ms.
+    pub max_latency_budget_ms: f64,
 }
 
 impl Default for NeuralRouterConfig {
@@ -84,6 +90,8 @@ impl Default for NeuralRouterConfig {
             drop_pressure_threshold: 0.80,
             min_samples_before_learning: 10,
             epsilon_decay: 0.0,
+            max_compute_cost: MAX_COMPUTE_COST,
+            max_latency_budget_ms: MAX_LATENCY_BUDGET_MS,
         }
     }
 }
@@ -216,7 +224,7 @@ impl NeuralRouter {
     }
 
     /// Build the normalized 7-element feature vector for a job at a given
-    /// system pressure level.
+    /// system pressure level, using the default normalization constants.
     ///
     /// # Arguments
     /// * `job`      — The job whose characteristics form the feature vector.
@@ -229,8 +237,16 @@ impl NeuralRouter {
     /// # Panics
     /// This function never panics.
     pub fn feature_vector(job: &Job, pressure: f64) -> [f64; N_FEATURES] {
+        Self::feature_vector_normalized(job, pressure, MAX_COMPUTE_COST, MAX_LATENCY_BUDGET_MS)
+    }
+
+    /// Build the feature vector using caller-supplied normalization denominators.
+    ///
+    /// Allows the normalization range to be derived from `NeuralRouterConfig`
+    /// (`max_compute_cost` / `max_latency_budget_ms`) rather than hard-coded constants.
+    fn feature_vector_normalized(job: &Job, pressure: f64, max_cost: f64, max_budget: f64) -> [f64; N_FEATURES] {
         let compute_cost_norm =
-            (job.compute_cost.min(1_000_000) as f64) / MAX_COMPUTE_COST;
+            (job.compute_cost.min(max_cost as u64) as f64) / max_cost;
 
         let (is_hashmix, is_primecount, is_montecarlo) = match job.kind {
             JobKind::HashMix => (1.0_f64, 0.0_f64, 0.0_f64),
@@ -241,7 +257,7 @@ impl NeuralRouter {
         let scaling_potential = job.scaling_potential as f64;
 
         let budget_norm =
-            (job.latency_budget_ms.min(5_000) as f64) / MAX_LATENCY_BUDGET_MS;
+            (job.latency_budget_ms.min(max_budget as u64) as f64) / max_budget;
 
         let pressure_clamped = pressure.clamp(0.0, 1.0);
 
@@ -268,7 +284,7 @@ impl NeuralRouter {
     /// # Panics
     /// This function never panics.
     pub fn score_all(&self, job: &Job, pressure: f64) -> [f64; N_STRATEGIES] {
-        let features = Self::feature_vector(job, pressure);
+        let features = Self::feature_vector_normalized(job, pressure, self.config.max_compute_cost, self.config.max_latency_budget_ms);
         let mut scores = [0.0_f64; N_STRATEGIES];
         for (score, row) in scores.iter_mut().zip(self.weights.iter()) {
             *score = dot7(row, &features);
@@ -385,7 +401,7 @@ impl NeuralRouter {
             return;
         }
 
-        let features = Self::feature_vector(features_job, pressure);
+        let features = Self::feature_vector_normalized(features_job, pressure, self.config.max_compute_cost, self.config.max_latency_budget_ms);
         let s_idx = strategy_index(outcome.strategy);
 
         for (w, f) in self.weights[s_idx].iter_mut().zip(features.iter()) {
@@ -447,6 +463,17 @@ impl NeuralRouter {
         } else {
             self.total_reward / self.sample_count as f64
         }
+    }
+
+    /// Return the current exploration rate (epsilon).
+    ///
+    /// Useful for Prometheus metrics and observability dashboards to track
+    /// how much the neural router is exploring vs. exploiting learned weights.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn epsilon(&self) -> f64 {
+        self.config.epsilon
     }
 
     /// Serialize the current learned state into a portable [`WeightSnapshot`].
