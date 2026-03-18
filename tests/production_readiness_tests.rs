@@ -398,19 +398,22 @@ async fn config_hot_reload_rejects_invalid_config_silently() {
         *cc.lock().expect("lock") += 1;
     });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Wait for the watcher to pick up the initial valid file (it will fire once
+    // because the content differs from the empty-string initial state).
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let count_before_garbage = *call_count.lock().expect("lock");
 
     // Overwrite with garbage JSON.
     fs::write(&path, b"{ not valid json !!!").expect("write garbage");
 
-    tokio::time::sleep(Duration::from_millis(160)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // The callback should NOT have been called for the invalid file.
-    let count = *call_count.lock().expect("lock");
+    // The callback should NOT have been called again after writing invalid JSON.
+    let count_after_garbage = *call_count.lock().expect("lock");
     assert_eq!(
-        count, 0,
-        "callback must not fire when the config file contains invalid JSON (got {} calls)",
-        count
+        count_before_garbage, count_after_garbage,
+        "callback must not fire again when the config file contains invalid JSON \
+         (before={count_before_garbage}, after={count_after_garbage})"
     );
 }
 

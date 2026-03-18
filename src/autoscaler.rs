@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn recommendation_predicted_rate_is_zero_without_observations() {
-        let mut a = default_autoscaler();
+        let a = default_autoscaler();
         // No observations yet — predict_rate() should return 0.0
         let rate = a.predict_rate();
         assert_eq!(rate, 0.0, "predicted_rate with no observations should be 0.0");

@@ -236,6 +236,13 @@ impl NeuralRouter {
     ///
     /// # Panics
     /// This function never panics.
+    // Exposed as a public API for external callers and integration tests that need
+    // to inspect or assert on the feature representation of a job. The compiler
+    // flags this as unused because all internal call-sites use the private
+    // `feature_vector_normalized` variant which accepts configurable max-cost /
+    // max-budget denominators from `NeuralRouterConfig`. Suppressing dead_code
+    // here preserves the stable public contract without removing a useful helper.
+    #[allow(dead_code)]
     pub fn feature_vector(job: &Job, pressure: f64) -> [f64; N_FEATURES] {
         Self::feature_vector_normalized(job, pressure, MAX_COMPUTE_COST, MAX_LATENCY_BUDGET_MS)
     }

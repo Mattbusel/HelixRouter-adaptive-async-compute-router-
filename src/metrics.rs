@@ -108,6 +108,12 @@ pub fn percentile_from_sorted(sorted: &[u64], q: f64) -> u64 {
 }
 
 /// Generic percentile calculation over an **unsorted** slice at quantile `q ∈ (0,1]`.
+///
+/// Available as a public utility for callers that need one-off percentile
+/// calculations without constructing a full `LatencyAgg`. Not used in the
+/// hot path internally (the rolling `LatencyAgg` accumulator handles that),
+/// so the compiler would otherwise flag this as dead code.
+#[allow(dead_code)]
 pub fn calc_percentile(samples: &[u64], q: f64) -> u64 {
     if samples.is_empty() { return 0; }
     let mut tmp = samples.to_vec();
@@ -116,6 +122,11 @@ pub fn calc_percentile(samples: &[u64], q: f64) -> u64 {
 }
 
 /// Convenience wrapper kept for callers that previously used `calc_p95`.
+///
+/// Delegates to [`calc_percentile`] at `q = 0.95`. Retained as a stable
+/// public API alias; suppressed as dead_code because all internal callers
+/// now use the `LatencyAgg` rolling accumulator instead.
+#[allow(dead_code)]
 pub fn calc_p95(samples: &[u64]) -> u64 {
     calc_percentile(samples, 0.95)
 }
@@ -204,6 +215,10 @@ pub struct NeuralMetrics {
 ///
 /// Convenience wrapper around [`prometheus_text_with_neural`].
 /// Suitable for callers that do not use the neural router.
+/// Suppressed as dead_code because the production HTTP handler uses the
+/// `_with_neural` variant directly; this simpler form is kept as a public
+/// API convenience for callers that do not have a neural router.
+#[allow(dead_code)]
 pub fn prometheus_text(
     completed: u64,
     dropped: u64,

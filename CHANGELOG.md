@@ -11,6 +11,67 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.1] — 2026-03-18
+
+### Summary
+
+Production-readiness hardening pass. No breaking API changes.
+
+### Changed
+
+- **CI** (`ci.yml`) — All test steps now pass `--all-features`. Added explicit
+  `cargo build --release` step to the primary `test` job so release-profile
+  compilation errors are caught in CI. Consolidated duplicate `audit` / `security`
+  jobs into a single `audit` job. Coverage job now passes `--all-features` to
+  `cargo tarpaulin`.
+
+- **Error propagation in `router.rs`** — Replaced all `.unwrap_or_default()` calls
+  on `JoinHandle::await` and `oneshot::Receiver::await` with explicit `match` arms
+  that emit `tracing::error!` when a task panics or a channel is dropped unexpectedly.
+  The recovery behaviour (return empty `Vec`) is unchanged; the difference is that
+  these events are now logged rather than silently discarded.
+
+- **Tracing instrumentation** — Added `#[tracing::instrument]` to `Router::submit`,
+  `Router::autoscale_tick`, and `choose_strategy`. Added `warn!` to the `Drop`
+  strategy arm in `Router::submit` so every dropped job appears in structured logs
+  with `job_id`, `kind`, `cpu_busy`, and `pressure` fields. Fixed duplicate comment
+  block on `Router::update_config_field` (removed stale `/// Hot-patch a single
+  config field…` line that was shadowed by the authoritative doc comment below it).
+
+- **`Cargo.toml`** — `[profile.release]` now sets `opt-level = 3`, `strip =
+  "symbols"`, and `panic = "abort"`. Added `[profile.bench]` with `debug = true`
+  so Criterion can attribute samples to source lines. Extended `[lints.clippy]`
+  with `large_futures`, `redundant_closure_for_method_calls`, `needless_pass_by_value`,
+  and `semicolon_if_nothing_returned` at `warn` level.
+
+### Added
+
+- **Doc comment** on `montecarlo_risk` (private function in `strategies.rs`) describing
+  the xorshift64 PRNG, simulation count formula, and return semantics.
+
+- **Doc comment** on `pressure_burst` (public function in `simulator.rs`) with full
+  parameter documentation for `seed`, `warm_count`, and `burst_count`.
+
+- **New test file** `tests/router_api_tests.rs` — covers public API paths that had no
+  dedicated external tests:
+  - `Router::routing_log` — empty on fresh router, populated after submit, capped at 50.
+  - `Router::ema_latency` — empty on fresh router, populated after inline submit.
+  - `Router::update_config_field` — all six recognized field names, unknown field returns false.
+  - `Router::restore_neural_weights` — weights change after restore, submit succeeds after restore.
+  - `Router::pressure` — zero on idle, increases with EOT signal.
+  - `choose_strategy` external call — Inline, Drop, and Batch under backpressure.
+  - `pressure_burst` — count, ID monotonicity, burst-phase heaviness.
+  - `Simulator` edge cases — zero `total_jobs`.
+
+- **README.md** fully rewritten — what adaptive async compute routing is (concept section),
+  updated ASCII architecture diagram showing full data flow from `submit` through all five
+  strategy arms plus background tasks and HTTP server, quickstart for both binary and library
+  usage, configuration table with validation rules, hot-reload and HTTP PATCH examples,
+  environment variables reference table, full HTTP endpoint table, benchmarks table, module
+  map, contributing guide with step-by-step instructions for adding a new strategy.
+
+---
+
 ## [1.0.0] — 2026-03-17
 
 ### Summary
