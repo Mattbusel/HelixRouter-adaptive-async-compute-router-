@@ -11,10 +11,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ### Changed (production-readiness pass -- 2026-03-17)
 - Replaced all `println!` and `eprintln!` calls in `src/main.rs` with structured `tracing::info!` / `tracing::warn!` / `tracing::error!` calls.
-- Added `/// ` doc comments to `RoutingDecision` and `PressureSnapshot` structs and all their fields in `types.rs`.
+- Added `///` doc comments to `RoutingDecision` and `PressureSnapshot` structs and all their fields in `types.rs`.
 - CI workflow (`ci.yml`) rewritten to add `cargo fmt --check` as a fast first gate, split into `fmt`, `test`, `msrv`, `audit`, and `bench-smoke` jobs, added cargo cache to bench job, added `RUST_BACKTRACE=1`.
-- README rewritten: project description, CI and license badges, ASCII architecture diagram showing routing components and async task flow, quickstart code example, API overview table, performance notes referencing bench results, contributing section, license section. No em dashes. No emojis.
+- README rewritten: project description, CI and license badges, ASCII architecture diagram showing routing components and async task flow, quickstart code example, API overview table, performance notes referencing bench results, contributing section, license section.
 - CHANGELOG updated with this production-readiness pass entry.
+- Added `///` doc comments to `RouterStats` struct and all fields (completed, dropped, routed, adaptive_spawn_threshold, pressure_score) in `router.rs`.
+- Added `///` field-level doc comments to the internal `RoutingDecision` type in `router.rs` (job_id, strategy, compute_cost, cpu_busy, pressure).
+- Added `///` doc comment to `web::serve()` with parameters, returns, and errors sections.
+- Added `///` doc comment to `web::metrics_prom()` listing all emitted Prometheus metric families.
+- Fixed incorrectly merged doc comment on `Router::autoscale_tick()` and `Router::shutdown()` in `router.rs`.
+- Added `Router::autoscale_tick()` doc comment explaining the periodic observation/recommendation cycle.
+
+### Added (production-readiness pass -- 2026-03-17)
+- **Release workflow** (`.github/workflows/release.yml`) -- Triggers on `v*.*.*` version tags; verifies tag matches Cargo.toml version, runs full CI (fmt + clippy + test + docs), publishes to crates.io, and creates a GitHub Release with the relevant CHANGELOG section as release notes.
 
 ### Added (prior entries)
 - **CONTRIBUTING.md** — Development setup, environment variables, test/bench commands, code style rules, step-by-step guide for adding a new routing strategy, and PR checklist.

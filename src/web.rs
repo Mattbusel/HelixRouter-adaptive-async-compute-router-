@@ -32,6 +32,21 @@ use crate::types::Strategy;
 
 type AppState = Arc<Router>;
 
+/// Start the Axum HTTP server and bind it to `addr`.
+///
+/// Registers all routes (dashboard, health, metrics, stats, config, SSE,
+/// neural snapshot, EOT telemetry) and serves them until the process exits
+/// or the underlying TCP listener is closed.
+///
+/// # Parameters
+///
+/// * `router` — Shared router instance; wrapped in `Arc` for handler access.
+/// * `addr`   — TCP address to bind (e.g. `127.0.0.1:8080`).
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if binding the TCP listener fails or if Axum's
+/// internal `serve` loop encounters a fatal I/O error.
 pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
     let shared: AppState = Arc::new(router);
 
@@ -458,6 +473,14 @@ async fn get_neural(State(router): State<AppState>) -> impl IntoResponse {
 
 // ===== Prometheus =====
 
+/// GET /metrics — Prometheus text-format exposition endpoint.
+///
+/// Emits counters and gauges for completed/dropped jobs, per-strategy routing
+/// counts, per-strategy latency percentiles (p50/p95/p99/ema/min/max), and
+/// neural-router learning quality metrics (sample_count, avg_reward, epsilon).
+///
+/// Content-Type is `text/plain; version=0.0.4` as required by the Prometheus
+/// scrape protocol.
 async fn metrics_prom(State(router): State<AppState>) -> Response {
     let snap = router.stats_snapshot().await;
     let summaries = router.latency_report().await;

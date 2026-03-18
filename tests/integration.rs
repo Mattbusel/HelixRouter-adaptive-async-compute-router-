@@ -1,6 +1,6 @@
 /// Integration tests: full request lifecycle through the router.
 use helixrouter::{
-    config::RouterConfig,
+    config::{RouterConfig, RouterConfigPatch},
     router::Router,
     simulator::{Simulator, SimulatorConfig},
     strategies::execute_job,
@@ -246,4 +246,183 @@ fn test_simulator_all_jobs_valid() {
         assert!(j.latency_budget_ms >= 5);
         assert!(!j.inputs.is_empty());
     }
+}
+
+// ===== EOT pressure injection =====
+
+#[tokio::test]
+async fn test_eot_pressure_defaults_to_zero() {
+    let router = Router::new(RouterConfig::default());
+    assert_eq!(router.eot_pressure(), 0.0);
+}
+
+#[tokio::test]
+async fn test_eot_pressure_set_and_read() {
+    let router = Router::new(RouterConfig::default());
+    router.set_eot_pressure(0.75);
+    let p = router.eot_pressure();
+    assert!((p - 0.75).abs() < 0.002, "expected ~0.75, got {p}");
+}
+
+#[tokio::test]
+async fn test_eot_pressure_clamped_above_one() {
+    let router = Router::new(RouterConfig::default());
+    router.set_eot_pressure(5.0);
+    let p = router.eot_pressure();
+    assert!(p <= 1.0, "pressure should be clamped to 1.0, got {p}");
+}
+
+#[tokio::test]
+async fn test_eot_pressure_clamped_below_zero() {
+    let router = Router::new(RouterConfig::default());
+    router.set_eot_pressure(-0.5);
+    let p = router.eot_pressure();
+    assert!(p >= 0.0, "pressure should be clamped to 0.0, got {p}");
+}
+
+#[tokio::test]
+async fn test_eot_pressure_reflected_in_stats_snapshot() {
+    let router = Router::new(RouterConfig::default());
+    router.set_eot_pressure(0.9);
+    let stats = router.stats_snapshot().await;
+    // When eot pressure dominates, pressure_score should be at least eot value
+    assert!(
+        stats.pressure_score >= 0.88,
+        "pressure_score should reflect eot=0.9, got {}",
+        stats.pressure_score
+    );
+}
+
+// ===== Autoscale tick =====
+
+#[tokio::test]
+async fn test_autoscale_tick_does_not_panic_without_observations() {
+    let router = Router::new(RouterConfig::default());
+    // Should be a no-op with no observations.
+    router.autoscale_tick().await;
+    let cfg = router.config().await;
+    assert!(cfg.validate().is_ok());
+}
+
+#[tokio::test]
+async fn test_autoscale_tick_after_load_keeps_config_valid() {
+    let router = Router::new(RouterConfig::default());
+    let jobs = Simulator::new(SimulatorConfig { total_jobs: 30, ..Default::default() }).all_jobs();
+    for job in jobs {
+        let _ = router.submit(job).await;
+    }
+    router.autoscale_tick().await;
+    let cfg = router.config().await;
+    assert!(cfg.validate().is_ok(), "config must remain valid after autoscale tick");
+}
+
+// ===== patch_config error paths =====
+
+#[tokio::test]
+async fn test_patch_config_invalid_ema_alpha_rejected() {
+    let router = Router::new(RouterConfig::default());
+    let patch = RouterConfigPatch { ema_alpha: Some(0.0), ..Default::default() };
+    assert!(router.patch_config(patch).await.is_err());
+    // Config must be unchanged
+    assert!((router.config().await.ema_alpha - 0.15).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn test_patch_config_inline_ge_spawn_rejected() {
+    let router = Router::new(RouterConfig::default());
+    let patch = RouterConfigPatch {
+        inline_threshold: Some(100_000),
+        spawn_threshold: Some(50_000),
+        ..Default::default()
+    };
+    assert!(router.patch_config(patch).await.is_err());
+}
+
+#[tokio::test]
+async fn test_patch_config_valid_update_applied() {
+    let router = Router::new(RouterConfig::default());
+    let patch = RouterConfigPatch { batch_max_size: Some(16), ..Default::default() };
+    let merged = router.patch_config(patch).await.expect("valid patch");
+    assert_eq!(merged.batch_max_size, 16);
+    assert_eq!(router.config().await.batch_max_size, 16);
+}
+
+// ===== Edge case: zero-cost job =====
+
+#[tokio::test]
+async fn test_zero_cost_job_routes_inline() {
+    let router = Router::new(RouterConfig::default());
+    let job = make_job(1, JobKind::HashMix, 0, 0.5);
+    let out = router.submit(job).await;
+    // zero cost <= inline_threshold, so should complete inline
+    assert!(out.is_some(), "zero-cost job should complete inline");
+    let stats = router.stats_snapshot().await;
+    assert_eq!(stats.routed.get(&Strategy::Inline).copied().unwrap_or(0), 1);
+}
+
+// ===== Edge case: empty inputs =====
+
+#[tokio::test]
+async fn test_empty_inputs_job_does_not_panic() {
+    let router = Router::new(RouterConfig::default());
+    let job = Job {
+        id: 99,
+        kind: JobKind::HashMix,
+        inputs: vec![],
+        compute_cost: 100,
+        scaling_potential: 0.5,
+        latency_budget_ms: 50,
+    };
+    let out = router.submit(job).await;
+    assert!(out.is_some(), "empty-inputs job should not panic");
+}
+
+// ===== Edge case: max u64 compute cost =====
+
+#[tokio::test]
+async fn test_max_cost_job_is_accounted_for() {
+    let router = Router::new(RouterConfig::default());
+    let job = make_job(1, JobKind::HashMix, u64::MAX, 0.1);
+    // MAX cost >> spawn_threshold, low scaling -> CpuPool (or dropped under pressure)
+    let out = router.submit(job).await;
+    let stats = router.stats_snapshot().await;
+    let accounted = stats.completed + stats.dropped;
+    assert!(
+        out.is_some() || accounted >= 1,
+        "max-cost job must either complete or be accounted as dropped"
+    );
+}
+
+// ===== Neural snapshot =====
+
+#[tokio::test]
+async fn test_neural_snapshot_weights_dimensions() {
+    let router = Router::new(RouterConfig::default());
+    let snap = router.neural_snapshot().await;
+    assert_eq!(snap.weights.len(), 5, "weight matrix outer dim should be 5 strategies");
+    for row in &snap.weights {
+        assert_eq!(row.len(), 7, "weight matrix inner dim should be 7 features");
+    }
+}
+
+#[tokio::test]
+async fn test_neural_snapshot_epsilon_in_range() {
+    let router = Router::new(RouterConfig::default());
+    let snap = router.neural_snapshot().await;
+    assert!(
+        snap.epsilon >= 0.0 && snap.epsilon <= 1.0,
+        "epsilon must be in [0,1], got {}",
+        snap.epsilon
+    );
+}
+
+// ===== Uptime =====
+
+#[tokio::test]
+async fn test_uptime_non_decreasing() {
+    let router = Router::new(RouterConfig::default());
+    let t0 = router.uptime_secs();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    let t1 = router.uptime_secs();
+    assert!(t1 >= t0, "uptime must be non-decreasing");
 }

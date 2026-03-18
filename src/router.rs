@@ -58,23 +58,40 @@ pub struct NeuralSnapshot {
 // ===== RoutingDecision (live feed) =====
 
 /// Emitted for every routing decision so the web UI can display a live stream.
+///
+/// Broadcast on the `decision_tx` channel after each `Router::submit` call.
+/// Subscribers (SSE feed, routing log) receive a clone of this value.
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutingDecision {
+    /// Caller-assigned job identifier, matches [`Job::id`].
     pub job_id: u64,
+    /// Execution strategy selected for this job.
     pub strategy: Strategy,
+    /// Abstract cost unit of the job, used as the primary routing dimension.
     pub compute_cost: u64,
+    /// Number of CPU pool workers busy at decision time.
     pub cpu_busy: usize,
+    /// Composite pressure score at decision time; range `[0.0, 1.0]`.
     pub pressure: f64,
 }
 
 // ===== Public stats snapshots =====
 
+/// A point-in-time snapshot of router statistics.
+///
+/// Returned by [`Router::stats_snapshot`] and serialised to JSON at
+/// `GET /api/stats`. All fields are safe to read concurrently.
 #[derive(Debug, Clone, Serialize)]
 pub struct RouterStats {
+    /// Per-strategy count of jobs routed since process start.
     pub routed: HashMap<Strategy, u64>,
+    /// Total jobs dropped due to backpressure since process start.
     pub dropped: u64,
+    /// Total jobs that completed execution since process start.
     pub completed: u64,
+    /// Current adaptive spawn threshold (may differ from config after auto-adaptation).
     pub adaptive_spawn_threshold: u64,
+    /// Composite pressure score at snapshot time; range `[0.0, 1.0]`.
     pub pressure_score: f64,
 }
 
@@ -709,11 +726,6 @@ impl Router {
         neural.restore(snap);
     }
 
-    /// Feed a load observation into the autoscaler and apply any recommendation.
-    ///
-    /// Call this periodically (e.g. every 10 seconds) from a background task.
-    /// When the autoscaler recommends scaling up, the `cpu_queue_cap` is
-    /// increased; when it recommends scaling down, it is decreased.
     /// Signal all background tasks (CPU dispatcher, batch flusher) to stop.
     ///
     /// Call this before dropping the router on a clean shutdown path to avoid
@@ -722,6 +734,14 @@ impl Router {
         let _ = self.inner.shutdown_tx.send(());
     }
 
+    /// Feed a load observation into the autoscaler and apply any recommendation.
+    ///
+    /// Call this periodically (e.g. every 10 seconds) from a background task.
+    /// When the autoscaler recommends scaling up, `cpu_queue_cap` is increased;
+    /// when it recommends scaling down, it is decreased.  Holds are no-ops.
+    ///
+    /// The observation is derived from the current `stats_snapshot`: total jobs
+    /// routed, drop rate, and composite pressure score.
     pub async fn autoscale_tick(&self) {
         use crate::autoscaler::ScaleDirection;
 
