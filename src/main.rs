@@ -88,12 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    println!("HelixRouter UI:  http://{addr}");
-    println!("Metrics:         http://{addr}/metrics");
-    println!("Stats JSON:      http://{addr}/api/stats");
-    println!("Config API:      http://{addr}/api/config");
-    println!("SSE decisions:   http://{addr}/api/stream/decisions");
-    println!();
+    tracing::info!("HelixRouter UI:  http://{}", addr);
+    tracing::info!("Metrics:         http://{}/metrics", addr);
+    tracing::info!("Stats JSON:      http://{}/api/stats", addr);
+    tracing::info!("Config API:      http://{}/api/config", addr);
+    tracing::info!("SSE decisions:   http://{}/api/stream/decisions", addr);
 
     // Simulation
     if sim_jobs > 0 {
@@ -113,19 +112,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Neural router summary
         let neural = router.neural_snapshot().await;
-        println!("== Neural router summary ==");
-        println!("samples:     {}", neural.sample_count);
-        println!("avg_reward:  {:.4}", neural.avg_reward);
-        println!("warmed_up:   {}", neural.is_warmed_up);
-        println!();
+        tracing::info!(
+            sample_count = neural.sample_count,
+            avg_reward = neural.avg_reward,
+            is_warmed_up = neural.is_warmed_up,
+            "neural router summary"
+        );
 
         let stats = router.stats_snapshot().await;
-        println!("== HelixRouter summary ==");
-        println!("completed: {}", stats.completed);
-        println!("dropped:   {}", stats.dropped);
-        println!("adaptive_spawn_threshold: {}", stats.adaptive_spawn_threshold);
-        println!("pressure_score: {:.3}", stats.pressure_score);
-        println!();
+        tracing::info!(
+            completed = stats.completed,
+            dropped = stats.dropped,
+            adaptive_spawn_threshold = stats.adaptive_spawn_threshold,
+            pressure_score = stats.pressure_score,
+            "HelixRouter simulation summary"
+        );
 
         let order = [
             types::Strategy::Inline,
@@ -136,24 +137,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ];
         for s in order {
             let v = stats.routed.get(&s).copied().unwrap_or(0);
-            println!("routed[{s}]: {v}");
+            tracing::info!(strategy = %s, count = v, "routed by strategy");
         }
 
-        println!();
-        println!("== latency by strategy (end-to-end) ==");
         for r in router.latency_report().await {
-            println!(
-                "{:<8} count={} avg={:.2}ms ema={:.2}ms p95={}ms",
-                r.strategy, r.count, r.avg_ms, r.ema_ms, r.p95_ms
+            tracing::info!(
+                strategy = %r.strategy,
+                count = r.count,
+                avg_ms = r.avg_ms,
+                ema_ms = r.ema_ms,
+                p95_ms = r.p95_ms,
+                "latency by strategy"
             );
         }
-        println!();
     }
 
-    println!("Sim finished. UI still running at http://{addr}. Ctrl+C to exit.");
+    tracing::info!("Sim finished. UI still running at http://{}. Ctrl+C to exit.", addr);
     tokio::signal::ctrl_c().await?;
 
-    println!("Shutting down gracefully...");
+    tracing::info!("Shutting down gracefully...");
     // Signal background tasks (CPU dispatcher, batch flusher) to stop.
     router.shutdown();
 
@@ -164,14 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match serde_json::to_string_pretty(&snap) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&weights_path, &json) {
-                tracing::warn!("failed to save neural weights to {weights_path}: {e}");
+                tracing::warn!("failed to save neural weights to {}: {}", weights_path, e);
             } else {
-                println!("Neural weights saved to {weights_path}");
+                tracing::info!(path = %weights_path, "neural weights saved");
             }
         }
-        Err(e) => tracing::warn!("failed to serialize neural weights: {e}"),
+        Err(e) => tracing::warn!("failed to serialize neural weights: {}", e),
     }
 
-    println!("bye");
+    tracing::info!("shutdown complete");
     Ok(())
 }

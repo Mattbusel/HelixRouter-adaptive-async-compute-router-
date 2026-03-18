@@ -17,10 +17,14 @@
 use crate::types::{Job, JobKind};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
+/// Configuration for the synthetic workload simulator.
 #[derive(Debug, Clone)]
 pub struct SimulatorConfig {
+    /// PRNG seed -- the same seed always produces the same job sequence.
     pub seed: u64,
+    /// Total number of jobs to generate before the iterator terminates.
     pub total_jobs: u64,
+    /// Fraction of jobs that are "heavy" (compute_cost 80k-300k). Range: [0.0, 1.0].
     pub heavy_job_fraction: f64,
 }
 
@@ -30,6 +34,11 @@ impl Default for SimulatorConfig {
     }
 }
 
+/// Deterministic synthetic workload generator.
+///
+/// Produces a finite stream of [`Job`] values with heterogeneous kinds, costs,
+/// and scaling potentials.  Uses a seeded PRNG so every run with the same
+/// `SimulatorConfig` is reproducible.
 pub struct Simulator {
     rng: StdRng,
     cfg: SimulatorConfig,
@@ -37,10 +46,12 @@ pub struct Simulator {
 }
 
 impl Simulator {
+    /// Create a new simulator seeded from `cfg.seed`.
     pub fn new(cfg: SimulatorConfig) -> Self {
         Self { rng: StdRng::seed_from_u64(cfg.seed), cfg, next_id: 0 }
     }
 
+    /// Return the next job in the sequence, or `None` when `total_jobs` is exhausted.
     pub fn next_job(&mut self) -> Option<Job> {
         if self.next_id >= self.cfg.total_jobs { return None; }
         let id = self.next_id;
@@ -48,6 +59,7 @@ impl Simulator {
         Some(self.gen_job(id))
     }
 
+    /// Drain the simulator and return all remaining jobs as a `Vec`.
     pub fn all_jobs(&mut self) -> Vec<Job> {
         let mut jobs = Vec::with_capacity(self.cfg.total_jobs as usize);
         while let Some(j) = self.next_job() { jobs.push(j); }

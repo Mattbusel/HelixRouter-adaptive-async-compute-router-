@@ -1,4 +1,5 @@
 /// Comprehensive tests for the config module.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use helixrouter::config::{ConfigError, RouterConfig};
 
 // ===== Default config =====
@@ -245,4 +246,82 @@ fn test_multiple_invalid_fields_first_error_returned() {
     cfg.cpu_queue_cap = 0;
     // validate() should return an error (first one found)
     assert!(cfg.validate().is_err());
+}
+
+// ===== Hot-reload while jobs are in flight =====
+
+/// Verify that a valid config update applied via `Router::set_config` while
+/// jobs are concurrently in-flight does not deadlock, panic, or corrupt the
+/// completion counter.
+#[tokio::test]
+async fn test_hot_reload_while_jobs_in_flight_no_deadlock() {
+    use helixrouter::{router::Router, types::{Job, JobKind}};
+
+    let router = Router::new(RouterConfig::default());
+    let mut handles = Vec::new();
+
+    // Submit 100 jobs in the background.
+    for i in 0..100u64 {
+        let r = router.clone();
+        handles.push(tokio::spawn(async move {
+            r.submit(Job {
+                id: i,
+                kind: JobKind::HashMix,
+                inputs: vec![i],
+                compute_cost: 100,
+                scaling_potential: 0.5,
+                latency_budget_ms: 50,
+            })
+            .await
+        }));
+    }
+
+    // Reload config from 10 concurrent tasks while jobs are running.
+    for _ in 0..10 {
+        let r = router.clone();
+        handles.push(tokio::spawn(async move {
+            let mut cfg = RouterConfig::default();
+            cfg.inline_threshold = 5_000;
+            r.set_config(cfg).await;
+        }));
+    }
+
+    for h in handles {
+        h.await.expect("task must not panic");
+    }
+
+    let stats = router.stats_snapshot().await;
+    assert_eq!(
+        stats.completed + stats.dropped,
+        100,
+        "all 100 jobs must be accounted for after concurrent hot-reload: \
+         completed={} dropped={}",
+        stats.completed,
+        stats.dropped,
+    );
+}
+
+/// Verify that attempting to apply an invalid config via `Router::patch_config`
+/// returns an error and leaves the live config valid.
+#[tokio::test]
+async fn test_hot_reload_invalid_config_rejected_and_live_config_unchanged() {
+    use helixrouter::{config::RouterConfigPatch, router::Router};
+
+    let router = Router::new(RouterConfig::default());
+    let before = router.config().await;
+
+    // Patch with ema_alpha = 0.0 which fails validation.
+    let bad_patch = RouterConfigPatch {
+        ema_alpha: Some(0.0),
+        ..Default::default()
+    };
+    let result = router.patch_config(bad_patch).await;
+    assert!(result.is_err(), "invalid patch must be rejected");
+
+    let after = router.config().await;
+    assert_eq!(
+        before, after,
+        "live config must be unchanged after rejected patch"
+    );
+    assert!(after.validate().is_ok(), "live config must still be valid");
 }

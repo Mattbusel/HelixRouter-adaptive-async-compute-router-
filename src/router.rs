@@ -150,6 +150,25 @@ pub struct Router {
 }
 
 impl Router {
+    /// Create a new `Router` from a validated [`RouterConfig`].
+    ///
+    /// Internally starts two background Tokio tasks:
+    /// - A CPU dispatch loop that drains the bounded `cpu_tx` queue with
+    ///   `spawn_blocking` workers, one per `cfg.cpu_parallelism` slot.
+    /// - A round-robin batch flusher that cycles through all job kinds and
+    ///   flushes stale batches after `cfg.batch_max_delay_ms` ms.
+    ///
+    /// The neural router is pre-seeded with heuristic weights via
+    /// [`NeuralRouter::warm_start_from_heuristics`] to avoid cold-start lag.
+    ///
+    /// # Parameters
+    ///
+    /// * `cfg` — Initial validated configuration. Hot-reload is available via
+    ///   [`Router::set_config`] and [`Router::patch_config`].
+    ///
+    /// # Returns
+    ///
+    /// A new `Router` instance ready to accept jobs via [`Router::submit`].
     pub fn new(cfg: RouterConfig) -> Self {
         let (cpu_tx, cpu_rx) = mpsc::channel::<CpuWork>(cfg.cpu_queue_cap);
         let (decision_tx, _) = broadcast::channel::<RoutingDecision>(256);
@@ -219,10 +238,17 @@ impl Router {
 
     // ===== Config =====
 
+    /// Return a clone of the current live configuration.
     pub async fn config(&self) -> RouterConfig {
         self.inner.cfg.read().await.clone()
     }
 
+    /// Replace the entire live configuration atomically.
+    ///
+    /// Callers should prefer [`Router::patch_config`] for partial updates.
+    /// This method does **not** validate the incoming config; validation is the
+    /// caller's responsibility. The web handler for `POST /api/config` calls
+    /// `cfg.validate()` before forwarding here.
     pub async fn set_config(&self, cfg: RouterConfig) {
         *self.inner.cfg.write().await = cfg;
     }
@@ -261,6 +287,16 @@ impl Router {
 
     // ===== Stats =====
 
+    /// Return a point-in-time snapshot of router statistics.
+    ///
+    /// Blends internal compute-queue pressure with the EOT external pressure
+    /// signal so the returned `pressure_score` reflects the full system state
+    /// including upstream token-generation load from Every-Other-Token.
+    ///
+    /// # Returns
+    ///
+    /// A [`RouterStats`] containing completed/dropped counts, adaptive spawn threshold,
+    /// composite pressure score, and per-strategy routed counts.
     pub async fn stats_snapshot(&self) -> RouterStats {
         let routed = self.inner.routed.lock().await.clone();
         let metrics = self.inner.metrics.lock().await;
@@ -282,6 +318,10 @@ impl Router {
         }
     }
 
+    /// Return per-strategy latency summaries (EMA, p50/p95/p99, min/max).
+    ///
+    /// Only strategies that have processed at least one job appear in the result.
+    /// Suitable for the `/api/stats` JSON endpoint and Prometheus export.
     pub async fn latency_report(&self) -> Vec<LatencySummary> {
         let metrics = self.inner.metrics.lock().await;
         latency_summaries(&metrics)
@@ -347,6 +387,14 @@ impl Router {
 
     /// Hot-patch a single config field by name. Returns true if the field was recognized.
     #[allow(dead_code)]
+    /// Update a single named config field by string key.
+    ///
+    /// Returns `true` if the field was found and updated, `false` if `field` does
+    /// not name a recognised config key. This is a low-level escape hatch used by
+    /// the adaptive threshold loop; prefer [`Router::patch_config`] for external callers.
+    ///
+    /// Note: this method skips full config validation. The caller is responsible for
+    /// ensuring the resulting config remains consistent.
     pub async fn update_config_field(&self, field: &str, value: u64) -> bool {
         let mut cfg = self.inner.cfg.write().await;
         match field {
@@ -363,6 +411,34 @@ impl Router {
 
     // ===== Submit =====
 
+    /// Submit a job for execution, selecting an appropriate strategy automatically.
+    ///
+    /// This is the primary entry point for all work. The method:
+    /// 1. Reads the current config and adaptive spawn threshold.
+    /// 2. Computes system pressure from CPU busy count and EMA metrics.
+    /// 3. Calls [`choose_strategy`] to get a heuristic baseline strategy.
+    /// 4. Optionally overrides with the [`NeuralRouter`]'s learned choice when warmed up.
+    /// 5. Executes the job under the selected strategy (inline, spawned, pooled, batched, or dropped).
+    /// 6. Records the outcome back into the neural router and metrics store.
+    /// 7. Broadcasts a [`RoutingDecision`] event on the SSE channel.
+    ///
+    /// # Parameters
+    ///
+    /// * `job` — The job descriptor. All fields are used for routing decisions.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Vec<Output>)` — Job completed; exactly one output element for each supported kernel.
+    /// - `None` — Job was dropped due to backpressure or the `Drop` strategy was selected.
+    ///
+    /// # Errors
+    ///
+    /// This function does not return a `Result`. Routing and dispatch errors are converted to
+    /// `None` (dropped) rather than panicking, honoring the no-panic-in-production guarantee.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
     pub async fn submit(&self, job: Job) -> Option<Vec<Output>> {
         let cfg = self.inner.cfg.read().await.clone();
         let adaptive_threshold = *self.inner.adaptive_spawn_threshold.lock().await;
@@ -711,6 +787,31 @@ impl Router {
 
 // ===== Strategy selection =====
 
+/// Select an execution strategy for `job` based on compute cost, backpressure,
+/// and the current configuration.
+///
+/// This is a pure, synchronous function with no side effects. It is separated
+/// from [`Router::submit`] so it can be benchmarked and unit-tested in isolation.
+///
+/// ## Decision tree
+///
+/// 1. If `cpu_busy >= backpressure_busy_threshold`:
+///    - `scaling_potential >= 0.65` → `Batch`
+///    - otherwise → `Drop`
+/// 2. `compute_cost <= inline_threshold` → `Inline`
+/// 3. `compute_cost <= spawn_threshold` → `Spawn`
+/// 4. `scaling_potential >= 0.65` → `Batch`
+/// 5. Otherwise → `CpuPool`
+///
+/// # Parameters
+///
+/// * `cfg`      — Current router config; thresholds are read-only.
+/// * `job`      — The job whose cost and scaling potential drive the decision.
+/// * `cpu_busy` — Number of CPU workers currently executing blocking work.
+///
+/// # Returns
+///
+/// A [`Strategy`] variant. Never panics.
 pub fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strategy {
     if cpu_busy >= cfg.backpressure_busy_threshold {
         if job.scaling_potential >= 0.65 {

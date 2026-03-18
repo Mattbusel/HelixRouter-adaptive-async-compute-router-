@@ -1,4 +1,17 @@
-//! RouterConfig -- tunable routing thresholds, validation, and hot-reload.
+//! # Module: config
+//!
+//! ## Responsibility
+//! Tunable routing thresholds, runtime validation, hot-reload from filesystem,
+//! and a `tokio::sync::watch`-backed live broadcast channel for reactive consumers.
+//!
+//! ## Guarantees
+//! - `RouterConfig::validate` is always called before any config is applied.
+//! - Invalid configs are rejected atomically — the live config is never partially updated.
+//! - `watch_config_with_callback` only fires the callback on valid, changed configs.
+//!
+//! ## NOT Responsible For
+//! - Persisting config changes to disk.
+//! - Distributing config updates across nodes (single-process only).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -26,29 +39,66 @@ impl std::error::Error for ConfigError {}
 
 // ===== RouterConfig =====
 
+/// Complete routing configuration.
+///
+/// All fields are validated together by [`RouterConfig::validate`] before use.
+/// The default values (`RouterConfig::default()`) are production-safe starting
+/// points that can be tuned via `PATCH /api/config` without a restart.
+///
+/// # Validation rules
+/// - `inline_threshold < spawn_threshold`
+/// - `cpu_queue_cap >= cpu_parallelism`
+/// - `ema_alpha` ∈ `(0, 1]`
+/// - `adaptive_step` ∈ `(0, 1]`
+/// - All numeric fields must be `> 0` (except `batch_max_delay_ms` and `adaptive_p95_threshold_factor`)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterConfig {
     /// Schema version — increment when breaking fields are added.
     /// Old binaries that ignore unknown fields will default this to 1 via serde.
     #[serde(default = "default_config_version")]
     pub version: u32,
+    /// Maximum compute cost for which a job is executed inline (on the calling task).
+    /// Jobs with `compute_cost <= inline_threshold` run inline without spawning.
+    /// Must be strictly less than `spawn_threshold`. Default: `8_000`.
     pub inline_threshold: u64,
+    /// Maximum compute cost for which a job is spawned as a Tokio task.
+    /// Jobs above this cost are routed to the CPU pool or dropped under pressure.
+    /// Must be strictly greater than `inline_threshold`. Default: `60_000`.
     pub spawn_threshold: u64,
+    /// Bounded capacity of the CPU worker queue (channel depth).
+    /// Must be >= `cpu_parallelism`. Default: `512`.
     pub cpu_queue_cap: usize,
+    /// Number of concurrent CPU-bound workers (blocking thread pool slots).
+    /// Default: `8`.
     pub cpu_parallelism: usize,
+    /// Number of busy CPU workers above which Batch/Drop strategies are forced.
+    /// When `cpu_busy >= backpressure_busy_threshold`, incoming jobs are batched
+    /// or dropped regardless of compute cost. Default: `7`.
     pub backpressure_busy_threshold: usize,
+    /// Maximum number of jobs accumulated before a batch is flushed.
+    /// Must be >= 1. Default: `8`.
     pub batch_max_size: usize,
+    /// Maximum time (ms) a batch waits before flushing even if not full.
+    /// Default: `10`.
     pub batch_max_delay_ms: u64,
+    /// Smoothing factor for the exponential moving average of observed latency.
+    /// Must be in `(0, 1]`. Higher values weight recent observations more.
+    /// Default: `0.15`.
     #[serde(default = "default_ema_alpha")]
     pub ema_alpha: f64,
-    /// Fractional step for adaptive spawn_threshold increases, in (0.0, 1.0].
+    /// Fractional step for adaptive spawn_threshold increases, in `(0.0, 1.0]`.
     /// A value of 0.10 means "raise threshold by 10% of its current value".
+    /// Default: `0.10`.
     #[serde(default = "default_adaptive_step")]
     pub adaptive_step: f64,
+    /// P95 latency budget (ms) for the CpuPool strategy.
+    /// When observed CpuPool P95 exceeds `adaptive_p95_threshold_factor × cpu_p95_budget_ms`,
+    /// `spawn_threshold` is raised by `adaptive_step` to offload work. Default: `200`.
     #[serde(default = "default_cpu_p95_budget_ms")]
     pub cpu_p95_budget_ms: u64,
     /// Multiplier on `cpu_p95_budget_ms` above which adaptive threshold raising triggers.
     /// E.g., 1.5 means: raise if observed p95 > 1.5 × cpu_p95_budget_ms.
+    /// Default: `1.5`.
     #[serde(default = "default_adaptive_p95_threshold_factor")]
     pub adaptive_p95_threshold_factor: f64,
 }

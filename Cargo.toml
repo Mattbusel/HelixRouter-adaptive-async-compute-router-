@@ -1,7 +1,18 @@
 [package]
 name = "helixrouter"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+rust-version = "1.75"
+description = "Adaptive async compute routing engine: per-job strategy selection (inline/spawn/pool/batch/drop) driven by live pressure, EMA latency, and online-learned quality estimates."
+repository = "https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-"
+homepage = "https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-"
+documentation = "https://docs.rs/helixrouter"
+license = "MIT"
+keywords = ["async", "routing", "backpressure", "autoscaler", "tokio"]
+categories = ["asynchronous", "concurrency", "network-programming"]
+authors = ["Matt Busel <matt@example.com>"]
+readme = "README.md"
+exclude = ["dashboard.png", "Screenshot*", "Doc.txt", "Expand Doc.txt", "yaml", "scripts/"]
 
 [[bin]]
 name = "helixrouter"

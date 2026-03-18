@@ -371,6 +371,42 @@ impl NeuralRouter {
     ///
     /// # Panics
     /// This function never panics.
+    /// Record the observed outcome of a routing decision and update learned weights.
+    ///
+    /// ## Learning algorithm
+    ///
+    /// This is an online gradient-ascent update (policy gradient, no value baseline):
+    ///
+    /// ```text
+    /// reward = match outcome:
+    ///     dropped       → REWARD_DROPPED        (large negative)
+    ///     within budget → REWARD_WITHIN_BUDGET   (positive)
+    ///     over budget   → REWARD_OVER_BUDGET     (small negative)
+    ///
+    /// weights[strategy][i] += learning_rate × reward × feature[i]
+    /// ```
+    ///
+    /// The weight matrix rows are indexed by strategy; columns by feature dimension.
+    /// A positive reward pushes the feature-weighted score for the chosen strategy up,
+    /// making it more likely to be selected for similar jobs in the future. A negative
+    /// reward pushes it down, discouraging the same choice for similar inputs.
+    ///
+    /// Epsilon is decayed by `epsilon_decay` every 100 samples, floored at `0.01`
+    /// so some exploration is always retained.
+    ///
+    /// Weight updates are **skipped** during the warm-up period
+    /// (`sample_count < min_samples_before_learning`) to avoid unstable early
+    /// gradients corrupting the heuristic pre-seed.
+    ///
+    /// # Parameters
+    ///
+    /// * `features_job` — The original job; used to reconstruct the feature vector.
+    /// * `pressure`     — System pressure that was observed at routing time.
+    /// * `outcome`      — The observed execution result (latency, budget, drop status).
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
     pub fn record_outcome(
         &mut self,
         features_job: &Job,

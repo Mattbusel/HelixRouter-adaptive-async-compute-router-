@@ -15,7 +15,13 @@
       "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test)",
       "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test config_tests test_edge_case_cpu_queue_cap_one_valid -- --nocapture)",
       "Bash(CARGO_TARGET_DIR=\"C:/cargo-targets/helixrouter\" TMPDIR=\"C:/tmp\" cargo test --test integration test_config_reload_affects_routing -- --nocapture)",
-      "Bash(CARGO_TARGET_DIR=C:/cargo-targets/helixrouter TMPDIR=C:/tmp cargo test)"
+      "Bash(CARGO_TARGET_DIR=C:/cargo-targets/helixrouter TMPDIR=C:/tmp cargo test)",
+      "Bash(__NEW_LINE_f54ba60d018928ad__ for:*)",
+      "Bash(do echo:*)",
+      "Skill(update-config)",
+      "Bash(find /r/workspaces/LLMTokenStreamQuantEngine -type f \\\\\\(-name *.rs -o -name *.cpp -o -name *.h \\\\\\) -exec wc -l {} +)",
+      "Bash(find /r/workspaces/Reddit-Options-Trader-ROT-/src -type f -name *.py 2)",
+      "Bash(/dev/null -exec wc -l {} +)"
     ]
   }
 }

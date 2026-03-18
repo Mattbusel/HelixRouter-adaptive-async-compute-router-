@@ -406,3 +406,156 @@ fn load_observation_eq_different_timestamp() {
     let b = obs(11, 200, 0.5, 0.0);
     assert_ne!(a, b);
 }
+
+// ---------------------------------------------------------------------------
+// Max / min parallelism bounds
+// ---------------------------------------------------------------------------
+
+/// Recommended parallelism must never exceed max_parallelism, even under extreme load.
+#[test]
+fn recommended_parallelism_never_exceeds_max_parallelism() {
+    let max = 16;
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 3,
+        max_parallelism: max,
+        ..Default::default()
+    });
+    for i in 0..10u64 {
+        a.observe(obs(i, i * 1_000, 0.99, 0.99)); // extreme pressure
+    }
+    let rec = a.recommend(max, 128).expect("must have recommendation");
+    assert!(
+        rec.recommended_parallelism <= max,
+        "parallelism {} must not exceed max {}",
+        rec.recommended_parallelism,
+        max
+    );
+}
+
+/// Recommended parallelism must be at least min_parallelism, even at zero load.
+#[test]
+fn recommended_parallelism_never_below_min_parallelism() {
+    let min = 2;
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 3,
+        min_parallelism: min,
+        ..Default::default()
+    });
+    for i in 0..10u64 {
+        a.observe(obs(i, i, 0.0, 0.0)); // near-zero load
+    }
+    let rec = a.recommend(min, 100_000).expect("must have recommendation");
+    assert!(
+        rec.recommended_parallelism >= min,
+        "parallelism {} must not go below min {}",
+        rec.recommended_parallelism,
+        min
+    );
+}
+
+/// Recommended queue capacity must never exceed max_queue_cap.
+#[test]
+fn recommended_queue_cap_never_exceeds_max_queue_cap() {
+    let max_cap = 256;
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 3,
+        max_queue_cap: max_cap,
+        ..Default::default()
+    });
+    for i in 0..10u64 {
+        a.observe(obs(i, i * 1_000, 0.99, 0.99));
+    }
+    let rec = a.recommend(4, max_cap).expect("must have recommendation");
+    assert!(
+        rec.recommended_queue_cap <= max_cap,
+        "queue cap {} must not exceed max {}",
+        rec.recommended_queue_cap,
+        max_cap
+    );
+}
+
+/// Recommended queue capacity must always be at least min_queue_cap.
+#[test]
+fn recommended_queue_cap_never_below_min_queue_cap() {
+    let min_cap = 64;
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 3,
+        min_queue_cap: min_cap,
+        ..Default::default()
+    });
+    for i in 0..10u64 {
+        a.observe(obs(i, i, 0.0, 0.0)); // near-zero load → scale down
+    }
+    let rec = a.recommend(4, min_cap).expect("must have recommendation");
+    assert!(
+        rec.recommended_queue_cap >= min_cap,
+        "queue cap {} must not go below min {}",
+        rec.recommended_queue_cap,
+        min_cap
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Correctness: recommendation direction matches observed load
+// ---------------------------------------------------------------------------
+
+/// Scale-Up direction always produces a higher (or equal) parallelism recommendation
+/// than the current value.
+#[test]
+fn scale_up_direction_means_parallelism_increases_or_stays_same() {
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 3,
+        ..Default::default()
+    });
+    for i in 0..10u64 {
+        a.observe(obs(i, i * 100, 0.95, 0.8));
+    }
+    let current = 4;
+    let rec = a.recommend(current, 128).expect("must have recommendation");
+    if rec.direction == ScaleDirection::Up {
+        assert!(
+            rec.recommended_parallelism >= current,
+            "Scale-Up must not decrease parallelism: current={current}, recommended={}",
+            rec.recommended_parallelism
+        );
+    }
+}
+
+/// Scale-Down direction always produces a lower (or equal) parallelism recommendation
+/// than the current value.
+#[test]
+fn scale_down_direction_means_parallelism_decreases_or_stays_same() {
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 3,
+        ..Default::default()
+    });
+    for i in 0..10u64 {
+        a.observe(obs(i, i, 0.01, 0.0)); // minimal load
+    }
+    let current = 8;
+    let rec = a.recommend(current, 50_000).expect("must have recommendation");
+    if rec.direction == ScaleDirection::Down {
+        assert!(
+            rec.recommended_parallelism <= current,
+            "Scale-Down must not increase parallelism: current={current}, recommended={}",
+            rec.recommended_parallelism
+        );
+    }
+}
+
+/// `recommend` returns `None` when fewer than `min_observations` are present.
+#[test]
+fn recommend_returns_none_before_min_observations() {
+    let mut a = Autoscaler::new(AutoscalerConfig {
+        min_observations: 5,
+        ..Default::default()
+    });
+    // Add only 4 observations — one short of the minimum.
+    for i in 0..4u64 {
+        a.observe(obs(i, i * 10, 0.5, 0.0));
+    }
+    assert!(
+        a.recommend(4, 128).is_none(),
+        "recommend must return None before min_observations"
+    );
+}

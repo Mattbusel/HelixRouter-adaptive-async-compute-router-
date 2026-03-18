@@ -4,15 +4,63 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: target
+
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build
-      - run: cargo test
+        with:
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build (all targets)
+        run: cargo build --all-targets
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: Docs (no-deps, deny warnings)
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Verify benchmarks compile
+        run: cargo bench --no-run
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet 2>/dev/null || true
+          cargo audit
+
+  bench-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run benchmarks (smoke -- no regression gate)
+        # Runs benches in test mode to confirm they complete without timing out.
+        # A full baseline comparison requires a persistent artifact store; this
+        # step confirms correctness and fails on non-zero exit only.
+        run: cargo bench -- --test

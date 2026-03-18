@@ -16,6 +16,11 @@
 
 use crate::types::{Job, JobKind, Output};
 
+/// Dispatch `job` to the appropriate compute kernel based on its `kind`.
+///
+/// Returns a `Vec<Output>` with exactly one element for every supported
+/// `JobKind`.  The call is CPU-bound, deterministic, and free of I/O or side
+/// effects — safe to call from `spawn_blocking`.
 pub fn execute_job(job: &Job) -> Vec<Output> {
     match job.kind {
         JobKind::HashMix       => vec![hashmix(job)],
@@ -24,6 +29,11 @@ pub fn execute_job(job: &Job) -> Vec<Output> {
     }
 }
 
+/// FNV-inspired hash-mix kernel.
+///
+/// Mixes all `job.inputs` through a multiply-xorshift cascade, then runs
+/// `compute_cost / 64` additional mixing rounds.  Always returns `Output::U64`.
+/// Uses wrapping arithmetic throughout — no overflow panics.
 pub fn hashmix(job: &Job) -> Output {
     let mut x: u64 = 0xcbf29ce484222325;
     for &v in &job.inputs {
@@ -43,6 +53,11 @@ pub fn hashmix(job: &Job) -> Output {
     Output::U64(t)
 }
 
+/// Sieve of Eratosthenes prime-count kernel.
+///
+/// Counts primes up to `n = compute_cost.clamp(10_000, 250_000)`.
+/// Returns `Output::U64(count)`.  Allocates an `O(n)` boolean sieve on
+/// each call — intended for medium-cost jobs routed to `spawn_blocking`.
 pub fn primecount(job: &Job) -> Output {
     let n = (job.compute_cost as usize).clamp(10_000, 250_000);
     let mut is_prime = vec![true; n + 1];

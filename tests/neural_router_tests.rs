@@ -401,6 +401,145 @@ fn greedy_never_picks_drop_below_drop_pressure_threshold() {
 }
 
 // ---------------------------------------------------------------------------
+// Cold-start behavior
+// ---------------------------------------------------------------------------
+
+/// A brand-new router (zero samples) must still return a valid strategy without
+/// panicking.  The choice may be arbitrary but must be a known Strategy variant.
+#[test]
+fn cold_start_returns_valid_strategy_with_zero_samples() {
+    let router = NeuralRouter::new(NeuralRouterConfig::default());
+    assert_eq!(router.sample_count(), 0);
+
+    let strategies = [
+        Strategy::Inline,
+        Strategy::Spawn,
+        Strategy::CpuPool,
+        Strategy::Batch,
+        Strategy::Drop,
+    ];
+
+    for id in 0..20u64 {
+        let job = make_job(id, JobKind::HashMix, 100 * (id + 1), 0.5, 500);
+        let chosen = router.choose(&job, 0.3);
+        assert!(
+            strategies.contains(&chosen),
+            "cold-start must return a valid Strategy, got {chosen:?}"
+        );
+    }
+}
+
+/// Before `min_samples_before_learning` is reached the router is NOT warmed up
+/// and `is_warmed_up()` must return `false`.
+#[test]
+fn cold_start_is_not_warmed_up_below_min_samples() {
+    let threshold = 10;
+    let mut router = NeuralRouter::new(NeuralRouterConfig {
+        min_samples_before_learning: threshold,
+        ..Default::default()
+    });
+    assert!(!router.is_warmed_up(), "should not be warmed up at construction");
+
+    let job = make_job(1, JobKind::HashMix, 1000, 0.5, 500);
+    for _ in 0..(threshold - 1) {
+        router.record_outcome(&job, 0.3, within_budget(Strategy::Inline, 500));
+    }
+    assert!(
+        !router.is_warmed_up(),
+        "should not be warmed up before min_samples threshold"
+    );
+}
+
+/// Once `min_samples_before_learning` is reached the router becomes warmed up.
+#[test]
+fn cold_start_becomes_warm_after_min_samples() {
+    let threshold = 5;
+    let mut router = NeuralRouter::new(NeuralRouterConfig {
+        min_samples_before_learning: threshold,
+        ..Default::default()
+    });
+
+    let job = make_job(1, JobKind::PrimeCount, 50_000, 0.5, 1000);
+    for _ in 0..threshold {
+        router.record_outcome(&job, 0.3, within_budget(Strategy::Spawn, 1000));
+    }
+    assert!(router.is_warmed_up(), "should be warmed up after min_samples outcomes");
+}
+
+// ---------------------------------------------------------------------------
+// Drift detection: reward degradation after strategy quality reversal
+// ---------------------------------------------------------------------------
+
+/// After a sustained period of positive rewards for strategy A, switching to
+/// sustained negative rewards must lower avg_reward — confirming that the
+/// running average tracks reward drift.
+#[test]
+fn drift_detection_reward_falls_after_strategy_quality_reversal() {
+    let mut router = NeuralRouter::new(NeuralRouterConfig {
+        min_samples_before_learning: 1,
+        learning_rate: 0.1,
+        ..Default::default()
+    });
+
+    let job = make_job(1, JobKind::MonteCarloRisk, 500_000, 0.8, 2000);
+
+    // Phase 1: good routing — positive rewards.
+    for _ in 0..40 {
+        router.record_outcome(&job, 0.3, within_budget(Strategy::CpuPool, 2000));
+    }
+    let reward_after_good_phase = router.avg_reward();
+
+    // Phase 2: bad routing — negative rewards (drops).
+    for _ in 0..40 {
+        router.record_outcome(&job, 0.9, dropped(Strategy::Drop));
+    }
+    let reward_after_bad_phase = router.avg_reward();
+
+    assert!(
+        reward_after_bad_phase < reward_after_good_phase,
+        "avg_reward must decrease after sustained drops: \
+         good_phase={reward_after_good_phase:.4}, bad_phase={reward_after_bad_phase:.4}"
+    );
+}
+
+/// Weights must shift toward a better strategy after quality reversal —
+/// the weight for the previously-penalised strategy should differ from its
+/// initial value once enough post-reversal outcomes are recorded.
+#[test]
+fn drift_detection_weights_adapt_after_reversal() {
+    let mut router = NeuralRouter::new(NeuralRouterConfig {
+        epsilon: 0.0,
+        min_samples_before_learning: 1,
+        learning_rate: 0.3,
+        ..Default::default()
+    });
+
+    let job = make_job(2, JobKind::HashMix, 40_000, 0.5, 1000);
+
+    // Phase 1: reward Spawn repeatedly.
+    for _ in 0..30 {
+        router.record_outcome(&job, 0.2, within_budget(Strategy::Spawn, 1000));
+    }
+    let weights_after_phase1 = *router.weights();
+
+    // Phase 2: penalise Spawn (over-budget), reward Batch.
+    for _ in 0..30 {
+        router.record_outcome(&job, 0.2, over_budget(Strategy::Spawn, 1000));
+    }
+    for _ in 0..30 {
+        router.record_outcome(&job, 0.2, within_budget(Strategy::Batch, 1000));
+    }
+    let weights_after_phase2 = *router.weights();
+
+    // At least one weight must have changed between phases — confirming adaptation.
+    let changed = weights_after_phase1
+        .iter()
+        .zip(weights_after_phase2.iter())
+        .any(|(row1, row2)| row1.iter().zip(row2.iter()).any(|(a, b)| (a - b).abs() > 1e-12));
+    assert!(changed, "weights must adapt after quality reversal");
+}
+
+// ---------------------------------------------------------------------------
 // Weight matrix shape invariants
 // ---------------------------------------------------------------------------
 

@@ -7,10 +7,16 @@ use std::fmt;
 // Enums
 // ---------------------------------------------------------------------------
 
+/// Discriminator for the three built-in compute kernels.
+///
+/// Serialises as a plain string (`"hash_mix"`, `"prime_count"`, `"monte_carlo_risk"`).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JobKind {
+    /// FNV-inspired hash-mix: fast, O(inputs + compute_cost/64) iterations.
     HashMix,
+    /// Sieve-of-Eratosthenes prime count: allocates O(compute_cost) memory.
     PrimeCount,
+    /// Monte-Carlo VaR simulation: floating-point intensive, seeded by job id.
     MonteCarloRisk,
 }
 
@@ -24,13 +30,22 @@ impl fmt::Display for JobKind {
     }
 }
 
+/// Execution strategy chosen by the router for a given job.
+///
+/// Serialises as snake_case (`"inline"`, `"spawn"`, `"cpu_pool"`, `"batch"`, `"drop"`).
+/// The `Ord` derivation is intentional and used for deterministic metric ordering only.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
+    /// Execute the job synchronously on the current async task. Lowest latency.
     Inline,
+    /// Spawn a new Tokio task. Suitable for moderate compute cost.
     Spawn,
+    /// Dispatch to a bounded `spawn_blocking` pool. Used for heavy CPU work.
     CpuPool,
+    /// Accumulate into a micro-batch and flush together. Amortises dispatch overhead.
     Batch,
+    /// Discard the job immediately. Used when backpressure exceeds configured thresholds.
     Drop,
 }
 
@@ -51,19 +66,37 @@ impl fmt::Display for Strategy {
 // Job / Output
 // ---------------------------------------------------------------------------
 
+/// A unit of work submitted to the router.
+///
+/// All fields are required. `compute_cost` is the primary dimension used for
+/// strategy selection; `scaling_potential` biases toward `Batch` for work that
+/// amortises well; `latency_budget_ms` is advisory and surfaced in telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
+    /// Caller-assigned monotonic identifier. Used as the PRNG seed for `MonteCarloRisk`.
     pub id: u64,
+    /// Which compute kernel to run.
     pub kind: JobKind,
+    /// Arbitrary u64 inputs forwarded to the kernel unchanged.
     pub inputs: Vec<u64>,
+    /// Abstract cost unit. Compared against `inline_threshold` and `spawn_threshold`
+    /// to determine whether the job runs inline, spawned, or pool-dispatched.
     pub compute_cost: u64,
+    /// How well the work parallelises or batches. Range: `[0.0, 1.0]`.
+    /// High values bias strategy selection toward `Batch`.
     pub scaling_potential: f32,
+    /// Soft deadline in milliseconds. Recorded in telemetry but not enforced.
     pub latency_budget_ms: u64,
 }
 
+/// The computed result of a job execution.
+///
+/// `U64` is returned by `HashMix` and `PrimeCount`; `F64` by `MonteCarloRisk`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Output {
+    /// A 64-bit unsigned integer result.
     U64(u64),
+    /// A 64-bit floating-point result.
     F64(f64),
 }
 
@@ -71,16 +104,29 @@ pub enum Output {
 // Routing decision event (streamed to UI via SSE)
 // ---------------------------------------------------------------------------
 
+/// A single routing decision event emitted for every job submission.
+///
+/// These events are streamed to subscribers via the SSE endpoint at
+/// `GET /api/stream/decisions` and buffered in the router's routing log.
+/// The web dashboard renders them in real time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct RoutingDecision {
+    /// Caller-assigned job identifier, matches [`Job::id`].
     pub job_id: u64,
+    /// The compute kernel that was requested.
     pub kind: JobKind,
+    /// The execution strategy that was chosen for this job.
     pub strategy: Strategy,
+    /// The job's stated compute cost, used as the primary routing dimension.
     pub compute_cost: u64,
+    /// How well the job parallelises or batches; range `[0.0, 1.0]`.
     pub scaling_potential: f32,
+    /// Number of CPU pool workers that were busy at decision time.
     pub cpu_busy: usize,
+    /// Composite pressure score at decision time; range `[0.0, 1.0]`.
     pub pressure_score: f64,
+    /// Unix timestamp in milliseconds when the decision was made.
     pub timestamp_ms: u64,
 }
 
@@ -88,13 +134,23 @@ pub struct RoutingDecision {
 // Pressure snapshot
 // ---------------------------------------------------------------------------
 
+/// A point-in-time snapshot of system pressure indicators.
+///
+/// Returned by pressure monitoring APIs and used internally by the pressure
+/// scoring formula: `40% queue fill + 30% drop rate EMA + 20% latency
+/// fraction + 10% queue EMA trend`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[allow(dead_code)]
 pub struct PressureSnapshot {
+    /// Number of CPU pool workers currently busy.
     pub cpu_busy: usize,
+    /// Current depth of the CPU dispatch queue.
     pub queue_depth: usize,
+    /// Percentage of recent jobs that were dropped; range `[0.0, 100.0]`.
     pub drop_rate_pct: f64,
+    /// Normalised latency trend signal; range `[0.0, 1.0]`.
     pub latency_trend: f64,
+    /// Composite pressure score derived from the above fields; range `[0.0, 1.0]`.
     pub composite: f64,
 }
 
