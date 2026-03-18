@@ -1,9 +1,9 @@
+"""Write README.md for HelixRouter."""
+
+content = """\
 # HelixRouter
 
 [![CI](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/helixrouter.svg)](https://crates.io/crates/helixrouter)
-[![docs.rs](https://docs.rs/helixrouter/badge.svg)](https://docs.rs/helixrouter)
-[![Rust Version](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 HelixRouter is an adaptive async compute routing engine written in Rust. It decides how each
@@ -208,12 +208,6 @@ broadcast::send for the SSE feed.
 
 ---
 
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for a full history of notable changes.
-
----
-
 ## Contributing
 
 1. Fork the repository and create a feature branch from main.
@@ -231,3 +225,10 @@ tracing calls instead of println, doc comments on all public items.
 ## License
 
 MIT. See https://opensource.org/licenses/MIT.
+"""
+
+import os
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'README.md')
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(content)
+print('README written:', len(content), 'bytes')

@@ -103,10 +103,15 @@ pub struct RouterConfig {
     pub adaptive_p95_threshold_factor: f64,
 }
 
+/// Default schema version returned when the `version` field is absent from a deserialised config.
 pub fn default_config_version() -> u32 { 1 }
+/// Default EMA smoothing factor (`0.15`) used when `ema_alpha` is absent from a deserialised config.
 pub fn default_ema_alpha() -> f64 { 0.15 }
+/// Default adaptive step (`0.10`) used when `adaptive_step` is absent from a deserialised config.
 pub fn default_adaptive_step() -> f64 { 0.10 }
+/// Default CpuPool P95 latency budget in milliseconds (`200`) used when absent from a deserialised config.
 pub fn default_cpu_p95_budget_ms() -> u64 { 200 }
+/// Default adaptive P95 threshold factor (`1.5`) used when absent from a deserialised config.
 pub fn default_adaptive_p95_threshold_factor() -> f64 { 1.5 }
 
 impl Default for RouterConfig {
@@ -175,6 +180,13 @@ pub struct RouterConfigPatch {
 }
 
 impl RouterConfig {
+    /// Validate all fields for internal consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if any constraint is violated (e.g.
+    /// `inline_threshold >= spawn_threshold`, `ema_alpha` outside `(0, 1]`,
+    /// `cpu_queue_cap < cpu_parallelism`).
     #[allow(dead_code)]
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.inline_threshold == 0 {
@@ -242,6 +254,7 @@ pub struct ConfigReloader {
 
 #[allow(dead_code)]
 impl ConfigReloader {
+    /// Create a new `ConfigReloader` seeded with `initial` as the starting config.
     pub fn new(initial: RouterConfig) -> Self {
         let (tx, rx) = tokio::sync::watch::channel(initial);
         Self { rx, tx }
@@ -263,6 +276,13 @@ impl ConfigReloader {
 
 // ===== File-watch hot-reload =====
 
+/// Watch a config file and update `config_lock` on every valid change.
+///
+/// Polls `path` at `interval`. When the file content changes and the new
+/// JSON deserialises to a valid [`RouterConfig`], the shared lock is updated.
+/// Invalid JSON or configs that fail validation are silently skipped.
+///
+/// Prefer [`watch_config_with_callback`] for callers that own a [`Router`].
 #[allow(dead_code)]
 pub async fn watch_config(
     path: PathBuf,

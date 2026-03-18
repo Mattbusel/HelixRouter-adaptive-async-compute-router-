@@ -1,4 +1,5 @@
-/// Comprehensive tests for the config module.
+//! Comprehensive tests for the config module.
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use helixrouter::config::{ConfigError, RouterConfig};
 
@@ -258,12 +259,13 @@ async fn test_hot_reload_while_jobs_in_flight_no_deadlock() {
     use helixrouter::{router::Router, types::{Job, JobKind}};
 
     let router = Router::new(RouterConfig::default());
-    let mut handles = Vec::new();
+    let mut job_handles = Vec::new();
+    let mut cfg_handles = Vec::new();
 
     // Submit 100 jobs in the background.
     for i in 0..100u64 {
         let r = router.clone();
-        handles.push(tokio::spawn(async move {
+        job_handles.push(tokio::spawn(async move {
             r.submit(Job {
                 id: i,
                 kind: JobKind::HashMix,
@@ -279,15 +281,18 @@ async fn test_hot_reload_while_jobs_in_flight_no_deadlock() {
     // Reload config from 10 concurrent tasks while jobs are running.
     for _ in 0..10 {
         let r = router.clone();
-        handles.push(tokio::spawn(async move {
+        cfg_handles.push(tokio::spawn(async move {
             let mut cfg = RouterConfig::default();
             cfg.inline_threshold = 5_000;
             r.set_config(cfg).await;
         }));
     }
 
-    for h in handles {
-        h.await.expect("task must not panic");
+    for h in job_handles {
+        h.await.expect("job task must not panic");
+    }
+    for h in cfg_handles {
+        h.await.expect("cfg task must not panic");
     }
 
     let stats = router.stats_snapshot().await;

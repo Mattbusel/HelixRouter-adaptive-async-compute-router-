@@ -1,0 +1,62 @@
+# cargo-deny configuration for HelixRouter
+# Run: cargo deny check
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Only check dependencies for the default feature set.
+all-features = false
+no-default-features = false
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+# Reject any crate whose license is not in this allow-list.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-DFS-2016",
+]
+# Treat unlicensed crates as an error.
+unlicensed = "deny"
+# Allow license expressions that combine allowed licenses with AND/OR.
+allow-osi-fsf-free = "neither"
+# Confidence threshold for license text detection.
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# Advisories (security vulnerabilities)
+# ---------------------------------------------------------------------------
+[advisories]
+# Deny any crate with a known security vulnerability.
+vulnerability = "deny"
+# Warn about crates flagged as unmaintained (may be promoted to deny later).
+unmaintained = "warn"
+# Warn about crates with yanked versions in use.
+yanked = "warn"
+# Ignore the notice category (informational only).
+notice = "warn"
+# Path to a local advisory database override (leave unset to use the default
+# RustSec Advisory Database fetched from GitHub).
+# db-path = "~/.cargo/advisory-db"
+
+# ---------------------------------------------------------------------------
+# Bans (duplicate crates / blocked crates)
+# ---------------------------------------------------------------------------
+[bans]
+# Warn when multiple versions of the same crate are present in the graph.
+multiple-versions = "warn"
+# Deny wildcard dependencies (e.g. foo = "*").
+wildcards = "deny"
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+# Only allow crates from crates.io; deny git or path sources in production.
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

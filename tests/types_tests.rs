@@ -1,3 +1,8 @@
+//! Integration tests for the `types` module.
+//!
+//! Verifies serialisation round-trips, `Display` formatting, `Ord` derivation,
+//! and field-level properties of `Job`, `JobKind`, `Strategy`, `Output`,
+//! `RoutingDecision`, and `PressureSnapshot`.
 use helixrouter::types::{Job, JobKind, RoutingDecision, Strategy};
 use std::collections::{HashMap, HashSet};
 

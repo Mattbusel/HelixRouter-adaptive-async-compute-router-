@@ -1,4 +1,8 @@
-/// Additional type-level compile tests.
+//! Additional type-level compile and property tests.
+//!
+//! Covers edge cases not addressed in `types_tests.rs`: trait bound
+//! verification, `HashSet` round-trips, `Clone` and `Debug` coverage, and
+//! boundary values for `PressureSnapshot` and `Output`.
 use helixrouter::types::{Job, JobKind, Output, PressureSnapshot, RoutingDecision, Strategy};
 use std::collections::{HashMap, HashSet};
 

@@ -9,6 +9,60 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [1.0.0] — 2026-03-17
+
+### Summary
+
+First stable release of HelixRouter. All public APIs are considered stable under
+Semantic Versioning from this point forward.
+
+### Highlights
+
+- **NeuralRouter** — Online-learning per-job-kind routing quality model.
+  Epsilon-greedy exploration with gradient-ascent weight updates. Pre-seeded via
+  `warm_start_from_heuristics` to eliminate cold-start lag. Exposes learned weight
+  snapshot at `GET /api/neural` and Prometheus gauges
+  (`helix_neural_sample_count`, `helix_neural_avg_reward`, `helix_neural_epsilon`).
+
+- **PredictiveAutoscaler** — Rolling OLS linear-trend demand forecast over a
+  configurable ring buffer. Emits `AutoscaleRecommendation` (direction, parallelism,
+  queue-cap) with a human-readable reason string. Dynamic prediction horizon shortens
+  under volatile load (high rate variance).
+
+- **Config hot-reload** — `watch_config_with_callback` polls a JSON file and pushes
+  validated updates into the router without a restart. Set `HELIX_CONFIG_PATH` to
+  enable. Invalid configs are silently skipped; the live config is never partially
+  updated.
+
+- **Prometheus metrics** — Full Prometheus text-format export at `/metrics`:
+  `helix_completed`, `helix_dropped`, `helix_routed{strategy}`,
+  `helix_latency_{p50,p95,p99,ema,min,max}_ms{strategy}`, and neural learning gauges.
+
+- **Adaptive threshold** — `maybe_adapt_threshold` raises `spawn_threshold` by
+  `adaptive_step` when CpuPool P95 exceeds `cpu_p95_budget_ms ×
+  adaptive_p95_threshold_factor`, shifting pressure away from the blocking pool
+  automatically.
+
+### Added
+
+- `deny.toml` — `cargo-deny` policy: MIT/Apache-2.0/ISC/BSD-2-Clause/BSD-3-Clause/
+  Unicode-DFS-2016 license allow-list; vulnerability policy `deny`; unmaintained
+  crates policy `warn`.
+- Windows CI job (`test-windows`) — runs `cargo build --all-targets` and
+  `cargo test --all-targets` on `windows-latest` to catch cross-platform regressions.
+- `/// ` doc comments on all previously undocumented public items: `default_*`
+  serde helpers in `config.rs`, `RouterConfig::validate`, `ConfigReloader::new`,
+  `watch_config`, `INDEX_HTML` in `web.rs`.
+- Module-level `//!` doc comments on all integration test files.
+
+### Changed
+
+- Version bumped from `0.3.0` to `1.0.0`.
+- All test files converted to `//!` module-level doc comments (from `///` or bare
+  `//` comments) for consistency and correct rustdoc rendering.
+
 ### Changed (production-readiness pass -- 2026-03-17)
 - Replaced all `println!` and `eprintln!` calls in `src/main.rs` with structured `tracing::info!` / `tracing::warn!` / `tracing::error!` calls.
 - Added `///` doc comments to `RoutingDecision` and `PressureSnapshot` structs and all their fields in `types.rs`.

@@ -1,4 +1,7 @@
-/// Integration tests: full request lifecycle through the router.
+//! Integration tests: full request lifecycle through the router.
+//!
+//! Exercises `Router::submit`, config hot-patch, pressure tracking, and
+//! per-strategy latency reporting using the built-in `Simulator` workload.
 use helixrouter::{
     config::{RouterConfig, RouterConfigPatch},
     router::Router,

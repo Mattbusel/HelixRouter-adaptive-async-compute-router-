@@ -1,4 +1,8 @@
-/// Comprehensive tests for the metrics module.
+//! Comprehensive tests for the `metrics` module.
+//!
+//! Covers `LatencyAgg` EMA/percentile computation, `PressureTracker` scoring,
+//! `MetricsStore` accumulation, `prometheus_text` output format, and the
+//! `latency_summaries` helper.
 use std::collections::HashMap;
 use helixrouter::{
     metrics::{latency_summaries, prometheus_text, LatencyAgg, LatencySummary, MetricsStore, PressureTracker},

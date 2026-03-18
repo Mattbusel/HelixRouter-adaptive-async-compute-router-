@@ -67,6 +67,11 @@ pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
 
 // ===== UI =====
 
+/// Embedded HTML source for the dark live-routing dashboard served at `GET /`.
+///
+/// Single-file, no external dependencies. Vanilla JS SSE client polls
+/// `/api/stream/decisions` and renders a strategy donut, latency table, and
+/// pressure gauge in real time.
 pub const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>

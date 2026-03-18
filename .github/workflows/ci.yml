@@ -77,6 +77,22 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
+  # ---- Windows cross-platform test ----------------------------------------
+  test-windows:
+    name: Tests (Windows)
+    runs-on: windows-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Build (all targets)
+        run: cargo build --all-targets
+      - name: Tests
+        run: cargo test --all-targets
+
   # ---- benchmark smoke test -----------------------------------------------
   bench-smoke:
     name: Benchmark Smoke Test
