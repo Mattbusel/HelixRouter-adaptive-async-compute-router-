@@ -13,7 +13,12 @@ use helixrouter::autoscaler::{Autoscaler, AutoscalerConfig, LoadObservation, Sca
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn obs(timestamp_secs: u64, total_jobs: u64, pressure_score: f64, drop_rate: f64) -> LoadObservation {
+fn obs(
+    timestamp_secs: u64,
+    total_jobs: u64,
+    pressure_score: f64,
+    drop_rate: f64,
+) -> LoadObservation {
     LoadObservation {
         timestamp_secs,
         total_jobs,
@@ -67,7 +72,10 @@ fn predict_rate_never_negative() {
         a.observe(obs(i, 1000 - i * 50, 0.0, 0.0));
     }
     let rate = a.predict_rate();
-    assert!(rate >= 0.0, "predicted rate must never be negative, got {rate}");
+    assert!(
+        rate >= 0.0,
+        "predicted rate must never be negative, got {rate}"
+    );
 }
 
 #[test]
@@ -87,7 +95,10 @@ fn predict_rate_two_observations_positive_slope() {
     a.observe(obs(0, 0, 0.5, 0.0));
     a.observe(obs(1, 100, 0.5, 0.0)); // 100 jobs/sec
     let rate = a.predict_rate();
-    assert!(rate > 0.0, "should predict positive rate from two points, got {rate}");
+    assert!(
+        rate > 0.0,
+        "should predict positive rate from two points, got {rate}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +184,10 @@ fn recommend_idempotent_same_observations() {
     let rec1 = a.recommend(4, 128).expect("first call");
     let rec2 = a.recommend(4, 128).expect("second call");
     // Same observation set → same direction.
-    assert_eq!(rec1.direction, rec2.direction, "recommend is not deterministic");
+    assert_eq!(
+        rec1.direction, rec2.direction,
+        "recommend is not deterministic"
+    );
 }
 
 #[test]
@@ -184,7 +198,10 @@ fn recommend_predicted_rate_is_non_negative() {
     });
     feed_ramp(&mut a, 10, 10, 0.5);
     let rec = a.recommend(4, 128).expect("must have recommendation");
-    assert!(rec.predicted_rate >= 0.0, "predicted_rate must not be negative");
+    assert!(
+        rec.predicted_rate >= 0.0,
+        "predicted_rate must not be negative"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -201,11 +218,7 @@ fn scale_up_parallelism_increments_by_one() {
         a.observe(obs(i, i * 5, 0.90, 0.0));
     }
     let rec = a.recommend(4, 128).expect("must have recommendation");
-    assert_eq!(
-        rec.recommended_parallelism,
-        5,
-        "expected current + 1 = 5"
-    );
+    assert_eq!(rec.recommended_parallelism, 5, "expected current + 1 = 5");
 }
 
 #[test]
@@ -218,11 +231,7 @@ fn scale_down_parallelism_decrements_by_one() {
         a.observe(obs(i, i, 0.05, 0.0));
     }
     let rec = a.recommend(4, 10_000).expect("must have recommendation");
-    assert_eq!(
-        rec.recommended_parallelism,
-        3,
-        "expected current - 1 = 3"
-    );
+    assert_eq!(rec.recommended_parallelism, 3, "expected current - 1 = 3");
 }
 
 #[test]
@@ -235,7 +244,9 @@ fn scale_up_queue_cap_increases_by_25_percent() {
         a.observe(obs(i, i * 5, 0.90, 0.0));
     }
     let current_cap = 100;
-    let rec = a.recommend(4, current_cap).expect("must have recommendation");
+    let rec = a
+        .recommend(4, current_cap)
+        .expect("must have recommendation");
     // 100 * 1.25 = 125
     assert_eq!(rec.recommended_queue_cap, 125);
 }
@@ -250,7 +261,9 @@ fn scale_down_queue_cap_decreases_by_20_percent() {
         a.observe(obs(i, i, 0.05, 0.0));
     }
     let current_cap = 1000;
-    let rec = a.recommend(4, current_cap).expect("must have recommendation");
+    let rec = a
+        .recommend(4, current_cap)
+        .expect("must have recommendation");
     // 1000 * 0.80 = 800
     assert_eq!(rec.recommended_queue_cap, 800);
 }
@@ -298,7 +311,10 @@ fn config_min_one_observation_allows_immediate_recommendation() {
         ..Default::default()
     });
     a.observe(obs(0, 0, 0.5, 0.0));
-    assert!(a.recommend(4, 128).is_some(), "should recommend with 1 observation");
+    assert!(
+        a.recommend(4, 128).is_some(),
+        "should recommend with 1 observation"
+    );
 }
 
 #[test]
@@ -533,7 +549,9 @@ fn scale_down_direction_means_parallelism_decreases_or_stays_same() {
         a.observe(obs(i, i, 0.01, 0.0)); // minimal load
     }
     let current = 8;
-    let rec = a.recommend(current, 50_000).expect("must have recommendation");
+    let rec = a
+        .recommend(current, 50_000)
+        .expect("must have recommendation");
     if rec.direction == ScaleDirection::Down {
         assert!(
             rec.recommended_parallelism <= current,

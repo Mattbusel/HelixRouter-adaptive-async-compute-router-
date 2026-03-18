@@ -3,11 +3,14 @@
 //! Covers `LatencyAgg` EMA/percentile computation, `PressureTracker` scoring,
 //! `MetricsStore` accumulation, `prometheus_text` output format, and the
 //! `latency_summaries` helper.
-use std::collections::HashMap;
 use helixrouter::{
-    metrics::{latency_summaries, prometheus_text, LatencyAgg, LatencySummary, MetricsStore, PressureTracker},
+    metrics::{
+        latency_summaries, prometheus_text, LatencyAgg, LatencySummary, MetricsStore,
+        PressureTracker,
+    },
     types::Strategy,
 };
+use std::collections::HashMap;
 
 // ===== LatencyAgg =====
 
@@ -177,7 +180,10 @@ fn test_latency_summaries_count_matches() {
     store.record_latency(Strategy::Inline, 10);
     store.record_latency(Strategy::Inline, 20);
     let sums = latency_summaries(&store);
-    let inline = sums.iter().find(|s| s.strategy == Strategy::Inline).unwrap();
+    let inline = sums
+        .iter()
+        .find(|s| s.strategy == Strategy::Inline)
+        .unwrap();
     assert_eq!(inline.count, 2);
 }
 

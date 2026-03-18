@@ -134,7 +134,10 @@ async fn stress_concurrent_patch_config() {
 
     // Config must still be valid after all concurrent patches.
     let cfg = router.config().await;
-    assert!(cfg.validate().is_ok(), "config must remain valid after concurrent patches");
+    assert!(
+        cfg.validate().is_ok(),
+        "config must remain valid after concurrent patches"
+    );
 }
 
 /// Rapid subscribe / unsubscribe on the decision broadcast channel does not block submits.

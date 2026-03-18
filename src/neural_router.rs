@@ -174,7 +174,8 @@ impl Lcg {
 
     /// Advance the LCG and return the next state value.
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0
+        self.0 = self
+            .0
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.0
@@ -251,9 +252,13 @@ impl NeuralRouter {
     ///
     /// Allows the normalization range to be derived from `NeuralRouterConfig`
     /// (`max_compute_cost` / `max_latency_budget_ms`) rather than hard-coded constants.
-    fn feature_vector_normalized(job: &Job, pressure: f64, max_cost: f64, max_budget: f64) -> [f64; N_FEATURES] {
-        let compute_cost_norm =
-            (job.compute_cost.min(max_cost as u64) as f64) / max_cost;
+    fn feature_vector_normalized(
+        job: &Job,
+        pressure: f64,
+        max_cost: f64,
+        max_budget: f64,
+    ) -> [f64; N_FEATURES] {
+        let compute_cost_norm = (job.compute_cost.min(max_cost as u64) as f64) / max_cost;
 
         let (is_hashmix, is_primecount, is_montecarlo) = match job.kind {
             JobKind::HashMix => (1.0_f64, 0.0_f64, 0.0_f64),
@@ -263,8 +268,7 @@ impl NeuralRouter {
 
         let scaling_potential = job.scaling_potential as f64;
 
-        let budget_norm =
-            (job.latency_budget_ms.min(max_budget as u64) as f64) / max_budget;
+        let budget_norm = (job.latency_budget_ms.min(max_budget as u64) as f64) / max_budget;
 
         let pressure_clamped = pressure.clamp(0.0, 1.0);
 
@@ -291,7 +295,12 @@ impl NeuralRouter {
     /// # Panics
     /// This function never panics.
     pub fn score_all(&self, job: &Job, pressure: f64) -> [f64; N_STRATEGIES] {
-        let features = Self::feature_vector_normalized(job, pressure, self.config.max_compute_cost, self.config.max_latency_budget_ms);
+        let features = Self::feature_vector_normalized(
+            job,
+            pressure,
+            self.config.max_compute_cost,
+            self.config.max_latency_budget_ms,
+        );
         let mut scores = [0.0_f64; N_STRATEGIES];
         for (score, row) in scores.iter_mut().zip(self.weights.iter()) {
             *score = dot7(row, &features);
@@ -341,9 +350,11 @@ impl NeuralRouter {
             let pool_size: usize = if can_drop { N_STRATEGIES } else { IDX_DROP };
             // Select uniformly from the eligible pool.
             let pick_unit = lcg_unit_from_u64(
-                job.id
-                    .wrapping_mul(0x517C_C1B7_2722_0A95)
-                    .wrapping_add(self.sample_count.wrapping_add(1).wrapping_mul(0xBF58_476D_1CE4_E5B9)),
+                job.id.wrapping_mul(0x517C_C1B7_2722_0A95).wrapping_add(
+                    self.sample_count
+                        .wrapping_add(1)
+                        .wrapping_mul(0xBF58_476D_1CE4_E5B9),
+                ),
             );
             let idx = (pick_unit * pool_size as f64) as usize;
             let idx = idx.min(pool_size.saturating_sub(1));
@@ -414,12 +425,7 @@ impl NeuralRouter {
     /// # Panics
     ///
     /// This function never panics.
-    pub fn record_outcome(
-        &mut self,
-        features_job: &Job,
-        pressure: f64,
-        outcome: StrategyOutcome,
-    ) {
+    pub fn record_outcome(&mut self, features_job: &Job, pressure: f64, outcome: StrategyOutcome) {
         let reward = if outcome.dropped {
             REWARD_DROPPED
         } else if outcome.latency_ms <= outcome.budget_ms {
@@ -434,8 +440,8 @@ impl NeuralRouter {
         // Epsilon decay: every 100 samples reduce exploration rate by the
         // configured fraction, floored at 0.01 so some exploration is retained.
         if self.config.epsilon_decay > 0.0 && self.sample_count % 100 == 0 {
-            self.config.epsilon = (self.config.epsilon * (1.0 - self.config.epsilon_decay))
-                .max(0.01);
+            self.config.epsilon =
+                (self.config.epsilon * (1.0 - self.config.epsilon_decay)).max(0.01);
         }
 
         // Honour the warm-up period: skip weight updates until we have seen
@@ -444,7 +450,12 @@ impl NeuralRouter {
             return;
         }
 
-        let features = Self::feature_vector_normalized(features_job, pressure, self.config.max_compute_cost, self.config.max_latency_budget_ms);
+        let features = Self::feature_vector_normalized(
+            features_job,
+            pressure,
+            self.config.max_compute_cost,
+            self.config.max_latency_budget_ms,
+        );
         let s_idx = strategy_index(outcome.strategy);
 
         for (w, f) in self.weights[s_idx].iter_mut().zip(features.iter()) {
@@ -565,16 +576,16 @@ impl NeuralRouter {
     /// This function never panics.
     pub fn warm_start_from_heuristics(&mut self) {
         // Inline: prefer low cost and generous budget; penalize under pressure.
-        self.weights[IDX_INLINE]  = [-2.0,  0.5,  0.0,  0.0,  0.0,  0.5, -1.0];
+        self.weights[IDX_INLINE] = [-2.0, 0.5, 0.0, 0.0, 0.0, 0.5, -1.0];
         // Spawn: mid-range cost suits Spawn.
-        self.weights[IDX_SPAWN]   = [ 0.5,  0.3,  0.3,  0.0,  0.0,  0.3, -0.5];
+        self.weights[IDX_SPAWN] = [0.5, 0.3, 0.3, 0.0, 0.0, 0.3, -0.5];
         // CpuPool: high cost, low scaling potential.
-        self.weights[IDX_CPUPOOL] = [ 1.5,  0.0,  0.5,  0.5, -1.0,  0.0, -0.5];
+        self.weights[IDX_CPUPOOL] = [1.5, 0.0, 0.5, 0.5, -1.0, 0.0, -0.5];
         // Batch: high cost AND high scaling potential (moderate weight to avoid over-routing).
         // Using 0.8 not 2.0 so low-cost high-scaling jobs still prefer Inline/Spawn.
-        self.weights[IDX_BATCH]   = [ 1.0,  0.0,  0.0,  0.3,  0.8,  0.0,  0.0];
+        self.weights[IDX_BATCH] = [1.0, 0.0, 0.0, 0.3, 0.8, 0.0, 0.0];
         // Drop: only under extreme pressure; strongly penalized otherwise.
-        self.weights[IDX_DROP]    = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0,  2.0];
+        self.weights[IDX_DROP] = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 2.0];
 
         // Advance sample_count past the warm-up gate so the router is consulted
         // from the first real job rather than after min_samples_before_learning.
@@ -645,7 +656,12 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn make_job(kind: JobKind, compute_cost: u64, scaling_potential: f32, latency_budget_ms: u64) -> Job {
+    fn make_job(
+        kind: JobKind,
+        compute_cost: u64,
+        scaling_potential: f32,
+        latency_budget_ms: u64,
+    ) -> Job {
         Job {
             id: 1,
             kind,
@@ -763,7 +779,11 @@ mod tests {
     fn feature_vector_cost_norm_clamped_above_max() {
         let job = make_job(JobKind::HashMix, 2_000_000, 0.0, 0);
         let fv = NeuralRouter::feature_vector(&job, 0.0);
-        assert!((fv[0] - 1.0).abs() < 1e-12, "should clamp to 1.0, got {}", fv[0]);
+        assert!(
+            (fv[0] - 1.0).abs() < 1e-12,
+            "should clamp to 1.0, got {}",
+            fv[0]
+        );
     }
 
     #[test]
@@ -923,7 +943,11 @@ mod tests {
 
         let job = make_job(JobKind::HashMix, 100, 0.5, 500);
         let s = router.choose(&job, 1.0);
-        assert_eq!(s, Strategy::Drop, "expected Drop at high pressure with high Drop weight");
+        assert_eq!(
+            s,
+            Strategy::Drop,
+            "expected Drop at high pressure with high Drop weight"
+        );
     }
 
     #[test]
@@ -973,7 +997,11 @@ mod tests {
         }
 
         let chosen = router.choose(&job, 0.3);
-        assert_eq!(chosen, Strategy::CpuPool, "repeated positive outcomes should bias toward CpuPool");
+        assert_eq!(
+            chosen,
+            Strategy::CpuPool,
+            "repeated positive outcomes should bias toward CpuPool"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -997,7 +1025,10 @@ mod tests {
         let job = make_job(JobKind::HashMix, 0, 0.0, 1000);
         let before = router.total_reward;
         router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Inline, 1000));
-        assert!(router.total_reward > before, "total_reward should increase for within-budget outcome");
+        assert!(
+            router.total_reward > before,
+            "total_reward should increase for within-budget outcome"
+        );
     }
 
     #[test]
@@ -1038,7 +1069,10 @@ mod tests {
         router.record_outcome(&job, 0.5, within_budget_outcome(Strategy::Spawn, 500));
         let weights_after = router.weights[IDX_SPAWN];
 
-        assert_ne!(weights_before, weights_after, "Spawn weights should change after outcome");
+        assert_ne!(
+            weights_before, weights_after,
+            "Spawn weights should change after outcome"
+        );
     }
 
     #[test]
@@ -1056,8 +1090,7 @@ mod tests {
 
         for i in [IDX_SPAWN, IDX_CPUPOOL, IDX_BATCH, IDX_DROP] {
             assert_eq!(
-                router.weights[i],
-                [0.0; N_FEATURES],
+                router.weights[i], [0.0; N_FEATURES],
                 "strategy index {i} weights should be unchanged"
             );
         }
@@ -1079,7 +1112,10 @@ mod tests {
         }
         // Weights must still be exactly zero.
         for row in router.weights.iter() {
-            assert_eq!(*row, [0.0; N_FEATURES], "weights changed before min_samples threshold");
+            assert_eq!(
+                *row, [0.0; N_FEATURES],
+                "weights changed before min_samples threshold"
+            );
         }
     }
 
@@ -1132,7 +1168,10 @@ mod tests {
         for _ in 0..5 {
             router.record_outcome(&job, 0.0, dropped_outcome(Strategy::Drop, 1000));
         }
-        assert!(router.avg_reward() < 0.0, "avg_reward should be negative after drops");
+        assert!(
+            router.avg_reward() < 0.0,
+            "avg_reward should be negative after drops"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1290,7 +1329,10 @@ mod tests {
         assert_eq!(restored.sample_count(), router.sample_count());
         for (a, b) in restored.weights().iter().zip(router.weights().iter()) {
             for (x, y) in a.iter().zip(b.iter()) {
-                assert!((x - y).abs() < 1e-12, "weight mismatch after JSON round-trip");
+                assert!(
+                    (x - y).abs() < 1e-12,
+                    "weight mismatch after JSON round-trip"
+                );
             }
         }
     }
@@ -1342,7 +1384,10 @@ mod tests {
             min_samples_before_learning: 5,
             ..Default::default()
         });
-        assert!(!router.is_warmed_up(), "should not be warmed up with zero samples");
+        assert!(
+            !router.is_warmed_up(),
+            "should not be warmed up with zero samples"
+        );
     }
 
     #[test]
@@ -1355,7 +1400,10 @@ mod tests {
         for _ in 0..4 {
             router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Inline, 500));
         }
-        assert!(!router.is_warmed_up(), "4 samples < threshold 5, should not be warmed up");
+        assert!(
+            !router.is_warmed_up(),
+            "4 samples < threshold 5, should not be warmed up"
+        );
     }
 
     #[test]
@@ -1368,7 +1416,10 @@ mod tests {
         for _ in 0..5 {
             router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Inline, 500));
         }
-        assert!(router.is_warmed_up(), "5 samples == threshold 5, should be warmed up");
+        assert!(
+            router.is_warmed_up(),
+            "5 samples == threshold 5, should be warmed up"
+        );
     }
 
     #[test]
@@ -1381,7 +1432,10 @@ mod tests {
         for _ in 0..10 {
             router.record_outcome(&job, 0.0, within_budget_outcome(Strategy::Spawn, 500));
         }
-        assert!(router.is_warmed_up(), "10 samples > threshold 3, must be warmed up");
+        assert!(
+            router.is_warmed_up(),
+            "10 samples > threshold 3, must be warmed up"
+        );
     }
 
     #[test]
@@ -1396,7 +1450,10 @@ mod tests {
             ..Default::default()
         });
         router.restore(snap);
-        assert!(!router.is_warmed_up(), "restored zero samples: should not be warmed up");
+        assert!(
+            !router.is_warmed_up(),
+            "restored zero samples: should not be warmed up"
+        );
     }
 
     #[test]
@@ -1411,17 +1468,32 @@ mod tests {
             ..Default::default()
         });
         router.restore(snap);
-        assert!(router.is_warmed_up(), "restored 100 samples > threshold 10: should be warmed up");
+        assert!(
+            router.is_warmed_up(),
+            "restored 100 samples > threshold 10: should be warmed up"
+        );
     }
 
     // ── Epsilon decay ──────────────────────────────────────────────────────
 
     fn make_outcome(strategy: Strategy) -> StrategyOutcome {
-        StrategyOutcome { strategy, latency_ms: 10, budget_ms: 100, dropped: false }
+        StrategyOutcome {
+            strategy,
+            latency_ms: 10,
+            budget_ms: 100,
+            dropped: false,
+        }
     }
 
     fn make_job_for_decay() -> Job {
-        Job { id: 0, kind: JobKind::HashMix, inputs: vec![], compute_cost: 100, scaling_potential: 0.5, latency_budget_ms: 200 }
+        Job {
+            id: 0,
+            kind: JobKind::HashMix,
+            inputs: vec![],
+            compute_cost: 100,
+            scaling_potential: 0.5,
+            latency_budget_ms: 200,
+        }
     }
 
     #[test]
@@ -1461,7 +1533,10 @@ mod tests {
         for _ in 0..100 {
             router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
         }
-        assert!(router.config.epsilon >= 0.01, "epsilon must not go below 0.01 floor");
+        assert!(
+            router.config.epsilon >= 0.01,
+            "epsilon must not go below 0.01 floor"
+        );
     }
 
     #[test]
@@ -1476,7 +1551,10 @@ mod tests {
         for _ in 0..200 {
             router.record_outcome(&job, 0.0, make_outcome(Strategy::Inline));
         }
-        assert!((router.config.epsilon - 0.50).abs() < 1e-10, "epsilon should not change with decay=0");
+        assert!(
+            (router.config.epsilon - 0.50).abs() < 1e-10,
+            "epsilon should not change with decay=0"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1486,14 +1564,23 @@ mod tests {
     #[test]
     fn test_warm_start_sets_is_warmed_up() {
         let mut router = NeuralRouter::new(NeuralRouterConfig::default());
-        assert!(!router.is_warmed_up(), "should not be warmed up before warm_start");
+        assert!(
+            !router.is_warmed_up(),
+            "should not be warmed up before warm_start"
+        );
         router.warm_start_from_heuristics();
-        assert!(router.is_warmed_up(), "should be warmed up after warm_start");
+        assert!(
+            router.is_warmed_up(),
+            "should be warmed up after warm_start"
+        );
     }
 
     #[test]
     fn test_warm_start_sample_count_at_least_min_samples() {
-        let cfg = NeuralRouterConfig { min_samples_before_learning: 50, ..Default::default() };
+        let cfg = NeuralRouterConfig {
+            min_samples_before_learning: 50,
+            ..Default::default()
+        };
         let mut router = NeuralRouter::new(cfg.clone());
         router.warm_start_from_heuristics();
         assert!(
@@ -1514,7 +1601,11 @@ mod tests {
         // Low cost, HashMix, no pressure → Inline should score highest
         let job = make_job(JobKind::HashMix, 500, 0.3, 50);
         let choice = router.choose(&job, 0.0);
-        assert_eq!(choice, Strategy::Inline, "warm-started router should prefer Inline for low-cost job");
+        assert_eq!(
+            choice,
+            Strategy::Inline,
+            "warm-started router should prefer Inline for low-cost job"
+        );
     }
 
     #[test]
@@ -1528,12 +1619,19 @@ mod tests {
         // High scaling potential → Batch should score highest
         let job = make_job(JobKind::MonteCarloRisk, 200_000, 0.95, 50);
         let choice = router.choose(&job, 0.0);
-        assert_eq!(choice, Strategy::Batch, "warm-started router should prefer Batch for high scaling_potential");
+        assert_eq!(
+            choice,
+            Strategy::Batch,
+            "warm-started router should prefer Batch for high scaling_potential"
+        );
     }
 
     #[test]
     fn test_warm_start_does_not_lower_existing_sample_count() {
-        let cfg = NeuralRouterConfig { min_samples_before_learning: 10, ..Default::default() };
+        let cfg = NeuralRouterConfig {
+            min_samples_before_learning: 10,
+            ..Default::default()
+        };
         let mut router = NeuralRouter::new(cfg);
         // Manually advance past warm-up
         let job = make_job(JobKind::HashMix, 100, 0.5, 50);
@@ -1542,7 +1640,11 @@ mod tests {
         }
         let before = router.sample_count();
         router.warm_start_from_heuristics();
-        assert_eq!(router.sample_count(), before, "warm_start should not lower an already-high sample_count");
+        assert_eq!(
+            router.sample_count(),
+            before,
+            "warm_start should not lower an already-high sample_count"
+        );
     }
 
     #[test]

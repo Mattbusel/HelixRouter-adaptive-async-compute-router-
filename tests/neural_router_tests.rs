@@ -94,7 +94,9 @@ fn router_avoids_negatively_reinforced_strategy() {
     });
     // Zero all weights first for a clean baseline.
     let weights: *mut [[f64; 7]; 5] = &mut *router.weights_mut();
-    unsafe { (*weights) = [[0.0_f64; 7]; 5]; }
+    unsafe {
+        (*weights) = [[0.0_f64; 7]; 5];
+    }
 
     let job = make_job(2, JobKind::PrimeCount, 200_000, 0.3, 500);
 
@@ -283,7 +285,10 @@ fn training_on_one_job_kind_does_not_change_scores_for_another_kind() {
         chosen,
         Strategy::Inline | Strategy::Spawn | Strategy::CpuPool | Strategy::Batch
     );
-    assert!(valid, "router must choose a valid non-Drop strategy: {chosen:?}");
+    assert!(
+        valid,
+        "router must choose a valid non-Drop strategy: {chosen:?}"
+    );
 
     // Confirm we measured both — just suppressing unused var warning.
     let _ = (scores_monte_before, scores_monte_after);
@@ -309,7 +314,11 @@ fn per_job_kind_routing_diversifies_over_time() {
     let valid = |s: &Strategy| {
         matches!(
             s,
-            Strategy::Inline | Strategy::Spawn | Strategy::CpuPool | Strategy::Batch | Strategy::Drop
+            Strategy::Inline
+                | Strategy::Spawn
+                | Strategy::CpuPool
+                | Strategy::Batch
+                | Strategy::Drop
         )
     };
     assert!(valid(&s_cheap));
@@ -438,7 +447,10 @@ fn cold_start_is_not_warmed_up_below_min_samples() {
         min_samples_before_learning: threshold,
         ..Default::default()
     });
-    assert!(!router.is_warmed_up(), "should not be warmed up at construction");
+    assert!(
+        !router.is_warmed_up(),
+        "should not be warmed up at construction"
+    );
 
     let job = make_job(1, JobKind::HashMix, 1000, 0.5, 500);
     for _ in 0..(threshold - 1) {
@@ -463,7 +475,10 @@ fn cold_start_becomes_warm_after_min_samples() {
     for _ in 0..threshold {
         router.record_outcome(&job, 0.3, within_budget(Strategy::Spawn, 1000));
     }
-    assert!(router.is_warmed_up(), "should be warmed up after min_samples outcomes");
+    assert!(
+        router.is_warmed_up(),
+        "should be warmed up after min_samples outcomes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +550,11 @@ fn drift_detection_weights_adapt_after_reversal() {
     let changed = weights_after_phase1
         .iter()
         .zip(weights_after_phase2.iter())
-        .any(|(row1, row2)| row1.iter().zip(row2.iter()).any(|(a, b)| (a - b).abs() > 1e-12));
+        .any(|(row1, row2)| {
+            row1.iter()
+                .zip(row2.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-12)
+        });
     assert!(changed, "weights must adapt after quality reversal");
 }
 
@@ -567,7 +586,13 @@ fn weights_all_finite_after_many_mixed_outcomes() {
         make_job(3, JobKind::MonteCarloRisk, 900_000, 0.9, 5000),
     ];
     let pressures = [0.1f64, 0.5, 0.9];
-    let strategies = [Strategy::Inline, Strategy::Spawn, Strategy::CpuPool, Strategy::Batch, Strategy::Drop];
+    let strategies = [
+        Strategy::Inline,
+        Strategy::Spawn,
+        Strategy::CpuPool,
+        Strategy::Batch,
+        Strategy::Drop,
+    ];
 
     for i in 0..300usize {
         let job = &jobs[i % 3];

@@ -52,7 +52,14 @@ fn test_output_variants_distinct() {
 
 #[test]
 fn test_job_clone() {
-    let j = Job { id: 7, kind: JobKind::HashMix, inputs: vec![1, 2], compute_cost: 500, scaling_potential: 0.3, latency_budget_ms: 20 };
+    let j = Job {
+        id: 7,
+        kind: JobKind::HashMix,
+        inputs: vec![1, 2],
+        compute_cost: 500,
+        scaling_potential: 0.3,
+        latency_budget_ms: 20,
+    };
     let j2 = j.clone();
     assert_eq!(j.id, j2.id);
     assert_eq!(j.inputs, j2.inputs);

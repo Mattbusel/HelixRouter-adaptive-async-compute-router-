@@ -44,7 +44,11 @@ async fn test_full_sim_completes_all_inline_jobs() {
 #[tokio::test]
 async fn test_full_sim_via_simulator() {
     let router = Router::new(RouterConfig::default());
-    let jobs = Simulator::new(SimulatorConfig { total_jobs: 50, ..Default::default() }).all_jobs();
+    let jobs = Simulator::new(SimulatorConfig {
+        total_jobs: 50,
+        ..Default::default()
+    })
+    .all_jobs();
 
     let mut handles = Vec::new();
     for job in jobs {
@@ -56,13 +60,20 @@ async fn test_full_sim_via_simulator() {
     }
 
     let stats = router.stats_snapshot().await;
-    assert!(stats.completed + stats.dropped == 50, "all 50 jobs accounted for");
+    assert!(
+        stats.completed + stats.dropped == 50,
+        "all 50 jobs accounted for"
+    );
 }
 
 #[tokio::test]
 async fn test_routed_by_strategy_sums_to_total() {
     let router = Router::new(RouterConfig::default());
-    let jobs = Simulator::new(SimulatorConfig { total_jobs: 30, ..Default::default() }).all_jobs();
+    let jobs = Simulator::new(SimulatorConfig {
+        total_jobs: 30,
+        ..Default::default()
+    })
+    .all_jobs();
     for job in jobs {
         let _ = router.submit(job).await;
     }
@@ -111,7 +122,8 @@ async fn test_backpressure_causes_drops() {
 
     let r2 = router.clone();
     let blocker = tokio::spawn(async move {
-        r2.submit(make_job(0, JobKind::PrimeCount, 250_000, 0.1)).await
+        r2.submit(make_job(0, JobKind::PrimeCount, 250_000, 0.1))
+            .await
     });
     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
@@ -217,7 +229,10 @@ async fn test_100_concurrent_jobs_all_resolve() {
 async fn test_adaptive_threshold_exposed_in_stats() {
     let router = Router::new(RouterConfig::default());
     let stats = router.stats_snapshot().await;
-    assert_eq!(stats.adaptive_spawn_threshold, RouterConfig::default().spawn_threshold);
+    assert_eq!(
+        stats.adaptive_spawn_threshold,
+        RouterConfig::default().spawn_threshold
+    );
 }
 
 // ===== Decision broadcast =====
@@ -242,7 +257,11 @@ async fn test_decisions_broadcast_on_every_submit() {
 
 #[test]
 fn test_simulator_all_jobs_valid() {
-    let jobs = Simulator::new(SimulatorConfig { total_jobs: 100, ..Default::default() }).all_jobs();
+    let jobs = Simulator::new(SimulatorConfig {
+        total_jobs: 100,
+        ..Default::default()
+    })
+    .all_jobs();
     assert_eq!(jobs.len(), 100);
     for j in &jobs {
         assert!(j.scaling_potential >= 0.0 && j.scaling_potential <= 1.0);
@@ -310,13 +329,20 @@ async fn test_autoscale_tick_does_not_panic_without_observations() {
 #[tokio::test]
 async fn test_autoscale_tick_after_load_keeps_config_valid() {
     let router = Router::new(RouterConfig::default());
-    let jobs = Simulator::new(SimulatorConfig { total_jobs: 30, ..Default::default() }).all_jobs();
+    let jobs = Simulator::new(SimulatorConfig {
+        total_jobs: 30,
+        ..Default::default()
+    })
+    .all_jobs();
     for job in jobs {
         let _ = router.submit(job).await;
     }
     router.autoscale_tick().await;
     let cfg = router.config().await;
-    assert!(cfg.validate().is_ok(), "config must remain valid after autoscale tick");
+    assert!(
+        cfg.validate().is_ok(),
+        "config must remain valid after autoscale tick"
+    );
 }
 
 // ===== patch_config error paths =====
@@ -324,7 +350,10 @@ async fn test_autoscale_tick_after_load_keeps_config_valid() {
 #[tokio::test]
 async fn test_patch_config_invalid_ema_alpha_rejected() {
     let router = Router::new(RouterConfig::default());
-    let patch = RouterConfigPatch { ema_alpha: Some(0.0), ..Default::default() };
+    let patch = RouterConfigPatch {
+        ema_alpha: Some(0.0),
+        ..Default::default()
+    };
     assert!(router.patch_config(patch).await.is_err());
     // Config must be unchanged
     assert!((router.config().await.ema_alpha - 0.15).abs() < 1e-9);
@@ -344,7 +373,10 @@ async fn test_patch_config_inline_ge_spawn_rejected() {
 #[tokio::test]
 async fn test_patch_config_valid_update_applied() {
     let router = Router::new(RouterConfig::default());
-    let patch = RouterConfigPatch { batch_max_size: Some(16), ..Default::default() };
+    let patch = RouterConfigPatch {
+        batch_max_size: Some(16),
+        ..Default::default()
+    };
     let merged = router.patch_config(patch).await.expect("valid patch");
     assert_eq!(merged.batch_max_size, 16);
     assert_eq!(router.config().await.batch_max_size, 16);
@@ -404,7 +436,11 @@ async fn test_max_cost_job_is_accounted_for() {
 async fn test_neural_snapshot_weights_dimensions() {
     let router = Router::new(RouterConfig::default());
     let snap = router.neural_snapshot().await;
-    assert_eq!(snap.weights.len(), 5, "weight matrix outer dim should be 5 strategies");
+    assert_eq!(
+        snap.weights.len(),
+        5,
+        "weight matrix outer dim should be 5 strategies"
+    );
     for row in &snap.weights {
         assert_eq!(row.len(), 7, "weight matrix inner dim should be 7 features");
     }

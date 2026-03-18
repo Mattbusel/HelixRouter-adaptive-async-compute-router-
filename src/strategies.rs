@@ -23,8 +23,8 @@ use crate::types::{Job, JobKind, Output};
 /// effects — safe to call from `spawn_blocking`.
 pub fn execute_job(job: &Job) -> Vec<Output> {
     match job.kind {
-        JobKind::HashMix       => vec![hashmix(job)],
-        JobKind::PrimeCount    => vec![primecount(job)],
+        JobKind::HashMix => vec![hashmix(job)],
+        JobKind::PrimeCount => vec![primecount(job)],
         JobKind::MonteCarloRisk => vec![montecarlo_risk(job)],
     }
 }
@@ -67,7 +67,10 @@ pub fn primecount(job: &Job) -> Output {
     while p * p <= n {
         if is_prime[p] {
             let mut k = p * p;
-            while k <= n { is_prime[k] = false; k += p; }
+            while k <= n {
+                is_prime[k] = false;
+                k += p;
+            }
         }
         p += 1;
     }
@@ -108,26 +111,42 @@ mod tests {
     use crate::types::JobKind;
 
     fn job(kind: JobKind, cost: u64) -> Job {
-        Job { id: 1, kind, inputs: vec![100, 200, 300], compute_cost: cost, scaling_potential: 0.5, latency_budget_ms: 50 }
+        Job {
+            id: 1,
+            kind,
+            inputs: vec![100, 200, 300],
+            compute_cost: cost,
+            scaling_potential: 0.5,
+            latency_budget_ms: 50,
+        }
     }
 
     #[test]
     fn test_hashmix_returns_u64() {
         let out = execute_job(&job(JobKind::HashMix, 5000));
         assert_eq!(out.len(), 1);
-        match &out[0] { Output::U64(_) => {}, _ => panic!("expected U64") }
+        match &out[0] {
+            Output::U64(_) => {}
+            _ => panic!("expected U64"),
+        }
     }
 
     #[test]
     fn test_primecount_returns_u64() {
         let out = execute_job(&job(JobKind::PrimeCount, 10_000));
-        match &out[0] { Output::U64(n) => assert!(*n > 0), _ => panic!() }
+        match &out[0] {
+            Output::U64(n) => assert!(*n > 0),
+            _ => panic!(),
+        }
     }
 
     #[test]
     fn test_montecarlo_returns_f64() {
         let out = execute_job(&job(JobKind::MonteCarloRisk, 20_000));
-        match &out[0] { Output::F64(_) => {}, _ => panic!("expected F64") }
+        match &out[0] {
+            Output::F64(_) => {}
+            _ => panic!("expected F64"),
+        }
     }
 
     #[test]
@@ -137,7 +156,7 @@ mod tests {
         let b = execute_job(&j);
         match (&a[0], &b[0]) {
             (Output::U64(x), Output::U64(y)) => assert_eq!(x, y),
-            _ => panic!()
+            _ => panic!(),
         }
     }
 
@@ -146,19 +165,26 @@ mod tests {
         let j = job(JobKind::PrimeCount, 10_000);
         match &execute_job(&j)[0] {
             Output::U64(n) => assert_eq!(*n, 1229),
-            _ => panic!()
+            _ => panic!(),
         }
     }
 
     #[test]
     fn test_montecarlo_result_in_range() {
         let out = execute_job(&job(JobKind::MonteCarloRisk, 20_000));
-        match &out[0] { Output::F64(v) => assert!(v.is_finite()), _ => panic!() }
+        match &out[0] {
+            Output::F64(v) => assert!(v.is_finite()),
+            _ => panic!(),
+        }
     }
 
     #[test]
     fn test_execute_job_one_output() {
-        for kind in [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk] {
+        for kind in [
+            JobKind::HashMix,
+            JobKind::PrimeCount,
+            JobKind::MonteCarloRisk,
+        ] {
             let out = execute_job(&job(kind, 15_000));
             assert_eq!(out.len(), 1);
         }
@@ -174,7 +200,7 @@ mod tests {
         let b = execute_job(&j2);
         match (&a[0], &b[0]) {
             (Output::U64(x), Output::U64(y)) => assert_ne!(x, y),
-            _ => panic!()
+            _ => panic!(),
         }
     }
 
@@ -182,9 +208,12 @@ mod tests {
     fn test_primecount_larger_n_more_primes() {
         let small = job(JobKind::PrimeCount, 10_000);
         let large = job(JobKind::PrimeCount, 50_000);
-        match (execute_job(&small)[0].clone(), execute_job(&large)[0].clone()) {
+        match (
+            execute_job(&small)[0].clone(),
+            execute_job(&large)[0].clone(),
+        ) {
             (Output::U64(s), Output::U64(l)) => assert!(l > s),
-            _ => panic!()
+            _ => panic!(),
         }
     }
 
@@ -192,12 +221,13 @@ mod tests {
     fn test_montecarlo_different_ids_differ() {
         let mut j1 = job(JobKind::MonteCarloRisk, 20_000);
         let mut j2 = job(JobKind::MonteCarloRisk, 20_000);
-        j1.id = 1; j2.id = 9999;
+        j1.id = 1;
+        j2.id = 9999;
         let a = execute_job(&j1);
         let b = execute_job(&j2);
         match (&a[0], &b[0]) {
             (Output::F64(x), Output::F64(y)) => assert!((x - y).abs() > 1e-12),
-            _ => panic!()
+            _ => panic!(),
         }
     }
 }

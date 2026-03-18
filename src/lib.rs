@@ -43,7 +43,9 @@
 //! ```
 
 #[cfg(feature = "distributed")]
-compile_error!("The 'distributed' feature is not yet implemented and must not be used in production.");
+compile_error!(
+    "The 'distributed' feature is not yet implemented and must not be used in production."
+);
 
 pub mod autoscaler;
 pub mod config;

@@ -44,7 +44,12 @@ fn heavy_job(id: u64) -> Job {
 }
 
 fn obs(ts: u64, jobs: u64, pressure: f64, drop_rate: f64) -> LoadObservation {
-    LoadObservation { timestamp_secs: ts, total_jobs: jobs, pressure_score: pressure, drop_rate }
+    LoadObservation {
+        timestamp_secs: ts,
+        total_jobs: jobs,
+        pressure_score: pressure,
+        drop_rate,
+    }
 }
 
 // ── Router: drop when all workers busy ────────────────────────────────────────
@@ -75,8 +80,21 @@ async fn router_drops_jobs_when_threshold_zero_and_low_scaling() {
     // With threshold=0, any number of busy workers (including 0) is "at or above"
     // the threshold. The choose_strategy function checks cpu_busy >= threshold,
     // so with threshold=0 and cpu_busy=0 the condition is met.
-    let strategy = choose_strategy(&RouterConfig { backpressure_busy_threshold: 0, inline_threshold: 1, spawn_threshold: 2, ..RouterConfig::default() }, &job, 0);
-    assert_eq!(strategy, Strategy::Drop, "threshold=0 + low scaling must produce Drop");
+    let strategy = choose_strategy(
+        &RouterConfig {
+            backpressure_busy_threshold: 0,
+            inline_threshold: 1,
+            spawn_threshold: 2,
+            ..RouterConfig::default()
+        },
+        &job,
+        0,
+    );
+    assert_eq!(
+        strategy,
+        Strategy::Drop,
+        "threshold=0 + low scaling must produce Drop"
+    );
     let _ = router; // silence unused warning
 }
 
@@ -201,7 +219,9 @@ fn autoscaler_scales_down_at_exactly_low_water_mark() {
     for i in 0..5u64 {
         a.observe(obs(i, i, threshold - 0.001, 0.0));
     }
-    let rec = a.recommend(4, 100_000).expect("should produce recommendation");
+    let rec = a
+        .recommend(4, 100_000)
+        .expect("should produce recommendation");
     assert_eq!(
         rec.direction,
         ScaleDirection::Down,
@@ -226,7 +246,9 @@ fn autoscaler_holds_between_high_and_low_water_marks() {
     for i in 0..5u64 {
         a.observe(obs(i, i * 5, midpoint, 0.0));
     }
-    let rec = a.recommend(4, 1_000).expect("should produce recommendation");
+    let rec = a
+        .recommend(4, 1_000)
+        .expect("should produce recommendation");
     assert_eq!(
         rec.direction,
         ScaleDirection::Hold,
@@ -274,7 +296,10 @@ fn autoscaler_hysteresis_no_immediate_oscillation() {
 fn config_negative_like_ema_alpha_zero_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.ema_alpha = 0.0;
-    assert!(cfg.validate().is_err(), "ema_alpha=0.0 must fail validation");
+    assert!(
+        cfg.validate().is_err(),
+        "ema_alpha=0.0 must fail validation"
+    );
 }
 
 #[test]
@@ -288,35 +313,50 @@ fn config_ema_alpha_exactly_one_is_valid() {
 fn config_cpu_parallelism_zero_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.cpu_parallelism = 0;
-    assert!(cfg.validate().is_err(), "cpu_parallelism=0 must fail validation");
+    assert!(
+        cfg.validate().is_err(),
+        "cpu_parallelism=0 must fail validation"
+    );
 }
 
 #[test]
 fn config_inline_threshold_zero_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.inline_threshold = 0;
-    assert!(cfg.validate().is_err(), "inline_threshold=0 must fail validation");
+    assert!(
+        cfg.validate().is_err(),
+        "inline_threshold=0 must fail validation"
+    );
 }
 
 #[test]
 fn config_spawn_threshold_zero_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.spawn_threshold = 0;
-    assert!(cfg.validate().is_err(), "spawn_threshold=0 must fail validation");
+    assert!(
+        cfg.validate().is_err(),
+        "spawn_threshold=0 must fail validation"
+    );
 }
 
 #[test]
 fn config_batch_max_size_zero_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.batch_max_size = 0;
-    assert!(cfg.validate().is_err(), "batch_max_size=0 must fail validation");
+    assert!(
+        cfg.validate().is_err(),
+        "batch_max_size=0 must fail validation"
+    );
 }
 
 #[test]
 fn config_inline_equals_spawn_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.inline_threshold = cfg.spawn_threshold;
-    assert!(cfg.validate().is_err(), "inline_threshold==spawn_threshold must fail");
+    assert!(
+        cfg.validate().is_err(),
+        "inline_threshold==spawn_threshold must fail"
+    );
 }
 
 #[test]
@@ -324,7 +364,10 @@ fn config_cpu_queue_cap_less_than_parallelism_is_invalid() {
     let mut cfg = RouterConfig::default();
     cfg.cpu_queue_cap = 4;
     cfg.cpu_parallelism = 8;
-    assert!(cfg.validate().is_err(), "cpu_queue_cap < cpu_parallelism must fail");
+    assert!(
+        cfg.validate().is_err(),
+        "cpu_queue_cap < cpu_parallelism must fail"
+    );
 }
 
 /// Missing required JSON fields — serde uses default for optional tagged fields
@@ -334,7 +377,10 @@ fn config_missing_inline_threshold_fails_deserialization() {
     // inline_threshold has no #[serde(default)], so it must be present.
     let json = r#"{"spawn_threshold":60000,"cpu_queue_cap":512,"cpu_parallelism":8,"backpressure_busy_threshold":7,"batch_max_size":8,"batch_max_delay_ms":10}"#;
     let result = serde_json::from_str::<RouterConfig>(json);
-    assert!(result.is_err(), "deserialization must fail without inline_threshold");
+    assert!(
+        result.is_err(),
+        "deserialization must fail without inline_threshold"
+    );
 }
 
 /// Adaptive step of exactly 1.0 is valid (upper bound is inclusive).
@@ -363,7 +409,10 @@ async fn router_patch_config_rejects_invalid_config() {
         ..Default::default()
     };
     let result = router.patch_config(bad_patch).await;
-    assert!(result.is_err(), "patch with invalid ema_alpha=0.0 must be rejected");
+    assert!(
+        result.is_err(),
+        "patch with invalid ema_alpha=0.0 must be rejected"
+    );
 }
 
 #[tokio::test]
@@ -374,7 +423,11 @@ async fn router_patch_config_accepts_valid_patch() {
         ..Default::default()
     };
     let result = router.patch_config(patch).await;
-    assert!(result.is_ok(), "valid patch must be accepted, got {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "valid patch must be accepted, got {:?}",
+        result.err()
+    );
     let cfg = router.config().await;
     assert_eq!(cfg.batch_max_size, 16);
 }
@@ -385,7 +438,10 @@ async fn router_patch_config_accepts_valid_patch() {
 /// and the router returns a valid strategy without panicking.
 #[test]
 fn neural_router_all_zero_job_returns_valid_strategy() {
-    let router = NeuralRouter::new(NeuralRouterConfig { epsilon: 0.0, ..Default::default() });
+    let router = NeuralRouter::new(NeuralRouterConfig {
+        epsilon: 0.0,
+        ..Default::default()
+    });
     let job = Job {
         id: 0,
         kind: JobKind::HashMix,
@@ -399,7 +455,10 @@ fn neural_router_all_zero_job_returns_valid_strategy() {
         strategy,
         Strategy::Inline | Strategy::Spawn | Strategy::CpuPool | Strategy::Batch | Strategy::Drop
     );
-    assert!(valid, "all-zero job must still produce a valid strategy: {strategy:?}");
+    assert!(
+        valid,
+        "all-zero job must still produce a valid strategy: {strategy:?}"
+    );
 }
 
 /// Feature vector from an all-zero job is a valid 7-element array with
@@ -528,7 +587,11 @@ fn strategy_cpupool_selected_for_heavy_low_scaling_job() {
         latency_budget_ms: 200,
     };
     let s = choose_strategy(&cfg, &job, 0);
-    assert_eq!(s, Strategy::CpuPool, "heavy low-scaling job should route CpuPool");
+    assert_eq!(
+        s,
+        Strategy::CpuPool,
+        "heavy low-scaling job should route CpuPool"
+    );
 }
 
 /// Cost at spawn_threshold with high scaling → Batch.
@@ -544,7 +607,11 @@ fn strategy_batch_selected_for_heavy_high_scaling_job() {
         latency_budget_ms: 200,
     };
     let s = choose_strategy(&cfg, &job, 0);
-    assert_eq!(s, Strategy::Batch, "heavy high-scaling job should route Batch");
+    assert_eq!(
+        s,
+        Strategy::Batch,
+        "heavy high-scaling job should route Batch"
+    );
 }
 
 /// Drop: backpressure active, low scaling potential.
@@ -568,17 +635,55 @@ fn strategy_drop_selected_under_backpressure_low_scaling() {
 fn strategy_all_five_variants_are_reachable() {
     let cfg = RouterConfig::default();
 
-    let inline_job = Job { id: 0, kind: JobKind::HashMix, inputs: vec![1], compute_cost: cfg.inline_threshold - 1, scaling_potential: 0.0, latency_budget_ms: 20 };
-    let spawn_job = Job { id: 1, kind: JobKind::HashMix, inputs: vec![1], compute_cost: cfg.inline_threshold + 1, scaling_potential: 0.1, latency_budget_ms: 50 };
-    let pool_job = Job { id: 2, kind: JobKind::PrimeCount, inputs: vec![1], compute_cost: cfg.spawn_threshold, scaling_potential: 0.1, latency_budget_ms: 200 };
-    let batch_job = Job { id: 3, kind: JobKind::HashMix, inputs: vec![1], compute_cost: cfg.spawn_threshold, scaling_potential: 0.9, latency_budget_ms: 200 };
-    let drop_job = Job { id: 4, kind: JobKind::HashMix, inputs: vec![1], compute_cost: 100, scaling_potential: 0.0, latency_budget_ms: 20 };
+    let inline_job = Job {
+        id: 0,
+        kind: JobKind::HashMix,
+        inputs: vec![1],
+        compute_cost: cfg.inline_threshold - 1,
+        scaling_potential: 0.0,
+        latency_budget_ms: 20,
+    };
+    let spawn_job = Job {
+        id: 1,
+        kind: JobKind::HashMix,
+        inputs: vec![1],
+        compute_cost: cfg.inline_threshold + 1,
+        scaling_potential: 0.1,
+        latency_budget_ms: 50,
+    };
+    let pool_job = Job {
+        id: 2,
+        kind: JobKind::PrimeCount,
+        inputs: vec![1],
+        compute_cost: cfg.spawn_threshold,
+        scaling_potential: 0.1,
+        latency_budget_ms: 200,
+    };
+    let batch_job = Job {
+        id: 3,
+        kind: JobKind::HashMix,
+        inputs: vec![1],
+        compute_cost: cfg.spawn_threshold,
+        scaling_potential: 0.9,
+        latency_budget_ms: 200,
+    };
+    let drop_job = Job {
+        id: 4,
+        kind: JobKind::HashMix,
+        inputs: vec![1],
+        compute_cost: 100,
+        scaling_potential: 0.0,
+        latency_budget_ms: 20,
+    };
 
     assert_eq!(choose_strategy(&cfg, &inline_job, 0), Strategy::Inline);
     assert_eq!(choose_strategy(&cfg, &spawn_job, 0), Strategy::Spawn);
     assert_eq!(choose_strategy(&cfg, &pool_job, 0), Strategy::CpuPool);
     assert_eq!(choose_strategy(&cfg, &batch_job, 0), Strategy::Batch);
-    assert_eq!(choose_strategy(&cfg, &drop_job, cfg.backpressure_busy_threshold), Strategy::Drop);
+    assert_eq!(
+        choose_strategy(&cfg, &drop_job, cfg.backpressure_busy_threshold),
+        Strategy::Drop
+    );
 }
 
 // ── Web: StatsResponse JSON structure ─────────────────────────────────────────
@@ -598,10 +703,10 @@ async fn web_neural_snapshot_has_all_required_fields() {
     let json = serde_json::to_string(&snap).expect("serialize NeuralSnapshot");
 
     assert!(json.contains("\"sample_count\""), "missing sample_count");
-    assert!(json.contains("\"avg_reward\""),   "missing avg_reward");
+    assert!(json.contains("\"avg_reward\""), "missing avg_reward");
     assert!(json.contains("\"is_warmed_up\""), "missing is_warmed_up");
-    assert!(json.contains("\"weights\""),      "missing weights");
-    assert!(json.contains("\"epsilon\""),      "missing epsilon");
+    assert!(json.contains("\"weights\""), "missing weights");
+    assert!(json.contains("\"epsilon\""), "missing epsilon");
 }
 
 /// stats_snapshot from a fresh router has sensible zero-state values.
@@ -649,8 +754,14 @@ async fn web_config_patch_valid_changes_only_specified_fields() {
         batch_max_delay_ms: Some(99),
         ..Default::default()
     };
-    let merged = router.patch_config(patch).await.expect("valid patch must succeed");
-    assert_eq!(merged.batch_max_delay_ms, 99, "batch_max_delay_ms should be updated");
+    let merged = router
+        .patch_config(patch)
+        .await
+        .expect("valid patch must succeed");
+    assert_eq!(
+        merged.batch_max_delay_ms, 99,
+        "batch_max_delay_ms should be updated"
+    );
     // All other fields should remain at their default values.
     assert_eq!(merged.inline_threshold, before.inline_threshold);
     assert_eq!(merged.spawn_threshold, before.spawn_threshold);
@@ -675,18 +786,26 @@ fn neural_router_record_outcome_zero_cost_job_does_not_panic() {
         latency_budget_ms: 0,
     };
     // Must not panic regardless of pressure or outcome
-    router.record_outcome(&job, 0.0, StrategyOutcome {
-        strategy: Strategy::Inline,
-        latency_ms: 0,
-        budget_ms: 0,
-        dropped: false,
-    });
-    router.record_outcome(&job, 1.0, StrategyOutcome {
-        strategy: Strategy::Drop,
-        latency_ms: 0,
-        budget_ms: 0,
-        dropped: true,
-    });
+    router.record_outcome(
+        &job,
+        0.0,
+        StrategyOutcome {
+            strategy: Strategy::Inline,
+            latency_ms: 0,
+            budget_ms: 0,
+            dropped: false,
+        },
+    );
+    router.record_outcome(
+        &job,
+        1.0,
+        StrategyOutcome {
+            strategy: Strategy::Drop,
+            latency_ms: 0,
+            budget_ms: 0,
+            dropped: true,
+        },
+    );
     assert_eq!(router.sample_count(), 2);
 }
 
@@ -706,5 +825,8 @@ fn neural_router_choose_at_exact_drop_pressure_threshold_does_not_panic() {
         strategy,
         Strategy::Inline | Strategy::Spawn | Strategy::CpuPool | Strategy::Batch | Strategy::Drop
     );
-    assert!(valid, "choose at exact threshold must return valid strategy: {strategy:?}");
+    assert!(
+        valid,
+        "choose at exact threshold must return valid strategy: {strategy:?}"
+    );
 }

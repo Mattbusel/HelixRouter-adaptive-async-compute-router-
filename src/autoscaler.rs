@@ -157,9 +157,11 @@ impl Autoscaler {
                     self.rate_variance = 0.0;
                 } else {
                     let diff = instant_rate - self.rate_ema;
-                    self.rate_ema = RATE_EMA_ALPHA * instant_rate + (1.0 - RATE_EMA_ALPHA) * self.rate_ema;
+                    self.rate_ema =
+                        RATE_EMA_ALPHA * instant_rate + (1.0 - RATE_EMA_ALPHA) * self.rate_ema;
                     // Welford-style EMA variance update.
-                    self.rate_variance = (1.0 - RATE_EMA_ALPHA) * (self.rate_variance + RATE_EMA_ALPHA * diff * diff);
+                    self.rate_variance = (1.0 - RATE_EMA_ALPHA)
+                        * (self.rate_variance + RATE_EMA_ALPHA * diff * diff);
                 }
             }
         }
@@ -270,7 +272,11 @@ impl Autoscaler {
             // All X values identical — return the mean rate (flat trend).
             let mean = sum_y / n;
             // Guard against NaN when all Y values are also identical edge-case.
-            if mean.is_finite() { (mean, 0.0) } else { return self.rate_ema.max(0.0); }
+            if mean.is_finite() {
+                (mean, 0.0)
+            } else {
+                return self.rate_ema.max(0.0);
+            }
         } else {
             let slope = (n * sum_xy - sum_x * sum_y) / denom;
             let intercept = (sum_y - slope * sum_x) / n;
@@ -335,8 +341,8 @@ impl Autoscaler {
 
         if high_pressure || high_load {
             let new_parallelism = (current_parallelism + 1).min(self.config.max_parallelism);
-            let new_queue_cap = ((current_queue_cap as f64 * 1.25) as usize)
-                .min(self.config.max_queue_cap);
+            let new_queue_cap =
+                ((current_queue_cap as f64 * 1.25) as usize).min(self.config.max_queue_cap);
 
             let reason = if high_pressure && high_load {
                 format!(
@@ -368,8 +374,8 @@ impl Autoscaler {
             let new_parallelism = current_parallelism
                 .saturating_sub(1)
                 .max(self.config.min_parallelism);
-            let new_queue_cap = ((current_queue_cap as f64 * 0.80) as usize)
-                .max(self.config.min_queue_cap);
+            let new_queue_cap =
+                ((current_queue_cap as f64 * 0.80) as usize).max(self.config.min_queue_cap);
 
             let reason = format!(
                 "low pressure ({:.2} < {:.2}) and low predicted load ({:.2} jobs/s < {:.0}% of cap {})",
@@ -422,7 +428,12 @@ mod tests {
     }
 
     /// Build a LoadObservation with only the fields under test set; the rest are zero / 0.0.
-    fn obs(timestamp_secs: u64, total_jobs: u64, pressure_score: f64, drop_rate: f64) -> LoadObservation {
+    fn obs(
+        timestamp_secs: u64,
+        total_jobs: u64,
+        pressure_score: f64,
+        drop_rate: f64,
+    ) -> LoadObservation {
         LoadObservation {
             timestamp_secs,
             total_jobs,
@@ -434,12 +445,7 @@ mod tests {
     /// Feed `count` observations with linearly increasing job counts (1 obs/sec).
     fn feed_increasing(autoscaler: &mut Autoscaler, count: usize, jobs_per_sec: u64) {
         for i in 0..count {
-            autoscaler.observe(obs(
-                i as u64,
-                i as u64 * jobs_per_sec,
-                0.5,
-                0.0,
-            ));
+            autoscaler.observe(obs(i as u64, i as u64 * jobs_per_sec, 0.5, 0.0));
         }
     }
 
@@ -583,7 +589,10 @@ mod tests {
         let rate = a.predict_rate();
         // All per-interval rates are 0.0 → prediction must be 0.0 (or clamped).
         assert!(rate >= 0.0);
-        assert!(rate < 1.0, "expected near-zero predicted rate for constant load, got {rate}");
+        assert!(
+            rate < 1.0,
+            "expected near-zero predicted rate for constant load, got {rate}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -686,7 +695,9 @@ mod tests {
             a.observe(obs(i, i * 5, 0.90, 0.0));
         }
         let current_cap = 128;
-        let rec = a.recommend(4, current_cap).expect("should have recommendation");
+        let rec = a
+            .recommend(4, current_cap)
+            .expect("should have recommendation");
         assert_eq!(rec.direction, ScaleDirection::Up);
         assert!(rec.recommended_queue_cap > current_cap);
     }
@@ -704,7 +715,9 @@ mod tests {
             a.observe(obs(i, i, 0.05, 0.0));
         }
         let current_cap = 10_000;
-        let rec = a.recommend(4, current_cap).expect("should have recommendation");
+        let rec = a
+            .recommend(4, current_cap)
+            .expect("should have recommendation");
         assert_eq!(rec.direction, ScaleDirection::Down);
         assert!(rec.recommended_queue_cap < current_cap);
     }
@@ -857,7 +870,10 @@ mod tests {
         assert_eq!(latest.timestamp_secs, 40);
         // The first observation (ts=10) must have been evicted.
         let all_ts: Vec<u64> = a.observations.iter().map(|o| o.timestamp_secs).collect();
-        assert!(!all_ts.contains(&10), "oldest entry should have been evicted");
+        assert!(
+            !all_ts.contains(&10),
+            "oldest entry should have been evicted"
+        );
         assert!(all_ts.contains(&40));
     }
 
@@ -904,7 +920,9 @@ mod tests {
         }
         let parallelism = 4;
         let queue_cap = 5000;
-        let rec = a.recommend(parallelism, queue_cap).expect("should have recommendation");
+        let rec = a
+            .recommend(parallelism, queue_cap)
+            .expect("should have recommendation");
         if rec.direction == ScaleDirection::Hold {
             assert_eq!(rec.recommended_parallelism, parallelism);
             assert_eq!(rec.recommended_queue_cap, queue_cap);
@@ -927,7 +945,9 @@ mod tests {
         }
 
         let rec1 = a1.recommend(4, 128).expect("a1 should have recommendation");
-        let rec2 = a2.recommend(4, 10_000).expect("a2 should have recommendation");
+        let rec2 = a2
+            .recommend(4, 10_000)
+            .expect("a2 should have recommendation");
 
         assert_eq!(rec1.direction, ScaleDirection::Up);
         assert_eq!(rec2.direction, ScaleDirection::Down);
@@ -977,8 +997,8 @@ mod tests {
         a.observe(obs(7, 1006, 0.0, 0.0)); // rate=1
         a.observe(obs(8, 1007, 0.0, 0.0)); // rate=1
         a.observe(obs(9, 1008, 0.0, 0.0)); // rate=1
-        // OLS will have a large Y at x=0.5, then near-zero Ys → downward slope.
-        // The projection 30s ahead will be deeply negative → clamped to 0.
+                                           // OLS will have a large Y at x=0.5, then near-zero Ys → downward slope.
+                                           // The projection 30s ahead will be deeply negative → clamped to 0.
         let rate = a.predict_rate();
         assert!(
             rate >= 0.0,
@@ -1059,7 +1079,10 @@ mod tests {
         feed_low_load(&mut a, 10);
         // 1 job/sec with cap 10_000 → rate far below 30% threshold
         let rate = a.predict_rate();
-        assert!(rate < 3000.0 * 0.30, "low load rate should be small, got {rate}");
+        assert!(
+            rate < 3000.0 * 0.30,
+            "low load rate should be small, got {rate}"
+        );
     }
 
     // ── predicted_rate is present in recommendation ───────────────────────
@@ -1069,8 +1092,16 @@ mod tests {
         let mut a = default_autoscaler();
         feed_increasing(&mut a, 15, 50);
         let rec = a.recommend(4, 128).expect("should have recommendation");
-        assert!(rec.predicted_rate.is_finite(), "predicted_rate should be finite: {}", rec.predicted_rate);
-        assert!(rec.predicted_rate >= 0.0, "predicted_rate should be non-negative: {}", rec.predicted_rate);
+        assert!(
+            rec.predicted_rate.is_finite(),
+            "predicted_rate should be finite: {}",
+            rec.predicted_rate
+        );
+        assert!(
+            rec.predicted_rate >= 0.0,
+            "predicted_rate should be non-negative: {}",
+            rec.predicted_rate
+        );
     }
 
     #[test]
@@ -1097,7 +1128,10 @@ mod tests {
         let a = default_autoscaler();
         // No observations yet — predict_rate() should return 0.0
         let rate = a.predict_rate();
-        assert_eq!(rate, 0.0, "predicted_rate with no observations should be 0.0");
+        assert_eq!(
+            rate, 0.0,
+            "predicted_rate with no observations should be 0.0"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1114,7 +1148,10 @@ mod tests {
     fn smoothed_rate_positive_after_increasing_observations() {
         let mut a = default_autoscaler();
         feed_increasing(&mut a, 10, 30);
-        assert!(a.smoothed_rate() > 0.0, "EMA rate should be positive after load");
+        assert!(
+            a.smoothed_rate() > 0.0,
+            "EMA rate should be positive after load"
+        );
     }
 
     #[test]
@@ -1132,7 +1169,10 @@ mod tests {
             let jobs = if i % 2 == 0 { i * 1 } else { i * 100 };
             a.observe(obs(i, jobs, 0.5, 0.0));
         }
-        assert!(a.rate_variance() > 0.0, "Bursty load should produce non-zero variance");
+        assert!(
+            a.rate_variance() > 0.0,
+            "Bursty load should produce non-zero variance"
+        );
     }
 
     #[test]
@@ -1143,6 +1183,9 @@ mod tests {
         let horizon = a.effective_horizon_secs();
         let base = a.config.predict_horizon_secs as f64;
         // With low variance the horizon should be close to the base
-        assert!(horizon >= base * 0.8, "stable load horizon={horizon} expected ~= {base}");
+        assert!(
+            horizon >= base * 0.8,
+            "stable load horizon={horizon} expected ~= {base}"
+        );
     }
 }

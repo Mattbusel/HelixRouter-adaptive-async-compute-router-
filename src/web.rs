@@ -11,13 +11,13 @@
 //! - Routing logic (see: router.rs)
 //! - Config management (see: config.rs)
 
-use std::{net::SocketAddr, sync::Arc, convert::Infallible};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::State,
     http::{header, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Response, Sse},
     response::sse::Event,
+    response::{Html, IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router as AxumRouter,
 };
@@ -55,14 +55,19 @@ pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
         .route("/health", get(health))
         .route("/metrics", get(metrics_prom))
         .route("/api/stats", get(stats_json))
-        .route("/api/config", get(get_config).post(set_config).patch(patch_config))
+        .route(
+            "/api/config",
+            get(get_config).post(set_config).patch(patch_config),
+        )
         .route("/api/telemetry", post(post_eot_telemetry))
         .route("/api/stream/decisions", get(sse_decisions))
         .route("/api/neural", get(get_neural))
         .with_state(shared);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await.map_err(std::io::Error::other)
+    axum::serve(listener, app)
+        .await
+        .map_err(std::io::Error::other)
 }
 
 // ===== UI =====
@@ -302,7 +307,9 @@ async fn ui() -> Html<&'static str> {
 
 // ===== SSE feed =====
 
-async fn sse_decisions(State(router): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+async fn sse_decisions(
+    State(router): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = router.subscribe_decisions();
     let stream = BroadcastStream::new(rx)
         .filter_map(|item| {
@@ -396,10 +403,7 @@ async fn get_config(State(router): State<AppState>) -> impl IntoResponse {
     Json(router.config().await)
 }
 
-async fn set_config(
-    State(router): State<AppState>,
-    Json(cfg): Json<RouterConfig>,
-) -> Response {
+async fn set_config(State(router): State<AppState>, Json(cfg): Json<RouterConfig>) -> Response {
     // Validate before committing — mirrors the safety check in patch_config.
     // Without this, callers could POST inline_threshold >= spawn_threshold,
     // ema_alpha=0, or cpu_parallelism=0, causing silent misbehaviour or
@@ -495,7 +499,13 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
         avg_reward: neural_snap.avg_reward,
         epsilon: neural_snap.epsilon,
     };
-    let text = prometheus_text_with_neural(snap.completed, snap.dropped, &snap.routed, &summaries, Some(&neural_metrics));
+    let text = prometheus_text_with_neural(
+        snap.completed,
+        snap.dropped,
+        &snap.routed,
+        &summaries,
+        Some(&neural_metrics),
+    );
 
     let mut resp = (StatusCode::OK, text).into_response();
     resp.headers_mut().insert(
@@ -514,13 +524,19 @@ mod tests {
 
     #[test]
     fn test_health_response_status_is_ok() {
-        let resp = HealthResponse { status: "ok", uptime_secs: 0 };
+        let resp = HealthResponse {
+            status: "ok",
+            uptime_secs: 0,
+        };
         assert_eq!(resp.status, "ok");
     }
 
     #[test]
     fn test_health_response_serializes_to_json() {
-        let resp = HealthResponse { status: "ok", uptime_secs: 42 };
+        let resp = HealthResponse {
+            status: "ok",
+            uptime_secs: 42,
+        };
         let json = serde_json::to_string(&resp).expect("serialize");
         assert!(json.contains("\"status\":\"ok\""), "json: {json}");
         assert!(json.contains("\"uptime_secs\":42"), "json: {json}");
@@ -528,7 +544,10 @@ mod tests {
 
     #[test]
     fn test_health_response_uptime_is_non_negative() {
-        let resp = HealthResponse { status: "ok", uptime_secs: u64::MAX };
+        let resp = HealthResponse {
+            status: "ok",
+            uptime_secs: u64::MAX,
+        };
         assert!(resp.uptime_secs <= u64::MAX);
     }
 
@@ -676,8 +695,14 @@ mod tests {
             adaptive_spawn_threshold: 250,
             pressure_score: 0.42,
             routed_by_strategy: vec![
-                CountRow { strategy: Strategy::Inline, count: 80 },
-                CountRow { strategy: Strategy::Drop,   count: 5  },
+                CountRow {
+                    strategy: Strategy::Inline,
+                    count: 80,
+                },
+                CountRow {
+                    strategy: Strategy::Drop,
+                    count: 5,
+                },
             ],
             latency_by_strategy: vec![LatencyRow {
                 strategy: Strategy::Inline,
@@ -695,27 +720,42 @@ mod tests {
         let json = serde_json::to_string(&resp).expect("serialize StatsResponse");
 
         // Top-level scalar fields
-        assert!(json.contains("\"completed\":100"),              "missing completed");
-        assert!(json.contains("\"dropped\":5"),                  "missing dropped");
-        assert!(json.contains("\"adaptive_spawn_threshold\":250"), "missing adaptive_spawn_threshold");
-        assert!(json.contains("\"pressure_score\":0.42"),        "missing pressure_score");
+        assert!(json.contains("\"completed\":100"), "missing completed");
+        assert!(json.contains("\"dropped\":5"), "missing dropped");
+        assert!(
+            json.contains("\"adaptive_spawn_threshold\":250"),
+            "missing adaptive_spawn_threshold"
+        );
+        assert!(
+            json.contains("\"pressure_score\":0.42"),
+            "missing pressure_score"
+        );
 
         // Array fields
-        assert!(json.contains("\"routed_by_strategy\""),         "missing routed_by_strategy");
-        assert!(json.contains("\"latency_by_strategy\""),        "missing latency_by_strategy");
+        assert!(
+            json.contains("\"routed_by_strategy\""),
+            "missing routed_by_strategy"
+        );
+        assert!(
+            json.contains("\"latency_by_strategy\""),
+            "missing latency_by_strategy"
+        );
 
         // routed row fields
-        assert!(json.contains("\"strategy\""),                   "missing strategy in routed row");
-        assert!(json.contains("\"count\""),                      "missing count in routed row");
+        assert!(
+            json.contains("\"strategy\""),
+            "missing strategy in routed row"
+        );
+        assert!(json.contains("\"count\""), "missing count in routed row");
 
         // latency row fields
-        assert!(json.contains("\"avg_ms\""),                     "missing avg_ms");
-        assert!(json.contains("\"ema_ms\""),                     "missing ema_ms");
-        assert!(json.contains("\"p50_ms\""),                     "missing p50_ms");
-        assert!(json.contains("\"p95_ms\""),                     "missing p95_ms");
-        assert!(json.contains("\"p99_ms\""),                     "missing p99_ms");
-        assert!(json.contains("\"min_ms\""),                     "missing min_ms");
-        assert!(json.contains("\"max_ms\""),                     "missing max_ms");
+        assert!(json.contains("\"avg_ms\""), "missing avg_ms");
+        assert!(json.contains("\"ema_ms\""), "missing ema_ms");
+        assert!(json.contains("\"p50_ms\""), "missing p50_ms");
+        assert!(json.contains("\"p95_ms\""), "missing p95_ms");
+        assert!(json.contains("\"p99_ms\""), "missing p99_ms");
+        assert!(json.contains("\"min_ms\""), "missing min_ms");
+        assert!(json.contains("\"max_ms\""), "missing max_ms");
     }
 
     /// Verify strategy names serialise as snake_case strings (EOT uses
@@ -728,20 +768,50 @@ mod tests {
             adaptive_spawn_threshold: 0,
             pressure_score: 0.0,
             routed_by_strategy: vec![
-                CountRow { strategy: Strategy::Inline,  count: 0 },
-                CountRow { strategy: Strategy::Spawn,   count: 0 },
-                CountRow { strategy: Strategy::CpuPool, count: 0 },
-                CountRow { strategy: Strategy::Batch,   count: 0 },
-                CountRow { strategy: Strategy::Drop,    count: 0 },
+                CountRow {
+                    strategy: Strategy::Inline,
+                    count: 0,
+                },
+                CountRow {
+                    strategy: Strategy::Spawn,
+                    count: 0,
+                },
+                CountRow {
+                    strategy: Strategy::CpuPool,
+                    count: 0,
+                },
+                CountRow {
+                    strategy: Strategy::Batch,
+                    count: 0,
+                },
+                CountRow {
+                    strategy: Strategy::Drop,
+                    count: 0,
+                },
             ],
             latency_by_strategy: vec![],
         };
         let json = serde_json::to_string(&resp).expect("serialize");
-        assert!(json.contains("\"inline\""),   "Strategy::Inline should serialise as \"inline\"");
-        assert!(json.contains("\"spawn\""),    "Strategy::Spawn should serialise as \"spawn\"");
-        assert!(json.contains("\"cpu_pool\""), "Strategy::CpuPool should serialise as \"cpu_pool\"");
-        assert!(json.contains("\"batch\""),    "Strategy::Batch should serialise as \"batch\"");
-        assert!(json.contains("\"drop\""),     "Strategy::Drop should serialise as \"drop\"");
+        assert!(
+            json.contains("\"inline\""),
+            "Strategy::Inline should serialise as \"inline\""
+        );
+        assert!(
+            json.contains("\"spawn\""),
+            "Strategy::Spawn should serialise as \"spawn\""
+        );
+        assert!(
+            json.contains("\"cpu_pool\""),
+            "Strategy::CpuPool should serialise as \"cpu_pool\""
+        );
+        assert!(
+            json.contains("\"batch\""),
+            "Strategy::Batch should serialise as \"batch\""
+        );
+        assert!(
+            json.contains("\"drop\""),
+            "Strategy::Drop should serialise as \"drop\""
+        );
     }
 
     /// Verify that `NeuralSnapshot` serialises the fields EOT expects.
@@ -762,10 +832,16 @@ mod tests {
 
         let json = serde_json::to_string(&snap).expect("serialize NeuralSnapshot");
 
-        assert!(json.contains("\"sample_count\":150"),  "missing sample_count");
-        assert!(json.contains("\"avg_reward\":0.82"),   "missing avg_reward");
-        assert!(json.contains("\"is_warmed_up\":true"), "missing is_warmed_up");
-        assert!(json.contains("\"weights\""),           "missing weights");
+        assert!(
+            json.contains("\"sample_count\":150"),
+            "missing sample_count"
+        );
+        assert!(json.contains("\"avg_reward\":0.82"), "missing avg_reward");
+        assert!(
+            json.contains("\"is_warmed_up\":true"),
+            "missing is_warmed_up"
+        );
+        assert!(json.contains("\"weights\""), "missing weights");
     }
 
     /// Verify that the weights matrix is a nested array parseable as Vec<Vec<f64>>.
@@ -793,7 +869,11 @@ mod tests {
         assert_eq!(weights.len(), 5, "outer dim should be 5 (N_STRATEGIES)");
         for (i, row) in weights.iter().enumerate() {
             let row_arr = row.as_array().expect("each row should be array");
-            assert_eq!(row_arr.len(), 7, "inner dim of row {i} should be 7 (N_FEATURES)");
+            assert_eq!(
+                row_arr.len(),
+                7,
+                "inner dim of row {i} should be 7 (N_FEATURES)"
+            );
         }
     }
 
@@ -847,6 +927,9 @@ mod tests {
     fn test_eot_telemetry_fails_on_missing_pressure() {
         let json = r#"{"drop_rate":0.1}"#;
         let result = serde_json::from_str::<EotTelemetry>(json);
-        assert!(result.is_err(), "missing pressure should fail deserialization");
+        assert!(
+            result.is_err(),
+            "missing pressure should fail deserialization"
+        );
     }
 }

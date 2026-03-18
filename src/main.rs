@@ -20,8 +20,11 @@ use simulator::{Simulator, SimulatorConfig};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("info".parse().map_err(|e: tracing_subscriber::filter::ParseError| e)?),
+            EnvFilter::from_default_env().add_directive(
+                "info"
+                    .parse()
+                    .map_err(|e: tracing_subscriber::filter::ParseError| e)?,
+            ),
         )
         .init();
 
@@ -96,7 +99,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Simulation
     if sim_jobs > 0 {
-        let jobs = Simulator::new(SimulatorConfig { seed: sim_seed, total_jobs: sim_jobs, ..Default::default() }).all_jobs();
+        let jobs = Simulator::new(SimulatorConfig {
+            seed: sim_seed,
+            total_jobs: sim_jobs,
+            ..Default::default()
+        })
+        .all_jobs();
         let mut handles = Vec::with_capacity(jobs.len());
         for job in jobs {
             let r = router.clone();
@@ -152,7 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    tracing::info!("Sim finished. UI still running at http://{}. Ctrl+C to exit.", addr);
+    tracing::info!(
+        "Sim finished. UI still running at http://{}. Ctrl+C to exit.",
+        addr
+    );
     tokio::signal::ctrl_c().await?;
 
     tracing::info!("Shutting down gracefully...");
@@ -160,8 +171,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     router.shutdown();
 
     // Persist neural router weights so the next startup avoids cold-start lag.
-    let weights_path = std::env::var("HELIX_WEIGHTS_PATH")
-        .unwrap_or_else(|_| "helix_weights.json".to_string());
+    let weights_path =
+        std::env::var("HELIX_WEIGHTS_PATH").unwrap_or_else(|_| "helix_weights.json".to_string());
     let snap = router.neural_snapshot().await;
     match serde_json::to_string_pretty(&snap) {
         Ok(json) => {

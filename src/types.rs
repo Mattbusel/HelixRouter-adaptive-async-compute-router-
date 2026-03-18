@@ -52,11 +52,11 @@ pub enum Strategy {
 impl fmt::Display for Strategy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Strategy::Inline  => "inline",
-            Strategy::Spawn   => "spawn",
+            Strategy::Inline => "inline",
+            Strategy::Spawn => "spawn",
             Strategy::CpuPool => "cpu_pool",
-            Strategy::Batch   => "batch",
-            Strategy::Drop    => "drop",
+            Strategy::Batch => "batch",
+            Strategy::Drop => "drop",
         };
         write!(f, "{s}")
     }
@@ -165,18 +165,18 @@ mod tests {
 
     #[test]
     fn test_strategy_display() {
-        assert_eq!(Strategy::Inline.to_string(),  "inline");
-        assert_eq!(Strategy::Spawn.to_string(),   "spawn");
+        assert_eq!(Strategy::Inline.to_string(), "inline");
+        assert_eq!(Strategy::Spawn.to_string(), "spawn");
         assert_eq!(Strategy::CpuPool.to_string(), "cpu_pool");
-        assert_eq!(Strategy::Batch.to_string(),   "batch");
-        assert_eq!(Strategy::Drop.to_string(),    "drop");
+        assert_eq!(Strategy::Batch.to_string(), "batch");
+        assert_eq!(Strategy::Drop.to_string(), "drop");
     }
 
     #[test]
     fn test_jobkind_display() {
-        assert_eq!(JobKind::HashMix.to_string(),         "hash_mix");
-        assert_eq!(JobKind::PrimeCount.to_string(),      "prime_count");
-        assert_eq!(JobKind::MonteCarloRisk.to_string(),  "monte_carlo_risk");
+        assert_eq!(JobKind::HashMix.to_string(), "hash_mix");
+        assert_eq!(JobKind::PrimeCount.to_string(), "prime_count");
+        assert_eq!(JobKind::MonteCarloRisk.to_string(), "monte_carlo_risk");
     }
 
     #[test]
@@ -215,7 +215,10 @@ mod tests {
         let o = Output::U64(12345);
         let j = serde_json::to_string(&o).unwrap();
         let back: Output = serde_json::from_str(&j).unwrap();
-        match back { Output::U64(v) => assert_eq!(v, 12345), _ => panic!("wrong variant") }
+        match back {
+            Output::U64(v) => assert_eq!(v, 12345),
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -223,7 +226,10 @@ mod tests {
         let o = Output::F64(-0.05);
         let j = serde_json::to_string(&o).unwrap();
         let back: Output = serde_json::from_str(&j).unwrap();
-        match back { Output::F64(v) => assert!((v + 0.05).abs() < 1e-10, "got {v}"), _ => panic!() }
+        match back {
+            Output::F64(v) => assert!((v + 0.05).abs() < 1e-10, "got {v}"),
+            _ => panic!(),
+        }
     }
 
     #[test]

@@ -45,8 +45,14 @@ async fn test_routing_log_populated_after_submit() {
     router.submit(cheap_job(2)).await;
 
     let log = router.routing_log().await;
-    assert!(!log.is_empty(), "routing log should have entries after submit");
-    assert!(log.len() <= 50, "routing log should be capped at 50 entries");
+    assert!(
+        !log.is_empty(),
+        "routing log should have entries after submit"
+    );
+    assert!(
+        log.len() <= 50,
+        "routing log should be capped at 50 entries"
+    );
 }
 
 #[tokio::test]
@@ -70,7 +76,10 @@ async fn test_routing_log_capped_at_50() {
 async fn test_ema_latency_empty_on_fresh_router() {
     let router = Router::new(RouterConfig::default());
     let ema = router.ema_latency().await;
-    assert!(ema.is_empty(), "no latency recorded yet; map should be empty");
+    assert!(
+        ema.is_empty(),
+        "no latency recorded yet; map should be empty"
+    );
 }
 
 #[tokio::test]
@@ -153,7 +162,11 @@ async fn test_restore_neural_weights_modifies_snapshot() {
 
     // Build a WeightSnapshot with clearly different weights
     let custom_weights = [[99.0_f64; 7]; 5];
-    let ws = WeightSnapshot { weights: custom_weights, sample_count: 0, total_reward: 0.0 };
+    let ws = WeightSnapshot {
+        weights: custom_weights,
+        sample_count: 0,
+        total_reward: 0.0,
+    };
     router.restore_neural_weights(ws).await;
 
     let snap_after = router.neural_snapshot().await;
@@ -175,7 +188,11 @@ async fn test_restore_neural_weights_survives_submit() {
     cfg.spawn_threshold = u64::MAX;
     let router = Router::new(cfg);
 
-    let ws = WeightSnapshot { weights: [[1.0_f64; 7]; 5], sample_count: 0, total_reward: 0.0 };
+    let ws = WeightSnapshot {
+        weights: [[1.0_f64; 7]; 5],
+        sample_count: 0,
+        total_reward: 0.0,
+    };
     router.restore_neural_weights(ws).await;
 
     // Submit a job — must not panic
@@ -189,7 +206,10 @@ async fn test_restore_neural_weights_survives_submit() {
 async fn test_pressure_is_zero_on_idle_router() {
     let router = Router::new(RouterConfig::default());
     let p = router.pressure().await;
-    assert!((0.0..=1.0).contains(&p), "pressure should be in [0,1], got {p}");
+    assert!(
+        (0.0..=1.0).contains(&p),
+        "pressure should be in [0,1], got {p}"
+    );
 }
 
 #[tokio::test]
@@ -256,7 +276,11 @@ fn test_choose_strategy_batch_under_backpressure_with_high_scaling() {
 #[test]
 fn test_pressure_burst_produces_correct_total() {
     let jobs = pressure_burst(42, 20, 10);
-    assert_eq!(jobs.len(), 30, "pressure_burst should produce warm_count + burst_count jobs");
+    assert_eq!(
+        jobs.len(),
+        30,
+        "pressure_burst should produce warm_count + burst_count jobs"
+    );
 }
 
 #[test]
@@ -282,12 +306,18 @@ fn test_pressure_burst_burst_phase_is_heavy() {
 
 #[test]
 fn test_simulator_zero_jobs_returns_empty() {
-    let mut sim = Simulator::new(SimulatorConfig { total_jobs: 0, ..Default::default() });
+    let mut sim = Simulator::new(SimulatorConfig {
+        total_jobs: 0,
+        ..Default::default()
+    });
     assert!(sim.all_jobs().is_empty());
 }
 
 #[test]
 fn test_simulator_next_job_on_zero_total_is_none() {
-    let mut sim = Simulator::new(SimulatorConfig { total_jobs: 0, ..Default::default() });
+    let mut sim = Simulator::new(SimulatorConfig {
+        total_jobs: 0,
+        ..Default::default()
+    });
     assert!(sim.next_job().is_none());
 }

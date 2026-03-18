@@ -135,7 +135,11 @@ fn test_validation_error_mentions_invalid_field() {
     let mut cfg = RouterConfig::default();
     cfg.inline_threshold = cfg.spawn_threshold + 1;
     let e = cfg.validate().unwrap_err();
-    assert!(e.0.contains("inline_threshold") || e.0.contains("spawn_threshold"), "err: {}", e.0);
+    assert!(
+        e.0.contains("inline_threshold") || e.0.contains("spawn_threshold"),
+        "err: {}",
+        e.0
+    );
 }
 
 #[test]
@@ -256,7 +260,10 @@ fn test_multiple_invalid_fields_first_error_returned() {
 /// completion counter.
 #[tokio::test]
 async fn test_hot_reload_while_jobs_in_flight_no_deadlock() {
-    use helixrouter::{router::Router, types::{Job, JobKind}};
+    use helixrouter::{
+        router::Router,
+        types::{Job, JobKind},
+    };
 
     let router = Router::new(RouterConfig::default());
     let mut job_handles = Vec::new();

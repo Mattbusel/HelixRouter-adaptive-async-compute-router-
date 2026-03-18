@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::autoscaler::{Autoscaler, AutoscalerConfig, LoadObservation};
 use crate::config::{ConfigError, RouterConfig, RouterConfigPatch};
-use crate::metrics::{latency_summaries, MetricsStore, LatencySummary};
+use crate::metrics::{latency_summaries, LatencySummary, MetricsStore};
 use crate::neural_router::{NeuralRouter, NeuralRouterConfig, StrategyOutcome, WeightSnapshot};
 use crate::strategies::execute_job;
 use crate::types::{Job, JobKind, Output, Strategy};
@@ -233,7 +233,11 @@ impl Router {
         let inner3 = inner.clone();
         let mut batch_shutdown = inner.shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let kinds = [JobKind::HashMix, JobKind::PrimeCount, JobKind::MonteCarloRisk];
+            let kinds = [
+                JobKind::HashMix,
+                JobKind::PrimeCount,
+                JobKind::MonteCarloRisk,
+            ];
             let mut idx = 0usize;
             loop {
                 let delay_ms = {
@@ -281,21 +285,46 @@ impl Router {
     /// resulting config would be invalid (e.g. `inline_threshold >= spawn_threshold`,
     /// `ema_alpha` outside `(0, 1]`, `cpu_parallelism == 0`). The live config is
     /// **not modified** when validation fails (atomic read-validate-write).
-    pub async fn patch_config(&self, patch: RouterConfigPatch) -> Result<RouterConfig, ConfigError> {
+    pub async fn patch_config(
+        &self,
+        patch: RouterConfigPatch,
+    ) -> Result<RouterConfig, ConfigError> {
         let mut cfg = self.inner.cfg.write().await;
         // Apply the patch to a candidate clone so we can validate before committing.
         let mut candidate = cfg.clone();
-        if let Some(v) = patch.inline_threshold { candidate.inline_threshold = v; }
-        if let Some(v) = patch.spawn_threshold { candidate.spawn_threshold = v; }
-        if let Some(v) = patch.cpu_queue_cap { candidate.cpu_queue_cap = v; }
-        if let Some(v) = patch.cpu_parallelism { candidate.cpu_parallelism = v; }
-        if let Some(v) = patch.backpressure_busy_threshold { candidate.backpressure_busy_threshold = v; }
-        if let Some(v) = patch.batch_max_size { candidate.batch_max_size = v; }
-        if let Some(v) = patch.batch_max_delay_ms { candidate.batch_max_delay_ms = v; }
-        if let Some(v) = patch.ema_alpha { candidate.ema_alpha = v; }
-        if let Some(v) = patch.adaptive_step { candidate.adaptive_step = v; }
-        if let Some(v) = patch.cpu_p95_budget_ms { candidate.cpu_p95_budget_ms = v; }
-        if let Some(v) = patch.adaptive_p95_threshold_factor { candidate.adaptive_p95_threshold_factor = v; }
+        if let Some(v) = patch.inline_threshold {
+            candidate.inline_threshold = v;
+        }
+        if let Some(v) = patch.spawn_threshold {
+            candidate.spawn_threshold = v;
+        }
+        if let Some(v) = patch.cpu_queue_cap {
+            candidate.cpu_queue_cap = v;
+        }
+        if let Some(v) = patch.cpu_parallelism {
+            candidate.cpu_parallelism = v;
+        }
+        if let Some(v) = patch.backpressure_busy_threshold {
+            candidate.backpressure_busy_threshold = v;
+        }
+        if let Some(v) = patch.batch_max_size {
+            candidate.batch_max_size = v;
+        }
+        if let Some(v) = patch.batch_max_delay_ms {
+            candidate.batch_max_delay_ms = v;
+        }
+        if let Some(v) = patch.ema_alpha {
+            candidate.ema_alpha = v;
+        }
+        if let Some(v) = patch.adaptive_step {
+            candidate.adaptive_step = v;
+        }
+        if let Some(v) = patch.cpu_p95_budget_ms {
+            candidate.cpu_p95_budget_ms = v;
+        }
+        if let Some(v) = patch.adaptive_p95_threshold_factor {
+            candidate.adaptive_p95_threshold_factor = v;
+        }
         // Validate before committing — roll back on error.
         candidate.validate()?;
         *cfg = candidate.clone();
@@ -352,7 +381,13 @@ impl Router {
     /// Return the last 50 routing decisions (most recent last).
     #[allow(dead_code)]
     pub async fn routing_log(&self) -> Vec<RoutingDecision> {
-        self.inner.routing_log.lock().await.iter().cloned().collect()
+        self.inner
+            .routing_log
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Return current composite pressure score in [0.0, 1.0].
@@ -363,7 +398,9 @@ impl Router {
     pub async fn pressure(&self) -> f64 {
         let metrics = self.inner.metrics.lock().await;
         let cfg = self.inner.cfg.read().await;
-        let cpu_busy = cfg.cpu_parallelism.saturating_sub(self.inner.cpu_slots.available_permits());
+        let cpu_busy = cfg
+            .cpu_parallelism
+            .saturating_sub(self.inner.cpu_slots.available_permits());
         let queue_frac = cpu_busy as f64 / cfg.cpu_parallelism.max(1) as f64;
         let internal = metrics.pressure.score(queue_frac);
         // Take the max: EOT distress should raise HelixRouter's pressure
@@ -384,7 +421,9 @@ impl Router {
     /// This function never panics.
     pub fn set_eot_pressure(&self, pressure: f64) {
         let milli = (pressure.clamp(0.0, 1.0) * 1000.0) as u64;
-        self.inner.eot_pressure_milli.store(milli, Ordering::Relaxed);
+        self.inner
+            .eot_pressure_milli
+            .store(milli, Ordering::Relaxed);
     }
 
     /// Read the currently injected EOT pressure (0.0–1.0).
@@ -396,7 +435,9 @@ impl Router {
     #[allow(dead_code)]
     pub async fn ema_latency(&self) -> std::collections::HashMap<Strategy, f64> {
         let metrics = self.inner.metrics.lock().await;
-        metrics.latency.iter()
+        metrics
+            .latency
+            .iter()
             .filter(|(_, agg)| agg.count > 0)
             .map(|(s, agg)| (*s, agg.ema_ms))
             .collect()
@@ -414,13 +455,34 @@ impl Router {
     pub async fn update_config_field(&self, field: &str, value: u64) -> bool {
         let mut cfg = self.inner.cfg.write().await;
         match field {
-            "inline_threshold" => { cfg.inline_threshold = value; true }
-            "spawn_threshold" => { cfg.spawn_threshold = value; true }
-            "backpressure_busy_threshold" => { cfg.backpressure_busy_threshold = value as usize; true }
-            "batch_max_size" => { cfg.batch_max_size = value as usize; true }
-            "batch_max_delay_ms" => { cfg.batch_max_delay_ms = value; true }
-            "cpu_queue_cap" => { cfg.cpu_queue_cap = value as usize; true }
-            "cpu_parallelism" => { cfg.cpu_parallelism = value as usize; true }
+            "inline_threshold" => {
+                cfg.inline_threshold = value;
+                true
+            }
+            "spawn_threshold" => {
+                cfg.spawn_threshold = value;
+                true
+            }
+            "backpressure_busy_threshold" => {
+                cfg.backpressure_busy_threshold = value as usize;
+                true
+            }
+            "batch_max_size" => {
+                cfg.batch_max_size = value as usize;
+                true
+            }
+            "batch_max_delay_ms" => {
+                cfg.batch_max_delay_ms = value;
+                true
+            }
+            "cpu_queue_cap" => {
+                cfg.cpu_queue_cap = value as usize;
+                true
+            }
+            "cpu_parallelism" => {
+                cfg.cpu_parallelism = value as usize;
+                true
+            }
             _ => false,
         }
     }
@@ -490,7 +552,11 @@ impl Router {
             let neural = self.inner.neural.lock().await;
             if neural.is_warmed_up() {
                 let nc = neural.choose(&job, pressure);
-                if nc != Strategy::Drop { nc } else { heuristic_strategy }
+                if nc != Strategy::Drop {
+                    nc
+                } else {
+                    heuristic_strategy
+                }
             } else {
                 heuristic_strategy
             }
@@ -531,7 +597,8 @@ impl Router {
                 self.bump_route(Strategy::Drop).await;
                 self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                 self.record_pressure(queue_frac, true, 1.0).await;
-                self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true).await;
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true)
+                    .await;
                 warn!(
                     job_id = job.id,
                     kind = %job.kind,
@@ -548,9 +615,11 @@ impl Router {
                 let out = execute_job(&job);
                 let ms = t0.elapsed().as_millis() as u64;
                 self.record_latency(Strategy::Inline, ms).await;
-                self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64).await;
+                self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64)
+                    .await;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
-                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
+                    .await;
                 Some(out)
             }
 
@@ -568,9 +637,11 @@ impl Router {
                 };
                 let ms = t0.elapsed().as_millis() as u64;
                 self.record_latency(Strategy::Spawn, ms).await;
-                self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64).await;
+                self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64)
+                    .await;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
-                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
+                    .await;
                 Some(out)
             }
 
@@ -578,12 +649,17 @@ impl Router {
                 self.bump_route(Strategy::CpuPool).await;
 
                 let (tx, rx) = oneshot::channel::<Vec<Output>>();
-                let work = CpuWork { job: job.clone(), reply: tx, enqueued_at: Instant::now() };
+                let work = CpuWork {
+                    job: job.clone(),
+                    reply: tx,
+                    enqueued_at: Instant::now(),
+                };
 
                 if self.inner.cpu_tx.try_send(work).is_err() {
                     self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                     self.record_pressure(queue_frac, true, 1.0).await;
-                    self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true).await;
+                    self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true)
+                        .await;
                     None
                 } else {
                     let t0 = Instant::now();
@@ -596,7 +672,8 @@ impl Router {
                     };
                     let ms = t0.elapsed().as_millis() as u64;
                     self.inner.completed.fetch_add(1, Ordering::Relaxed);
-                    self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
+                    self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
+                        .await;
                     Some(out)
                 }
             }
@@ -642,7 +719,8 @@ impl Router {
                 };
                 let ms = t0.elapsed().as_millis() as u64;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
-                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
+                self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
+                    .await;
                 Some(out)
             }
         }
@@ -664,7 +742,8 @@ impl Router {
                 return; // not enough data
             }
             let p95 = agg.p95_ms;
-            let trigger_ms = (cfg.cpu_p95_budget_ms as f64 * cfg.adaptive_p95_threshold_factor) as u64;
+            let trigger_ms =
+                (cfg.cpu_p95_budget_ms as f64 * cfg.adaptive_p95_threshold_factor) as u64;
 
             if p95 > trigger_ms {
                 drop(metrics);
@@ -702,7 +781,12 @@ impl Router {
     }
 
     async fn record_pressure(&self, queue_frac: f64, was_dropped: bool, lat_frac: f64) {
-        self.inner.metrics.lock().await.pressure.record(queue_frac, was_dropped, lat_frac);
+        self.inner
+            .metrics
+            .lock()
+            .await
+            .pressure
+            .record(queue_frac, was_dropped, lat_frac);
     }
 
     /// Record the outcome of a routing decision into the neural router's weight matrix.
@@ -887,7 +971,11 @@ pub fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strate
 
 // ===== CPU dispatch loop =====
 
-async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>, mut shutdown: broadcast::Receiver<()>) {
+async fn cpu_dispatch_loop(
+    inner: Arc<Inner>,
+    mut rx: mpsc::Receiver<CpuWork>,
+    mut shutdown: broadcast::Receiver<()>,
+) {
     info!("cpu dispatcher started");
 
     loop {
@@ -898,7 +986,9 @@ async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>, m
 
         // acquire_owned returns Err only when the semaphore is closed (i.e. Inner
         // is being dropped).  Treat this as a graceful shutdown signal.
-        let Ok(permit) = inner.cpu_slots.clone().acquire_owned().await else { break };
+        let Ok(permit) = inner.cpu_slots.clone().acquire_owned().await else {
+            break;
+        };
 
         let inner2 = inner.clone();
         tokio::spawn(async move {
@@ -914,7 +1004,11 @@ async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>, m
             let _ = work.reply.send(out);
 
             let ms = work.enqueued_at.elapsed().as_millis() as u64;
-            inner2.metrics.lock().await.record_latency(Strategy::CpuPool, ms);
+            inner2
+                .metrics
+                .lock()
+                .await
+                .record_latency(Strategy::CpuPool, ms);
             // completed is incremented by the submit() caller after rx.await
 
             drop(permit);
@@ -955,7 +1049,9 @@ async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
             if prev_seq != u64::MAX && e.seq < prev_seq {
                 tracing::warn!(
                     "batch flush reorder detected: seq {} flushed after seq {} for kind {:?}",
-                    e.seq, prev_seq, kind
+                    e.seq,
+                    prev_seq,
+                    kind
                 );
             }
             prev_seq = e.seq;
@@ -967,7 +1063,11 @@ async fn flush_batch_kind(inner: Arc<Inner>, kind: JobKind) {
         let _ = e.reply.send(out);
 
         let ms = e.enqueued_at.elapsed().as_millis() as u64;
-        inner.metrics.lock().await.record_latency(Strategy::Batch, ms);
+        inner
+            .metrics
+            .lock()
+            .await
+            .record_latency(Strategy::Batch, ms);
     }
 }
 
@@ -1022,14 +1122,20 @@ mod tests {
     fn test_choose_strategy_drop_under_backpressure_low_scaling() {
         let cfg = RouterConfig::default();
         let job = default_job(1, 100_000, 0.1);
-        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Drop);
+        assert_eq!(
+            choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold),
+            Strategy::Drop
+        );
     }
 
     #[test]
     fn test_choose_strategy_batch_under_backpressure_high_scaling() {
         let cfg = RouterConfig::default();
         let job = default_job(1, 100_000, 0.7);
-        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Batch);
+        assert_eq!(
+            choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold),
+            Strategy::Batch
+        );
     }
 
     #[test]
@@ -1050,14 +1156,20 @@ mod tests {
     fn test_choose_strategy_batch_threshold_at_scaling_0_65() {
         let cfg = RouterConfig::default();
         let job = default_job(1, 100_000, 0.65);
-        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Batch);
+        assert_eq!(
+            choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold),
+            Strategy::Batch
+        );
     }
 
     #[test]
     fn test_choose_strategy_drop_at_scaling_0_64() {
         let cfg = RouterConfig::default();
         let job = default_job(1, 100_000, 0.64);
-        assert_eq!(choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold), Strategy::Drop);
+        assert_eq!(
+            choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold),
+            Strategy::Drop
+        );
     }
 
     // ===== Router integration (async) =====
@@ -1095,7 +1207,13 @@ mod tests {
         let router = Router::new(cfg.clone());
 
         // Acquire all slots so cpu_busy = parallelism
-        let _permit = router.inner.cpu_slots.clone().acquire_many_owned(1).await.unwrap();
+        let _permit = router
+            .inner
+            .cpu_slots
+            .clone()
+            .acquire_many_owned(1)
+            .await
+            .unwrap();
 
         let job = default_job(10, 100_000, 0.1); // low scaling → Drop
         let out = router.submit(job).await;
@@ -1154,7 +1272,10 @@ mod tests {
     async fn test_router_adaptive_threshold_accessible() {
         let router = Router::new(RouterConfig::default());
         let stats = router.stats_snapshot().await;
-        assert_eq!(stats.adaptive_spawn_threshold, RouterConfig::default().spawn_threshold);
+        assert_eq!(
+            stats.adaptive_spawn_threshold,
+            RouterConfig::default().spawn_threshold
+        );
     }
 
     #[tokio::test]
@@ -1177,49 +1298,64 @@ mod tests {
     #[tokio::test]
     async fn test_patch_config_backpressure_busy_threshold() {
         let router = Router::new(RouterConfig::default());
-        let cfg = router.patch_config(RouterConfigPatch {
-            backpressure_busy_threshold: Some(3),
-            ..RouterConfigPatch::default()
-        }).await.expect("valid patch");
+        let cfg = router
+            .patch_config(RouterConfigPatch {
+                backpressure_busy_threshold: Some(3),
+                ..RouterConfigPatch::default()
+            })
+            .await
+            .expect("valid patch");
         assert_eq!(cfg.backpressure_busy_threshold, 3);
     }
 
     #[tokio::test]
     async fn test_patch_config_batch_max_delay_ms() {
         let router = Router::new(RouterConfig::default());
-        let cfg = router.patch_config(RouterConfigPatch {
-            batch_max_delay_ms: Some(50),
-            ..RouterConfigPatch::default()
-        }).await.expect("valid patch");
+        let cfg = router
+            .patch_config(RouterConfigPatch {
+                batch_max_delay_ms: Some(50),
+                ..RouterConfigPatch::default()
+            })
+            .await
+            .expect("valid patch");
         assert_eq!(cfg.batch_max_delay_ms, 50);
     }
 
     #[tokio::test]
     async fn test_patch_config_adaptive_p95_threshold_factor() {
         let router = Router::new(RouterConfig::default());
-        let cfg = router.patch_config(RouterConfigPatch {
-            adaptive_p95_threshold_factor: Some(2.0),
-            ..RouterConfigPatch::default()
-        }).await.expect("valid patch");
+        let cfg = router
+            .patch_config(RouterConfigPatch {
+                adaptive_p95_threshold_factor: Some(2.0),
+                ..RouterConfigPatch::default()
+            })
+            .await
+            .expect("valid patch");
         assert!((cfg.adaptive_p95_threshold_factor - 2.0).abs() < 1e-10);
     }
 
     #[tokio::test]
     async fn test_patch_config_empty_patch_leaves_defaults() {
         let router = Router::new(RouterConfig::default());
-        let cfg = router.patch_config(RouterConfigPatch::default()).await.expect("valid patch");
+        let cfg = router
+            .patch_config(RouterConfigPatch::default())
+            .await
+            .expect("valid patch");
         assert_eq!(cfg, RouterConfig::default());
     }
 
     #[tokio::test]
     async fn test_patch_config_all_new_fields_at_once() {
         let router = Router::new(RouterConfig::default());
-        let cfg = router.patch_config(RouterConfigPatch {
-            backpressure_busy_threshold: Some(2),
-            batch_max_delay_ms: Some(20),
-            adaptive_p95_threshold_factor: Some(1.8),
-            ..RouterConfigPatch::default()
-        }).await.expect("valid patch");
+        let cfg = router
+            .patch_config(RouterConfigPatch {
+                backpressure_busy_threshold: Some(2),
+                batch_max_delay_ms: Some(20),
+                adaptive_p95_threshold_factor: Some(1.8),
+                ..RouterConfigPatch::default()
+            })
+            .await
+            .expect("valid patch");
         assert_eq!(cfg.backpressure_busy_threshold, 2);
         assert_eq!(cfg.batch_max_delay_ms, 20);
         assert!((cfg.adaptive_p95_threshold_factor - 1.8).abs() < 1e-10);
@@ -1229,11 +1365,13 @@ mod tests {
     async fn test_patch_config_inline_ge_spawn_returns_err() {
         let router = Router::new(RouterConfig::default());
         // inline_threshold >= spawn_threshold is invalid
-        let result = router.patch_config(RouterConfigPatch {
-            inline_threshold: Some(100_000),
-            spawn_threshold: Some(50_000),
-            ..RouterConfigPatch::default()
-        }).await;
+        let result = router
+            .patch_config(RouterConfigPatch {
+                inline_threshold: Some(100_000),
+                spawn_threshold: Some(50_000),
+                ..RouterConfigPatch::default()
+            })
+            .await;
         assert!(result.is_err(), "expected ConfigError for inline >= spawn");
     }
 
@@ -1242,21 +1380,28 @@ mod tests {
         let router = Router::new(RouterConfig::default());
         let before = router.config().await;
         // Try to push an invalid patch.
-        let _ = router.patch_config(RouterConfigPatch {
-            cpu_parallelism: Some(0),
-            ..RouterConfigPatch::default()
-        }).await;
+        let _ = router
+            .patch_config(RouterConfigPatch {
+                cpu_parallelism: Some(0),
+                ..RouterConfigPatch::default()
+            })
+            .await;
         let after = router.config().await;
-        assert_eq!(before, after, "live config must not change on invalid patch");
+        assert_eq!(
+            before, after,
+            "live config must not change on invalid patch"
+        );
     }
 
     #[tokio::test]
     async fn test_patch_config_ema_alpha_out_of_range_returns_err() {
         let router = Router::new(RouterConfig::default());
-        let result = router.patch_config(RouterConfigPatch {
-            ema_alpha: Some(0.0),
-            ..RouterConfigPatch::default()
-        }).await;
+        let result = router
+            .patch_config(RouterConfigPatch {
+                ema_alpha: Some(0.0),
+                ..RouterConfigPatch::default()
+            })
+            .await;
         assert!(result.is_err(), "ema_alpha=0 must be rejected");
     }
 
@@ -1289,7 +1434,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_neural_weights_can_round_trip_snapshot() {
-
         let router = Router::new(RouterConfig::default());
 
         // Take a snapshot of the current (untrained) weights.
@@ -1415,7 +1559,10 @@ mod tests {
         let before = *router.inner.adaptive_spawn_threshold.lock().await;
         router.maybe_adapt_threshold().await;
         let after = *router.inner.adaptive_spawn_threshold.lock().await;
-        assert!(after >= before, "threshold should not decrease when p95 is over budget");
+        assert!(
+            after >= before,
+            "threshold should not decrease when p95 is over budget"
+        );
     }
 
     // ── EOT pressure in neural router (improvement #6) ────────────────────
@@ -1449,7 +1596,10 @@ mod tests {
         let j2 = default_job(2, 100_000, 0.9);
         tokio::join!(router.submit(j1), router.submit(j2));
         let after = router.inner.batch_seq.load(Ordering::Relaxed);
-        assert!(after > before, "batch_seq should have advanced after batch submissions");
+        assert!(
+            after > before,
+            "batch_seq should have advanced after batch submissions"
+        );
     }
 
     // ── warm_start_from_heuristics called at construction (improvement #5) ─

@@ -21,7 +21,6 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-
 // ===== ConfigError =====
 
 /// A validation error from `RouterConfig::validate`.
@@ -104,15 +103,25 @@ pub struct RouterConfig {
 }
 
 /// Default schema version returned when the `version` field is absent from a deserialised config.
-pub fn default_config_version() -> u32 { 1 }
+pub fn default_config_version() -> u32 {
+    1
+}
 /// Default EMA smoothing factor (`0.15`) used when `ema_alpha` is absent from a deserialised config.
-pub fn default_ema_alpha() -> f64 { 0.15 }
+pub fn default_ema_alpha() -> f64 {
+    0.15
+}
 /// Default adaptive step (`0.10`) used when `adaptive_step` is absent from a deserialised config.
-pub fn default_adaptive_step() -> f64 { 0.10 }
+pub fn default_adaptive_step() -> f64 {
+    0.10
+}
 /// Default CpuPool P95 latency budget in milliseconds (`200`) used when absent from a deserialised config.
-pub fn default_cpu_p95_budget_ms() -> u64 { 200 }
+pub fn default_cpu_p95_budget_ms() -> u64 {
+    200
+}
 /// Default adaptive P95 threshold factor (`1.5`) used when absent from a deserialised config.
-pub fn default_adaptive_p95_threshold_factor() -> f64 { 1.5 }
+pub fn default_adaptive_p95_threshold_factor() -> f64 {
+    1.5
+}
 
 impl Default for RouterConfig {
     fn default() -> Self {
@@ -293,15 +302,21 @@ pub async fn watch_config(
     let mut last_content = String::new();
     loop {
         tokio::time::sleep(interval).await;
-        let mtime = tokio::fs::metadata(&path).await
+        let mtime = tokio::fs::metadata(&path)
+            .await
             .ok()
             .and_then(|m| m.modified().ok());
-        if mtime.is_some() && mtime == last_mtime { continue; }
+        if mtime.is_some() && mtime == last_mtime {
+            continue;
+        }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if content == last_content { last_mtime = mtime; continue; }
+        if content == last_content {
+            last_mtime = mtime;
+            continue;
+        }
         last_content = content.clone();
         last_mtime = mtime;
         match serde_json::from_str::<RouterConfig>(&content) {
@@ -347,7 +362,8 @@ where
         loop {
             tokio::time::sleep(interval).await;
             // Check mtime first to skip the file read when nothing has changed.
-            let mtime = tokio::fs::metadata(&path).await
+            let mtime = tokio::fs::metadata(&path)
+                .await
                 .ok()
                 .and_then(|m| m.modified().ok());
             if mtime.is_some() && mtime == last_mtime {
@@ -382,7 +398,9 @@ where
 mod tests {
     use super::*;
 
-    fn valid() -> RouterConfig { RouterConfig::default() }
+    fn valid() -> RouterConfig {
+        RouterConfig::default()
+    }
 
     #[test]
     fn test_default_is_valid() {
@@ -486,7 +504,10 @@ mod tests {
         let minimal = r#"{"inline_threshold":1000,"spawn_threshold":5000,"cpu_queue_cap":64,"cpu_parallelism":4,"backpressure_busy_threshold":3,"batch_max_size":4,"batch_max_delay_ms":5}"#;
         let cfg: RouterConfig = serde_json::from_str(minimal).unwrap();
         assert!((cfg.ema_alpha - default_ema_alpha()).abs() < 1e-10);
-        assert!((cfg.adaptive_p95_threshold_factor - default_adaptive_p95_threshold_factor()).abs() < 1e-10);
+        assert!(
+            (cfg.adaptive_p95_threshold_factor - default_adaptive_p95_threshold_factor()).abs()
+                < 1e-10
+        );
     }
 
     #[test]
@@ -689,7 +710,9 @@ mod tests {
         let path = tmp.path().to_path_buf();
 
         // Write invalid JSON
-        tokio::fs::write(&path, b"{ not valid json }").await.unwrap();
+        tokio::fs::write(&path, b"{ not valid json }")
+            .await
+            .unwrap();
 
         let seen = Arc::new(Mutex::new(0usize));
         let seen_clone = Arc::clone(&seen);

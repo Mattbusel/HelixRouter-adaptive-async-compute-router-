@@ -50,7 +50,10 @@ async fn test_sse_lagged_subscriber_receives_lagged_error() {
             let mut saw_lagged = false;
             for _ in 0..400 {
                 match slow_rx.try_recv() {
-                    Err(TryRecvError::Lagged(_)) => { saw_lagged = true; break; }
+                    Err(TryRecvError::Lagged(_)) => {
+                        saw_lagged = true;
+                        break;
+                    }
                     Err(TryRecvError::Closed) | Err(TryRecvError::Empty) => break,
                     Ok(_) => {}
                 }
@@ -88,7 +91,10 @@ async fn test_sse_fast_subscriber_receives_all_events() {
             Err(TryRecvError::Closed) | Err(TryRecvError::Empty) => break,
         }
     }
-    assert_eq!(received, n_jobs, "fast subscriber should receive exactly {n_jobs} events, got {received}");
+    assert_eq!(
+        received, n_jobs,
+        "fast subscriber should receive exactly {n_jobs} events, got {received}"
+    );
 }
 
 /// Router with no active subscribers should not panic or block.
@@ -100,7 +106,10 @@ async fn test_sse_no_subscribers_router_runs_normally() {
         router.submit(make_job(i, 100)).await;
     }
     let stats = router.stats_snapshot().await;
-    assert_eq!(stats.completed, 50, "all jobs should complete with no SSE subscribers");
+    assert_eq!(
+        stats.completed, 50,
+        "all jobs should complete with no SSE subscribers"
+    );
 }
 
 /// Multiple concurrent subscribers each observe their own independent stream.
@@ -120,13 +129,17 @@ async fn test_sse_multiple_subscribers_independent() {
     loop {
         match rx1.try_recv() {
             Ok(_) => count1 += 1,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => break,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => {
+                break
+            }
         }
     }
     loop {
         match rx2.try_recv() {
             Ok(_) => count2 += 1,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => break,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => {
+                break
+            }
         }
     }
     assert_eq!(count1, n_jobs, "subscriber 1 should see {n_jobs} events");
@@ -150,8 +163,13 @@ async fn test_sse_late_subscriber_misses_prior_events() {
     loop {
         match late_rx.try_recv() {
             Ok(_) => count += 1,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => break,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) | Err(TryRecvError::Lagged(_)) => {
+                break
+            }
         }
     }
-    assert_eq!(count, 0, "late subscriber should not receive past events, got {count}");
+    assert_eq!(
+        count, 0,
+        "late subscriber should not receive past events, got {count}"
+    );
 }

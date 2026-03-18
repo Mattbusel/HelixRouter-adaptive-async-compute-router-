@@ -11,7 +11,7 @@
 
 use helixrouter::{
     autoscaler::{Autoscaler, AutoscalerConfig, LoadObservation, ScaleDirection},
-    config::{RouterConfig, watch_config_with_callback},
+    config::{watch_config_with_callback, RouterConfig},
     neural_router::{NeuralRouter, NeuralRouterConfig, StrategyOutcome},
     router::Router,
     types::{Job, JobKind, Strategy},
@@ -45,7 +45,12 @@ fn expensive_job() -> Job {
     }
 }
 
-fn make_outcome(strategy: Strategy, latency_ms: u64, budget_ms: u64, dropped: bool) -> StrategyOutcome {
+fn make_outcome(
+    strategy: Strategy,
+    latency_ms: u64,
+    budget_ms: u64,
+    dropped: bool,
+) -> StrategyOutcome {
     StrategyOutcome {
         strategy,
         latency_ms,
@@ -54,7 +59,12 @@ fn make_outcome(strategy: Strategy, latency_ms: u64, budget_ms: u64, dropped: bo
     }
 }
 
-fn obs(timestamp_secs: u64, total_jobs: u64, pressure_score: f64, drop_rate: f64) -> LoadObservation {
+fn obs(
+    timestamp_secs: u64,
+    total_jobs: u64,
+    pressure_score: f64,
+    drop_rate: f64,
+) -> LoadObservation {
     LoadObservation {
         timestamp_secs,
         total_jobs,
@@ -204,7 +214,10 @@ fn autoscaler_recommends_scale_up_under_sustained_spike() {
     }
 
     let rec = a.recommend(8, 512);
-    assert!(rec.is_some(), "autoscaler must produce a recommendation after min_observations");
+    assert!(
+        rec.is_some(),
+        "autoscaler must produce a recommendation after min_observations"
+    );
     let rec = rec.unwrap();
     assert_eq!(
         rec.direction,
@@ -385,11 +398,7 @@ async fn config_hot_reload_rejects_invalid_config_silently() {
 
     // Write a valid initial config.
     let initial = RouterConfig::default();
-    fs::write(
-        &path,
-        serde_json::to_string(&initial).expect("serialize"),
-    )
-    .expect("write");
+    fs::write(&path, serde_json::to_string(&initial).expect("serialize")).expect("write");
 
     let call_count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
     let cc = Arc::clone(&call_count);
@@ -425,11 +434,7 @@ async fn config_hot_reload_does_not_panic_under_concurrent_access() {
     let path = dir.path().join("helix_concurrent.json");
 
     let initial = RouterConfig::default();
-    fs::write(
-        &path,
-        serde_json::to_string(&initial).expect("serialize"),
-    )
-    .expect("write");
+    fs::write(&path, serde_json::to_string(&initial).expect("serialize")).expect("write");
 
     // Start the watcher.
     watch_config_with_callback(path.clone(), Duration::from_millis(30), |_cfg| {});
@@ -555,7 +560,11 @@ async fn backpressure_stats_dropped_count_is_consistent() {
         join_set.spawn(async move {
             let job = Job {
                 id: i as u64,
-                kind: if i % 2 == 0 { JobKind::HashMix } else { JobKind::PrimeCount },
+                kind: if i % 2 == 0 {
+                    JobKind::HashMix
+                } else {
+                    JobKind::PrimeCount
+                },
                 inputs: vec![i as u64],
                 compute_cost: if i % 2 == 0 { 500 } else { 80_000 },
                 scaling_potential: 0.5,

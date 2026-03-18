@@ -76,8 +76,12 @@ impl LatencyAgg {
             self.min_ms = ms;
             self.max_ms = ms;
         } else {
-            if ms < self.min_ms { self.min_ms = ms; }
-            if ms > self.max_ms { self.max_ms = ms; }
+            if ms < self.min_ms {
+                self.min_ms = ms;
+            }
+            if ms > self.max_ms {
+                self.max_ms = ms;
+            }
         }
 
         // Recompute all three percentiles from a single sort pass (was 3 × O(n log n)).
@@ -90,7 +94,11 @@ impl LatencyAgg {
 
     /// Return arithmetic mean latency in milliseconds. Returns `0.0` when no samples recorded.
     pub fn avg_ms(&self) -> f64 {
-        if self.count == 0 { 0.0 } else { self.sum_ms / self.count as f64 }
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum_ms / self.count as f64
+        }
     }
 }
 
@@ -101,7 +109,9 @@ impl LatencyAgg {
 /// Compute a percentile from an **already-sorted** slice.  Does not sort.
 /// Returns 0 for an empty slice.  `q` is in (0, 1].
 pub fn percentile_from_sorted(sorted: &[u64], q: f64) -> u64 {
-    if sorted.is_empty() { return 0; }
+    if sorted.is_empty() {
+        return 0;
+    }
     let idx = ((sorted.len() as f64) * q).ceil() as usize;
     let idx = idx.saturating_sub(1).min(sorted.len() - 1);
     sorted[idx]
@@ -115,7 +125,9 @@ pub fn percentile_from_sorted(sorted: &[u64], q: f64) -> u64 {
 /// so the compiler would otherwise flag this as dead code.
 #[allow(dead_code)]
 pub fn calc_percentile(samples: &[u64], q: f64) -> u64 {
-    if samples.is_empty() { return 0; }
+    if samples.is_empty() {
+        return 0;
+    }
     let mut tmp = samples.to_vec();
     tmp.sort_unstable();
     percentile_from_sorted(&tmp, q)
@@ -189,8 +201,16 @@ pub fn pressure_score(
     drop_rate_pct: f64,
     latency_trend: f64,
 ) -> f64 {
-    let cpu_frac = if cpu_parallelism == 0 { 0.0 } else { cpu_busy as f64 / cpu_parallelism as f64 };
-    let queue_frac = if queue_cap == 0 { 0.0 } else { queue_depth as f64 / queue_cap as f64 };
+    let cpu_frac = if cpu_parallelism == 0 {
+        0.0
+    } else {
+        cpu_busy as f64 / cpu_parallelism as f64
+    };
+    let queue_frac = if queue_cap == 0 {
+        0.0
+    } else {
+        queue_depth as f64 / queue_cap as f64
+    };
     let drop_frac = (drop_rate_pct / 100.0).clamp(0.0, 1.0);
     let trend_frac = latency_trend.clamp(0.0, 1.0);
     (0.40 * cpu_frac + 0.30 * queue_frac + 0.20 * drop_frac + 0.10 * trend_frac).clamp(0.0, 1.0)
@@ -265,12 +285,30 @@ pub fn prometheus_text_with_neural(
     lat_vec.sort_by_key(|s| s.strategy.to_string());
     for s in &lat_vec {
         let strat = &s.strategy;
-        out.push_str(&format!("helix_latency_p50_ms{{strategy=\"{strat}\"}} {}\n", s.p50_ms));
-        out.push_str(&format!("helix_latency_p95_ms{{strategy=\"{strat}\"}} {}\n", s.p95_ms));
-        out.push_str(&format!("helix_latency_p99_ms{{strategy=\"{strat}\"}} {}\n", s.p99_ms));
-        out.push_str(&format!("helix_latency_ema_ms{{strategy=\"{strat}\"}} {:.3}\n", s.ema_ms));
-        out.push_str(&format!("helix_latency_min_ms{{strategy=\"{strat}\"}} {}\n", s.min_ms));
-        out.push_str(&format!("helix_latency_max_ms{{strategy=\"{strat}\"}} {}\n", s.max_ms));
+        out.push_str(&format!(
+            "helix_latency_p50_ms{{strategy=\"{strat}\"}} {}\n",
+            s.p50_ms
+        ));
+        out.push_str(&format!(
+            "helix_latency_p95_ms{{strategy=\"{strat}\"}} {}\n",
+            s.p95_ms
+        ));
+        out.push_str(&format!(
+            "helix_latency_p99_ms{{strategy=\"{strat}\"}} {}\n",
+            s.p99_ms
+        ));
+        out.push_str(&format!(
+            "helix_latency_ema_ms{{strategy=\"{strat}\"}} {:.3}\n",
+            s.ema_ms
+        ));
+        out.push_str(&format!(
+            "helix_latency_min_ms{{strategy=\"{strat}\"}} {}\n",
+            s.min_ms
+        ));
+        out.push_str(&format!(
+            "helix_latency_max_ms{{strategy=\"{strat}\"}} {}\n",
+            s.max_ms
+        ));
     }
     // Neural learning quality metrics
     if let Some(n) = neural {
@@ -304,7 +342,10 @@ pub struct PressureTracker {
 impl PressureTracker {
     /// Create a new `PressureTracker` with the given EMA alpha.
     pub fn new(alpha: f64) -> Self {
-        Self { alpha, ..Default::default() }
+        Self {
+            alpha,
+            ..Default::default()
+        }
     }
 
     /// Update pressure with current observation.
@@ -323,8 +364,15 @@ impl PressureTracker {
     /// uses `current_queue_frac` (or its EMA when unavailable) once at 40% weight,
     /// and adds the EMA as a 10% smoothing signal.
     pub fn score(&self, current_queue_frac: f64) -> f64 {
-        let qf = if current_queue_frac > 0.0 { current_queue_frac } else { self.queue_frac_ema };
-        (0.40 * qf + 0.30 * self.drop_rate_ema + 0.20 * self.lat_frac_ema + 0.10 * self.queue_frac_ema)
+        let qf = if current_queue_frac > 0.0 {
+            current_queue_frac
+        } else {
+            self.queue_frac_ema
+        };
+        (0.40 * qf
+            + 0.30 * self.drop_rate_ema
+            + 0.20 * self.lat_frac_ema
+            + 0.10 * self.queue_frac_ema)
             .clamp(0.0, 1.0)
     }
 }
@@ -349,7 +397,11 @@ pub struct MetricsStore {
 impl MetricsStore {
     /// Create a new `MetricsStore` with the given EMA smoothing factor.
     pub fn new(alpha: f64) -> Self {
-        Self { alpha, pressure: PressureTracker::new(alpha), ..Default::default() }
+        Self {
+            alpha,
+            pressure: PressureTracker::new(alpha),
+            ..Default::default()
+        }
     }
 
     /// Record a latency observation for the given strategy.
@@ -367,17 +419,20 @@ pub fn latency_summaries(store: &MetricsStore) -> Vec<LatencySummary> {
 
 /// Build LatencySummary vec from a raw latency HashMap (for sharded callers).
 pub fn latency_summaries_from_map(latency: &HashMap<Strategy, LatencyAgg>) -> Vec<LatencySummary> {
-    let mut out: Vec<LatencySummary> = latency.iter().map(|(s, agg)| LatencySummary {
-        strategy: *s,
-        count: agg.count,
-        avg_ms: agg.avg_ms(),
-        ema_ms: agg.ema_ms,
-        p50_ms: agg.p50_ms,
-        p95_ms: agg.p95_ms,
-        p99_ms: agg.p99_ms,
-        min_ms: agg.min_ms,
-        max_ms: agg.max_ms,
-    }).collect();
+    let mut out: Vec<LatencySummary> = latency
+        .iter()
+        .map(|(s, agg)| LatencySummary {
+            strategy: *s,
+            count: agg.count,
+            avg_ms: agg.avg_ms(),
+            ema_ms: agg.ema_ms,
+            p50_ms: agg.p50_ms,
+            p95_ms: agg.p95_ms,
+            p99_ms: agg.p99_ms,
+            min_ms: agg.min_ms,
+            max_ms: agg.max_ms,
+        })
+        .collect();
     out.sort_by_key(|r| r.strategy.to_string());
     out
 }
@@ -502,7 +557,12 @@ mod tests {
         for v in 1..=100u64 {
             agg.record(v, 0.15);
         }
-        assert!(agg.p99_ms >= agg.p95_ms, "p99={} p95={}", agg.p99_ms, agg.p95_ms);
+        assert!(
+            agg.p99_ms >= agg.p95_ms,
+            "p99={} p95={}",
+            agg.p99_ms,
+            agg.p95_ms
+        );
     }
 
     #[test]
@@ -521,11 +581,19 @@ mod tests {
         }
         assert_eq!(agg.samples_ms.len(), 512, "buffer should be capped at 512");
         // min_ms is the running global minimum over all 600 samples (0..599) → 0.
-        assert_eq!(agg.min_ms, 0, "min_ms should be the global minimum, got {}", agg.min_ms);
+        assert_eq!(
+            agg.min_ms, 0,
+            "min_ms should be the global minimum, got {}",
+            agg.min_ms
+        );
         // max_ms is the global maximum → 599.
         assert_eq!(agg.max_ms, 599, "max_ms should be 599, got {}", agg.max_ms);
         // p95 is computed from the rolling 512-sample window (last 512: 88..599).
-        assert!(agg.p95_ms >= 88, "p95 of window [88,599] should be >= 88, got {}", agg.p95_ms);
+        assert!(
+            agg.p95_ms >= 88,
+            "p95 of window [88,599] should be >= 88, got {}",
+            agg.p95_ms
+        );
     }
 
     #[test]
