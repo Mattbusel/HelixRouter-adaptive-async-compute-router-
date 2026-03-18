@@ -10,7 +10,12 @@ Versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Bumped version to 0.3.0; `rust-version = "1.75"` declared in Cargo.toml.
+- README rewritten: badges (CI, crates.io, docs.rs, license, MSRV), one-paragraph pitch, feature table, architecture ASCII diagram, full quickstart with library and binary usage, performance table with Criterion numbers, module map, test-coverage table, environment variables reference, contributing guide.
+- CI pipeline split into parallel jobs: `fmt`, `test`, `msrv` (Rust 1.75), `audit`, `bench-smoke`. MSRV now gated in CI. `RUST_BACKTRACE=1` added globally.
+- `///` doc comments on all public items in `types.rs` (enums, structs, and variants) and `simulator.rs` (config fields, struct, and methods).
 - `CHANGELOG.md` — this file.
+- Crate-level `///` documentation in `src/lib.rs` with module map and quickstart example.
 - Crate-level `///` documentation in `src/lib.rs` with module map and quickstart example.
 - `///` doc comments on all public `strategies` functions (`execute_job`, `hashmix`, `primecount`).
 - CI: `cargo clippy`, `cargo doc --no-deps` (deny warnings), `cargo audit`, and benchmark regression smoke step.
