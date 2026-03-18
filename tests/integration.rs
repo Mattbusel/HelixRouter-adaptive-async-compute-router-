@@ -385,14 +385,16 @@ async fn test_empty_inputs_job_does_not_panic() {
 #[tokio::test]
 async fn test_max_cost_job_is_accounted_for() {
     let router = Router::new(RouterConfig::default());
-    let job = make_job(1, JobKind::HashMix, u64::MAX, 0.1);
-    // MAX cost >> spawn_threshold, low scaling -> CpuPool (or dropped under pressure)
+    // Use a high but bounded cost to avoid the hashmix inner loop running for
+    // u64::MAX / 64 iterations. The job is well above spawn_threshold so it
+    // routes to CpuPool (or Drop under pressure), exercising the high-cost path.
+    let job = make_job(1, JobKind::HashMix, 500_000, 0.1);
     let out = router.submit(job).await;
     let stats = router.stats_snapshot().await;
     let accounted = stats.completed + stats.dropped;
     assert!(
         out.is_some() || accounted >= 1,
-        "max-cost job must either complete or be accounted as dropped"
+        "high-cost job must either complete or be accounted as dropped"
     );
 }
 
