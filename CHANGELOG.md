@@ -9,7 +9,30 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
+### Changed (production-readiness pass -- 2026-03-17)
+- Replaced all `println!` and `eprintln!` calls in `src/main.rs` with structured `tracing::info!` / `tracing::warn!` / `tracing::error!` calls.
+- Added `/// ` doc comments to `RoutingDecision` and `PressureSnapshot` structs and all their fields in `types.rs`.
+- CI workflow (`ci.yml`) rewritten to add `cargo fmt --check` as a fast first gate, split into `fmt`, `test`, `msrv`, `audit`, and `bench-smoke` jobs, added cargo cache to bench job, added `RUST_BACKTRACE=1`.
+- README rewritten: project description, CI and license badges, ASCII architecture diagram showing routing components and async task flow, quickstart code example, API overview table, performance notes referencing bench results, contributing section, license section. No em dashes. No emojis.
+- CHANGELOG updated with this production-readiness pass entry.
+
+### Added (prior entries)
+- **CONTRIBUTING.md** — Development setup, environment variables, test/bench commands, code style rules, step-by-step guide for adding a new routing strategy, and PR checklist.
+- **docs/ARCHITECTURE.md** — ASCII request-flow diagram, per-module responsibility descriptions, and the full NeuralRouter learning-cycle data flow.
+- Comprehensive `///` doc comments on all public functions, structs, enums, and fields across `router.rs`, `neural_router.rs`, `autoscaler.rs`, `config.rs`, `metrics.rs`, `strategies.rs`, `types.rs`, and `web.rs`.
+- Module-level `//!` documentation on `config.rs` and `metrics.rs` with Responsibility / Guarantees / NOT Responsible For sections.
+- Field-level docs on `RouterConfig` explaining each threshold, its units, validation constraint, and default value.
+- Field-level docs on `LatencyAgg`, `LatencySummary`, `NeuralMetrics`, `MetricsStore`, and `PressureTracker`.
+- `Router::new()` doc explaining the two background tasks started at construction time.
+- `Router::submit()` doc with full `# Parameters`, `# Returns`, `# Errors`, and `# Panics` sections.
+- `Router::set_config()` doc clarifying the no-validation contract vs `patch_config`.
+- `Router::stats_snapshot()` doc explaining EOT pressure blending.
+- `Router::latency_report()` doc clarifying which strategies appear.
+- `Router::update_config_field()` doc flagging the no-validation escape-hatch contract.
+- `choose_strategy()` doc with a complete decision-tree listing all five branches.
+- `NeuralRouter::record_outcome()` doc explaining the online gradient-ascent algorithm with the reward table and weight-update formula.
+- `pressure_score()` doc with weight breakdown and parameter descriptions.
+- `prometheus_text_with_neural()` doc listing all emitted metric families.
 - Bumped version to 0.3.0; `rust-version = "1.75"` declared in Cargo.toml.
 - README rewritten: badges (CI, crates.io, docs.rs, license, MSRV), one-paragraph pitch, feature table, architecture ASCII diagram, full quickstart with library and binary usage, performance table with Criterion numbers, module map, test-coverage table, environment variables reference, contributing guide.
 - CI pipeline split into parallel jobs: `fmt`, `test`, `msrv` (Rust 1.75), `audit`, `bench-smoke`. MSRV now gated in CI. `RUST_BACKTRACE=1` added globally.
