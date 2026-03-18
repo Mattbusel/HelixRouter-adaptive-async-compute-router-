@@ -3,6 +3,7 @@
 //! Verifies serialisation round-trips, `Display` formatting, `Ord` derivation,
 //! and field-level properties of `Job`, `JobKind`, `Strategy`, `Output`,
 //! `RoutingDecision`, and `PressureSnapshot`.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use helixrouter::types::{Job, JobKind, RoutingDecision, Strategy};
 use std::collections::{HashMap, HashSet};
 

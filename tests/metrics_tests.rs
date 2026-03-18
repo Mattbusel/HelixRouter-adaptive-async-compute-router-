@@ -3,6 +3,7 @@
 //! Covers `LatencyAgg` EMA/percentile computation, `PressureTracker` scoring,
 //! `MetricsStore` accumulation, `prometheus_text` output format, and the
 //! `latency_summaries` helper.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use helixrouter::{
     metrics::{
         latency_summaries, prometheus_text, LatencyAgg, LatencySummary, MetricsStore,

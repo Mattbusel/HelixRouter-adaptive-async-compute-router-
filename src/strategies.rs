@@ -106,6 +106,7 @@ fn montecarlo_risk(job: &Job) -> Output {
     Output::F64(samples[idx.min(samples.len() - 1)])
 }
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::types::JobKind;

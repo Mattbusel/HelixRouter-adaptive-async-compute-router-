@@ -2,6 +2,7 @@
 //!
 //! Exercises `Router::submit`, config hot-patch, pressure tracking, and
 //! per-strategy latency reporting using the built-in `Simulator` workload.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use helixrouter::{
     config::{RouterConfig, RouterConfigPatch},
     router::Router,

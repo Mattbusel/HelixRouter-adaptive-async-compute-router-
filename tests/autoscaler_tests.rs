@@ -2,6 +2,7 @@
 //!
 //! These complement the inline unit tests in src/autoscaler.rs by covering:
 //! - Multi-phase workload patterns (ramp, spike, decline)
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! - Drop-rate treated as a pressure signal
 //! - Idempotent recommendations (calling recommend twice returns same direction)
 //! - Custom config edge cases

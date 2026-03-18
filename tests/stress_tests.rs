@@ -3,6 +3,7 @@
 //! These tests exercise the router under high-concurrency conditions to surface
 //! data races, deadlocks, and ordering violations that sequential tests miss.
 //! They are intentionally broad: any panic, hang, or assertion failure indicates
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! a real concurrency bug.
 
 use helixrouter::{

@@ -1,4 +1,5 @@
 //! Production-readiness tests for HelixRouter.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! Covers four gap areas identified in the audit:
 //   1. NeuralRouter convergence and reward tracking
