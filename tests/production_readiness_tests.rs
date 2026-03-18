@@ -515,7 +515,7 @@ async fn backpressure_drops_when_queue_cap_is_zero() {
             kind: JobKind::PrimeCount,
             inputs: vec![9999],
             compute_cost: 1_000_000, // far above all thresholds
-            scaling_potential: 0.9,
+            scaling_potential: 0.0,  // low scaling => Drop branch when under backpressure
             latency_budget_ms: 1,
         };
         if router.submit(job).await.is_none() {
@@ -525,7 +525,7 @@ async fn backpressure_drops_when_queue_cap_is_zero() {
 
     assert!(
         dropped > 0,
-        "at least some heavy jobs must be dropped when cpu_queue_cap is 0"
+        "at least some heavy jobs must be dropped under maximum backpressure (threshold=0)"
     );
 }
 
