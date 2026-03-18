@@ -27,7 +27,7 @@ use std::{
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::autoscaler::{Autoscaler, AutoscalerConfig, LoadObservation};
 use crate::config::{ConfigError, RouterConfig, RouterConfigPatch};
@@ -402,9 +402,8 @@ impl Router {
             .collect()
     }
 
-    /// Hot-patch a single config field by name. Returns true if the field was recognized.
-    #[allow(dead_code)]
     /// Update a single named config field by string key.
+    #[allow(dead_code)]
     ///
     /// Returns `true` if the field was found and updated, `false` if `field` does
     /// not name a recognised config key. This is a low-level escape hatch used by
@@ -532,6 +531,13 @@ impl Router {
                 self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                 self.record_pressure(queue_frac, true, 1.0).await;
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, 0, true).await;
+                warn!(
+                    job_id = job.id,
+                    kind = %job.kind,
+                    cpu_busy,
+                    pressure = %format!("{pressure:.3}"),
+                    "job dropped due to backpressure"
+                );
                 None
             }
 
@@ -552,7 +558,13 @@ impl Router {
                 let t0 = Instant::now();
                 let j = job.clone();
                 let handle = tokio::spawn(async move { execute_job(&j) });
-                let out = handle.await.unwrap_or_default();
+                let out = match handle.await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(err = %e, job_id = job.id, "spawned task panicked; returning empty result");
+                        vec![]
+                    }
+                };
                 let ms = t0.elapsed().as_millis() as u64;
                 self.record_latency(Strategy::Spawn, ms).await;
                 self.record_pressure(queue_frac, false, ms as f64 / budget_ms.max(1) as f64).await;
@@ -574,7 +586,13 @@ impl Router {
                     None
                 } else {
                     let t0 = Instant::now();
-                    let out = rx.await.unwrap_or_default();
+                    let out = match rx.await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!(err = %e, job_id = job.id, "cpu pool oneshot dropped before reply");
+                            vec![]
+                        }
+                    };
                     let ms = t0.elapsed().as_millis() as u64;
                     self.inner.completed.fetch_add(1, Ordering::Relaxed);
                     self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
@@ -614,7 +632,13 @@ impl Router {
                 }
 
                 let t0 = Instant::now();
-                let out = rx.await.unwrap_or_default();
+                let out = match rx.await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(err = %e, job_id = job.id, "batch oneshot dropped before reply");
+                        vec![]
+                    }
+                };
                 let ms = t0.elapsed().as_millis() as u64;
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false).await;
@@ -832,6 +856,7 @@ impl Router {
 /// # Returns
 ///
 /// A [`Strategy`] variant. Never panics.
+#[tracing::instrument(level = "trace", skip(cfg, job), fields(job_id = job.id, kind = %job.kind, cost = job.compute_cost))]
 pub fn choose_strategy(cfg: &RouterConfig, job: &Job, cpu_busy: usize) -> Strategy {
     if cpu_busy >= cfg.backpressure_busy_threshold {
         if job.scaling_potential >= 0.65 {
@@ -877,7 +902,13 @@ async fn cpu_dispatch_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<CpuWork>, m
         tokio::spawn(async move {
             let j = work.job.clone();
             let handle = tokio::task::spawn_blocking(move || execute_job(&j));
-            let out = handle.await.unwrap_or_default();
+            let out = match handle.await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(err = %e, "spawn_blocking panicked in cpu pool; returning empty result");
+                    vec![]
+                }
+            };
             let _ = work.reply.send(out);
 
             let ms = work.enqueued_at.elapsed().as_millis() as u64;
