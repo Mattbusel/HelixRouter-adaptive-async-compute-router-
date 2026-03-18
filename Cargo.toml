@@ -63,10 +63,27 @@ name = "routing"
 harness = false
 
 [profile.release]
+# Maximum optimization: enable link-time optimization and single codegen unit.
 lto = true
 codegen-units = 1
+opt-level = 3
+# Strip debug symbols from release binaries to reduce binary size.
+strip = "symbols"
+# Abort on panic in release builds — panics in libraries should never reach production.
+# Change to "unwind" if you need backtraces or if downstream code catches panics.
+panic = "abort"
+
+[profile.bench]
+# Keep debug info in benchmarks so Criterion can attribute samples to source lines.
+debug = true
 
 [lints.clippy]
+# Deny panicking operations in library code (test modules are exempted by `#[allow]`).
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+# Catch common correctness pitfalls.
+large_futures = "warn"
+redundant_closure_for_method_calls = "warn"
+needless_pass_by_value = "warn"
+semicolon_if_nothing_returned = "warn"

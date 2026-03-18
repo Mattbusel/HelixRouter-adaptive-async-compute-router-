@@ -97,6 +97,19 @@ impl Simulator {
     }
 }
 
+/// Generate a two-phase job sequence for pressure-burst testing.
+///
+/// Phase 1: `warm_count` low-cost jobs (no heavy fraction) to warm up the router.
+/// Phase 2: `burst_count` fully-heavy jobs to saturate the CPU pool.
+///
+/// All job IDs are re-assigned as monotonically increasing integers after merging
+/// the two phases so downstream callers see a contiguous ID space.
+///
+/// # Parameters
+///
+/// * `seed`        — PRNG seed for reproducibility.
+/// * `warm_count`  — Number of warm-up jobs.
+/// * `burst_count` — Number of heavy-burst jobs appended after warm-up.
 #[allow(dead_code)]
 pub fn pressure_burst(seed: u64, warm_count: u64, burst_count: u64) -> Vec<Job> {
     let mut sim = Simulator::new(SimulatorConfig { seed, total_jobs: warm_count, heavy_job_fraction: 0.0 });

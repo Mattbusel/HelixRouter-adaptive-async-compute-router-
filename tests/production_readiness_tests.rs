@@ -490,12 +490,14 @@ async fn backpressure_no_drops_when_all_jobs_go_inline() {
 
 #[tokio::test]
 async fn backpressure_drops_when_queue_cap_is_zero() {
-    // Setting cpu_queue_cap to 0 forces CpuPool jobs to overflow immediately.
-    // With a very low inline and spawn threshold, heavy jobs must be dropped.
+    // A backpressure_busy_threshold of 0 means any busy worker triggers
+    // backpressure immediately, causing low-scaling jobs to be dropped.
+    // cpu_queue_cap must be >= cpu_parallelism per RouterConfig validation,
+    // so we use the minimum valid value (1) instead of 0.
     let cfg = RouterConfig {
-        inline_threshold: 0,
-        spawn_threshold: 0,
-        cpu_queue_cap: 0,
+        inline_threshold: 1,
+        spawn_threshold: 2,
+        cpu_queue_cap: 1,
         cpu_parallelism: 1,
         backpressure_busy_threshold: 0,
         batch_max_size: 1,

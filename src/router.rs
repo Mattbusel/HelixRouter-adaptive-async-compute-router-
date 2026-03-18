@@ -455,6 +455,7 @@ impl Router {
     /// # Panics
     ///
     /// This function never panics.
+    #[tracing::instrument(level = "debug", skip(self), fields(job_id = job.id, kind = %job.kind, cost = job.compute_cost))]
     pub async fn submit(&self, job: Job) -> Option<Vec<Output>> {
         let cfg = self.inner.cfg.read().await.clone();
         let adaptive_threshold = *self.inner.adaptive_spawn_threshold.lock().await;
@@ -766,6 +767,7 @@ impl Router {
     ///
     /// The observation is derived from the current `stats_snapshot`: total jobs
     /// routed, drop rate, and composite pressure score.
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn autoscale_tick(&self) {
         use crate::autoscaler::ScaleDirection;
 
