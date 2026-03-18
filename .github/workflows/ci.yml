@@ -28,6 +28,8 @@ jobs:
     name: Build, Clippy, Test, Docs
     runs-on: ubuntu-latest
     needs: fmt
+    env:
+      LD_LIBRARY_PATH: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,8 +38,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Clear LD_LIBRARY_PATH (avoid rustc path-join bug)
-        run: echo "LD_LIBRARY_PATH=" >> $GITHUB_ENV
 
       - name: Build (all targets, debug)
         run: cargo build --all-targets
@@ -59,12 +59,12 @@ jobs:
     name: MSRV (1.81)
     runs-on: ubuntu-latest
     needs: fmt
+    env:
+      LD_LIBRARY_PATH: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.81
       - uses: Swatinem/rust-cache@v2
-      - name: Clear LD_LIBRARY_PATH (avoid rustc path-join bug)
-        run: echo "LD_LIBRARY_PATH=" >> $GITHUB_ENV
       - name: Build on MSRV
         run: cargo build
 
