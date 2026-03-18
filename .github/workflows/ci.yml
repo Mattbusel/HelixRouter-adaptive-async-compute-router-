@@ -77,6 +77,29 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
+  # ---- security audit (exact spec) ----------------------------------------
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  # ---- coverage ------------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-tarpaulin --locked
+      - run: cargo tarpaulin --out Xml --engine llvm
+      - uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: false
+
   # ---- Windows cross-platform test ----------------------------------------
   test-windows:
     name: Tests (Windows)
