@@ -24,10 +24,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# `distributed` is a planned feature for multi-node coordination via Redis.
-# Not yet implemented: enabling this flag adds the redis dependency but no distributed
-# logic is active. Reserved for future multi-node support.
-distributed = ["redis"]
 
 [dependencies]
 # async runtime — core, never remove
@@ -48,8 +44,6 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # futures core for stream trait
 futures-core = "0.3"
-# Redis for distributed mode (optional)
-redis = { version = "0.24", features = ["aio", "tokio-comp"], optional = true }
 
 [dev-dependencies]
 # criterion benchmarks

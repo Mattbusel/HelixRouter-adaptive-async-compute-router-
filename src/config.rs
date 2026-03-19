@@ -748,4 +748,37 @@ mod tests {
             "callback should not fire for invalid config"
         );
     }
+
+    // ── Improvement #11: inline_threshold < spawn_threshold invariant ─────
+
+    #[test]
+    fn test_validate_rejects_equal_inline_and_spawn_thresholds() {
+        let mut cfg = RouterConfig::default();
+        cfg.inline_threshold = 50_000;
+        cfg.spawn_threshold = 50_000;
+        let result = cfg.validate();
+        assert!(result.is_err(), "inline == spawn must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.0.contains("inline_threshold"),
+            "error should mention inline_threshold"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_inline_above_spawn() {
+        let mut cfg = RouterConfig::default();
+        cfg.inline_threshold = 100_000;
+        cfg.spawn_threshold = 50_000;
+        let result = cfg.validate();
+        assert!(result.is_err(), "inline > spawn must be rejected");
+    }
+
+    #[test]
+    fn test_validate_accepts_inline_strictly_below_spawn() {
+        let mut cfg = RouterConfig::default();
+        cfg.inline_threshold = 8_000;
+        cfg.spawn_threshold = 60_000;
+        assert!(cfg.validate().is_ok(), "inline < spawn must be valid");
+    }
 }

@@ -153,6 +153,31 @@ fn bench_choose_strategy_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_neural_choose(c: &mut Criterion) {
+    use helixrouter::neural_router::{NeuralRouter, NeuralRouterConfig};
+    let mut neural = NeuralRouter::new(NeuralRouterConfig::default());
+    neural.warm_start_from_heuristics();
+    let job = make_job(1, 50_000, 0.5);
+    let pressure = 0.5f64;
+    c.bench_function("neural/choose", |b| {
+        b.iter(|| black_box(neural.choose(black_box(&job), black_box(pressure))))
+    });
+}
+
+fn bench_router_batch_flush(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let router = rt.block_on(async { Router::new(RouterConfig::default()) });
+    c.bench_function("router/batch_flush", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                // Submit a batch job (high scaling potential -> batch strategy)
+                let job = make_job(1, 100_000, 0.9);
+                let _ = router.submit(job).await;
+            })
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_choose_strategy_inline,
@@ -166,5 +191,7 @@ criterion_group!(
     bench_router_submit_inline,
     bench_router_scaling_sweep,
     bench_choose_strategy_scaling,
+    bench_neural_choose,
+    bench_router_batch_flush,
 );
 criterion_main!(benches);

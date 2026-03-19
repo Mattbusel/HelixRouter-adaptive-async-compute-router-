@@ -325,9 +325,12 @@ async fn sse_decisions(
                 }
                 // Err arm covers BroadcastStreamRecvError::Lagged: the subscriber
                 // fell behind and old events were dropped from the channel buffer.
-                // Returning None here skips the gap silently so a slow SSE client
+                // Log the lag count and return None so a slow SSE client
                 // cannot stall job submission by filling the broadcast channel.
-                Err(_) => None,
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "SSE: subscriber lagged, {} decisions dropped from stream", n);
+                    None
+                }
             }
         });
     Sse::new(stream)
@@ -525,6 +528,14 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
     for (kind, count) in sorted_flushed {
         text.push_str(&format!("helix_batch_flushed{{kind=\"{kind}\"}} {count}\n"));
     }
+    // Blocking panic counter.
+    text.push_str("# HELP helix_blocking_panics_total Number of blocking CPU tasks that panicked\n");
+    text.push_str("# TYPE helix_blocking_panics_total counter\n");
+    text.push_str(&format!("helix_blocking_panics_total {}\n", snap.blocking_panics));
+    // CPU queue depth gauge.
+    text.push_str("# HELP helix_cpu_queue_depth Current number of jobs queued for CPU pool\n");
+    text.push_str("# TYPE helix_cpu_queue_depth gauge\n");
+    text.push_str(&format!("helix_cpu_queue_depth {}\n", snap.cpu_queue_depth));
 
     let mut resp = (StatusCode::OK, text).into_response();
     resp.headers_mut().insert(

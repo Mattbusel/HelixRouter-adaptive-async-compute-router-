@@ -6,7 +6,7 @@
 //!
 //! ## Guarantees
 //! - No panics: all division-by-zero paths are guarded.
-//! - Bounded memory: the sample window is capped at 512 entries per strategy.
+//! - Bounded memory: the sample window is capped at the configured window size entries per strategy.
 //! - Deterministic: percentiles from the same sample set always produce the same result.
 //!
 //! ## NOT Responsible For
@@ -24,12 +24,15 @@ use std::collections::{HashMap, VecDeque};
 /// Weight for the current CPU-utilisation / queue-fill fraction (primary signal).
 /// Changing these constants requires updating the doc-comments on [`pressure_score`] and [`PressureTracker::score`].
 const PRESSURE_WEIGHT_PRIMARY_UTIL: f64 = 0.40;
-/// Weight for the rolling drop-rate EMA.
-const PRESSURE_WEIGHT_DROP_RATE: f64 = 0.30;
-/// Weight for the rolling latency-fraction EMA.
-const PRESSURE_WEIGHT_LATENCY: f64 = 0.20;
+/// Weight for the rolling queue fill fraction EMA (30%).
+const PRESSURE_WEIGHT_QUEUE_FILL: f64 = 0.30;
+/// Weight for the rolling drop-rate EMA (20%).
+const PRESSURE_WEIGHT_DROP_RATE: f64 = 0.20;
 /// Weight for the smoothed queue-fill EMA (trend signal).
 const PRESSURE_WEIGHT_SMOOTHED_TREND: f64 = 0.10;
+
+/// Capacity of the per-strategy circular sample buffer used for percentile computation.
+const LATENCY_WINDOW_SIZE: usize = 512;
 
 // ---------------------------------------------------------------------------
 // LatencyAgg
@@ -49,15 +52,15 @@ pub struct LatencyAgg {
     pub sum_ms: f64,
     /// Exponential moving average of latency in milliseconds.
     pub ema_ms: f64,
-    /// Circular sample buffer — capacity-capped at 512 via VecDeque with overwrite.
+    /// Circular sample buffer — capacity-capped at `LATENCY_WINDOW_SIZE` via VecDeque with overwrite.
     pub samples_ms: VecDeque<u64>,
-    /// Rolling 50th percentile over the last 512 samples.
+    /// Rolling 50th percentile over the last configured window size samples.
     /// Updated lazily: call `sync_percentiles()` before reading if you need a fresh value.
     pub p50_ms: u64,
-    /// Rolling 95th percentile over the last 512 samples.
+    /// Rolling 95th percentile over the last configured window size samples.
     /// Updated lazily: call `sync_percentiles()` before reading if you need a fresh value.
     pub p95_ms: u64,
-    /// Rolling 99th percentile over the last 512 samples.
+    /// Rolling 99th percentile over the last configured window size samples.
     /// Updated lazily: call `sync_percentiles()` before reading if you need a fresh value.
     pub p99_ms: u64,
     /// All-time minimum observed latency.
@@ -92,8 +95,8 @@ impl LatencyAgg {
             self.ema_ms = alpha * ms as f64 + (1.0 - alpha) * self.ema_ms;
         }
 
-        // Circular buffer — pop oldest when full
-        if self.samples_ms.len() >= 512 {
+        // Circular buffer — pop oldest when full (capped at LATENCY_WINDOW_SIZE)
+        if self.samples_ms.len() >= LATENCY_WINDOW_SIZE {
             self.samples_ms.pop_front();
         }
         self.samples_ms.push_back(ms);
@@ -201,11 +204,11 @@ pub struct LatencySummary {
     pub avg_ms: f64,
     /// Exponential moving average latency in milliseconds.
     pub ema_ms: f64,
-    /// 50th percentile (median) of the rolling 512-sample window.
+    /// 50th percentile (median) of the rolling sample window.
     pub p50_ms: u64,
-    /// 95th percentile of the rolling 512-sample window.
+    /// 95th percentile of the rolling sample window.
     pub p95_ms: u64,
-    /// 99th percentile of the rolling 512-sample window.
+    /// 99th percentile of the rolling sample window.
     pub p99_ms: u64,
     /// All-time minimum observed latency.
     pub min_ms: u64,
@@ -219,7 +222,7 @@ pub struct LatencySummary {
 
 /// Compute a composite pressure score in `[0.0, 1.0]`.
 ///
-/// Weights: `40% cpu_busy fraction + 30% queue depth fraction + 20% drop rate + 10% latency trend`.
+/// Weights: `40% cpu_busy fraction + 30% queue fill fraction + 20% drop rate + 10% latency trend`.
 ///
 /// All inputs are clamped before combination; the result is clamped to `[0.0, 1.0]`.
 ///
@@ -253,8 +256,8 @@ pub fn pressure_score(
     let drop_frac = (drop_rate_pct / 100.0).clamp(0.0, 1.0);
     let trend_frac = latency_trend.clamp(0.0, 1.0);
     (PRESSURE_WEIGHT_PRIMARY_UTIL * cpu_frac
-        + PRESSURE_WEIGHT_DROP_RATE * queue_frac
-        + PRESSURE_WEIGHT_LATENCY * drop_frac
+        + PRESSURE_WEIGHT_QUEUE_FILL * queue_frac
+        + PRESSURE_WEIGHT_DROP_RATE * drop_frac
         + PRESSURE_WEIGHT_SMOOTHED_TREND * trend_frac)
         .clamp(0.0, 1.0)
 }
@@ -420,8 +423,8 @@ impl PressureTracker {
             self.queue_frac_ema
         };
         (PRESSURE_WEIGHT_PRIMARY_UTIL * qf
-            + PRESSURE_WEIGHT_DROP_RATE * self.drop_rate_ema
-            + PRESSURE_WEIGHT_LATENCY * self.lat_frac_ema
+            + PRESSURE_WEIGHT_QUEUE_FILL * self.drop_rate_ema
+            + PRESSURE_WEIGHT_DROP_RATE * self.lat_frac_ema
             + PRESSURE_WEIGHT_SMOOTHED_TREND * self.queue_frac_ema)
             .clamp(0.0, 1.0)
     }
@@ -643,7 +646,7 @@ mod tests {
         for i in 0..600u64 {
             agg.record(i, 0.15);
         }
-        assert_eq!(agg.samples_ms.len(), 512, "buffer should be capped at 512");
+        assert_eq!(agg.samples_ms.len(), LATENCY_WINDOW_SIZE, "buffer should be capped at LATENCY_WINDOW_SIZE");
         // min_ms is the running global minimum over all 600 samples (0..599) → 0.
         assert_eq!(
             agg.min_ms, 0,
@@ -667,7 +670,7 @@ mod tests {
         for i in 0..600u64 {
             agg.record(i, 0.15);
         }
-        assert!(agg.samples_ms.len() <= 512);
+        assert!(agg.samples_ms.len() <= LATENCY_WINDOW_SIZE);
     }
 
     #[test]
