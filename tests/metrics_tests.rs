@@ -49,6 +49,7 @@ fn test_latency_agg_sum_accumulates() {
 fn test_latency_agg_p95_single_element() {
     let mut agg = LatencyAgg::default();
     agg.record(77, 0.15);
+    agg.sync_percentiles();
     assert_eq!(agg.p95_ms, 77);
 }
 
@@ -58,6 +59,7 @@ fn test_latency_agg_p95_even_distribution() {
     for i in 1..=20u64 {
         agg.record(i, 0.15);
     }
+    agg.sync_percentiles();
     assert!(agg.p95_ms >= 19);
 }
 
@@ -158,8 +160,8 @@ fn test_metrics_store_same_strategy_accumulates() {
 
 #[test]
 fn test_latency_summaries_empty_when_no_data() {
-    let store = MetricsStore::new(0.2);
-    assert!(latency_summaries(&store).is_empty());
+    let mut store = MetricsStore::new(0.2);
+    assert!(latency_summaries(&mut store).is_empty());
 }
 
 #[test]
@@ -168,7 +170,7 @@ fn test_latency_summaries_sorted_alphabetically() {
     store.record_latency(Strategy::Spawn, 10);
     store.record_latency(Strategy::Inline, 5);
     store.record_latency(Strategy::Batch, 20);
-    let sums = latency_summaries(&store);
+    let sums = latency_summaries(&mut store);
     let names: Vec<String> = sums.iter().map(|s| s.strategy.to_string()).collect();
     let mut sorted = names.clone();
     sorted.sort();
@@ -180,7 +182,7 @@ fn test_latency_summaries_count_matches() {
     let mut store = MetricsStore::new(0.2);
     store.record_latency(Strategy::Inline, 10);
     store.record_latency(Strategy::Inline, 20);
-    let sums = latency_summaries(&store);
+    let sums = latency_summaries(&mut store);
     let inline = sums
         .iter()
         .find(|s| s.strategy == Strategy::Inline)
@@ -193,7 +195,7 @@ fn test_latency_summaries_avg_correct() {
     let mut store = MetricsStore::new(0.2);
     store.record_latency(Strategy::Spawn, 10);
     store.record_latency(Strategy::Spawn, 30);
-    let sums = latency_summaries(&store);
+    let sums = latency_summaries(&mut store);
     let spawn = sums.iter().find(|s| s.strategy == Strategy::Spawn).unwrap();
     assert!((spawn.avg_ms - 20.0).abs() < 1e-9);
 }

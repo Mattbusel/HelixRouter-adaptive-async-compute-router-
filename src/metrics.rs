@@ -18,13 +18,29 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 
 // ---------------------------------------------------------------------------
+// Pressure score weights
+// ---------------------------------------------------------------------------
+
+/// Weight for the current CPU-utilisation / queue-fill fraction (primary signal).
+/// Changing these constants requires updating the doc-comments on [`pressure_score`] and [`PressureTracker::score`].
+const PRESSURE_WEIGHT_PRIMARY_UTIL: f64 = 0.40;
+/// Weight for the rolling drop-rate EMA.
+const PRESSURE_WEIGHT_DROP_RATE: f64 = 0.30;
+/// Weight for the rolling latency-fraction EMA.
+const PRESSURE_WEIGHT_LATENCY: f64 = 0.20;
+/// Weight for the smoothed queue-fill EMA (trend signal).
+const PRESSURE_WEIGHT_SMOOTHED_TREND: f64 = 0.10;
+
+// ---------------------------------------------------------------------------
 // LatencyAgg
 // ---------------------------------------------------------------------------
 
 /// Per-strategy latency accumulator.
 ///
 /// Maintains a running EMA, global min/max, and a 512-entry rolling sample
-/// window from which p50/p95/p99 are computed on each update.
+/// window from which p50/p95/p99 are computed **lazily on read** rather than
+/// on every insert. This avoids the O(n log n) sort on every `record()` call
+/// in the hot path; the sort is deferred until `percentiles()` is called.
 #[derive(Debug, Clone, Default)]
 pub struct LatencyAgg {
     /// Total number of observations recorded.
@@ -36,19 +52,30 @@ pub struct LatencyAgg {
     /// Circular sample buffer — capacity-capped at 512 via VecDeque with overwrite.
     pub samples_ms: VecDeque<u64>,
     /// Rolling 50th percentile over the last 512 samples.
+    /// Updated lazily: call `sync_percentiles()` before reading if you need a fresh value.
     pub p50_ms: u64,
     /// Rolling 95th percentile over the last 512 samples.
+    /// Updated lazily: call `sync_percentiles()` before reading if you need a fresh value.
     pub p95_ms: u64,
     /// Rolling 99th percentile over the last 512 samples.
+    /// Updated lazily: call `sync_percentiles()` before reading if you need a fresh value.
     pub p99_ms: u64,
     /// All-time minimum observed latency.
     pub min_ms: u64,
     /// All-time maximum observed latency.
     pub max_ms: u64,
+    /// Dirty flag: set to `true` when new samples have been added since the last
+    /// percentile computation. `sync_percentiles()` clears it.
+    dirty: bool,
 }
 
 impl LatencyAgg {
-    /// Record a new latency observation, updating EMA, percentiles, and min/max.
+    /// Record a new latency observation, updating EMA and min/max.
+    ///
+    /// Percentile fields (`p50_ms`, `p95_ms`, `p99_ms`) are **not** recomputed
+    /// here to avoid an O(n log n) sort on the hot path. Instead the `dirty`
+    /// flag is set; call [`LatencyAgg::sync_percentiles`] before reading
+    /// percentile values.
     ///
     /// # Parameters
     ///
@@ -84,12 +111,24 @@ impl LatencyAgg {
             }
         }
 
-        // Recompute all three percentiles from a single sort pass (was 3 × O(n log n)).
+        // Mark percentiles dirty — they will be recomputed lazily on next read.
+        self.dirty = true;
+    }
+
+    /// Recompute p50/p95/p99 from the current sample buffer if dirty.
+    ///
+    /// This is the single O(n log n) sort operation, deferred from `record()`.
+    /// Called by `latency_summaries` and by any code that reads `p50_ms`/`p95_ms`/`p99_ms`.
+    pub fn sync_percentiles(&mut self) {
+        if !self.dirty {
+            return;
+        }
         let mut sorted: Vec<u64> = self.samples_ms.iter().copied().collect();
         sorted.sort_unstable();
         self.p50_ms = percentile_from_sorted(&sorted, 0.50);
         self.p95_ms = percentile_from_sorted(&sorted, 0.95);
         self.p99_ms = percentile_from_sorted(&sorted, 0.99);
+        self.dirty = false;
     }
 
     /// Return arithmetic mean latency in milliseconds. Returns `0.0` when no samples recorded.
@@ -213,7 +252,11 @@ pub fn pressure_score(
     };
     let drop_frac = (drop_rate_pct / 100.0).clamp(0.0, 1.0);
     let trend_frac = latency_trend.clamp(0.0, 1.0);
-    (0.40 * cpu_frac + 0.30 * queue_frac + 0.20 * drop_frac + 0.10 * trend_frac).clamp(0.0, 1.0)
+    (PRESSURE_WEIGHT_PRIMARY_UTIL * cpu_frac
+        + PRESSURE_WEIGHT_DROP_RATE * queue_frac
+        + PRESSURE_WEIGHT_LATENCY * drop_frac
+        + PRESSURE_WEIGHT_SMOOTHED_TREND * trend_frac)
+        .clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +272,8 @@ pub struct NeuralMetrics {
     pub avg_reward: f64,
     /// Current exploration rate (epsilon) of the epsilon-greedy policy.
     pub epsilon: f64,
+    /// Whether the neural router has passed its warm-up threshold and is actively used for routing.
+    pub is_warmed_up: bool,
 }
 
 /// Render Prometheus text-format metrics without neural learning metrics.
@@ -318,6 +363,11 @@ pub fn prometheus_text_with_neural(
         out.push_str(&format!("helix_neural_avg_reward {:.6}\n", n.avg_reward));
         out.push_str("# TYPE helix_neural_epsilon gauge\n");
         out.push_str(&format!("helix_neural_epsilon {:.6}\n", n.epsilon));
+        out.push_str("# TYPE helix_neural_is_warmed_up gauge\n");
+        out.push_str(&format!(
+            "helix_neural_is_warmed_up {}\n",
+            if n.is_warmed_up { 1 } else { 0 }
+        ));
     }
     out
 }
@@ -369,10 +419,10 @@ impl PressureTracker {
         } else {
             self.queue_frac_ema
         };
-        (0.40 * qf
-            + 0.30 * self.drop_rate_ema
-            + 0.20 * self.lat_frac_ema
-            + 0.10 * self.queue_frac_ema)
+        (PRESSURE_WEIGHT_PRIMARY_UTIL * qf
+            + PRESSURE_WEIGHT_DROP_RATE * self.drop_rate_ema
+            + PRESSURE_WEIGHT_LATENCY * self.lat_frac_ema
+            + PRESSURE_WEIGHT_SMOOTHED_TREND * self.queue_frac_ema)
             .clamp(0.0, 1.0)
     }
 }
@@ -413,24 +463,33 @@ impl MetricsStore {
 }
 
 /// Build LatencySummary vec from a MetricsStore.
-pub fn latency_summaries(store: &MetricsStore) -> Vec<LatencySummary> {
-    latency_summaries_from_map(&store.latency)
+///
+/// Lazily syncs percentiles for each strategy aggregate before building summaries.
+pub fn latency_summaries(store: &mut MetricsStore) -> Vec<LatencySummary> {
+    latency_summaries_from_map(&mut store.latency)
 }
 
 /// Build LatencySummary vec from a raw latency HashMap (for sharded callers).
-pub fn latency_summaries_from_map(latency: &HashMap<Strategy, LatencyAgg>) -> Vec<LatencySummary> {
+///
+/// Calls [`LatencyAgg::sync_percentiles`] on each entry so the returned
+/// p50/p95/p99 values are always up to date, paying the O(n log n) sort cost
+/// only on read rather than on every insert.
+pub fn latency_summaries_from_map(latency: &mut HashMap<Strategy, LatencyAgg>) -> Vec<LatencySummary> {
     let mut out: Vec<LatencySummary> = latency
-        .iter()
-        .map(|(s, agg)| LatencySummary {
-            strategy: *s,
-            count: agg.count,
-            avg_ms: agg.avg_ms(),
-            ema_ms: agg.ema_ms,
-            p50_ms: agg.p50_ms,
-            p95_ms: agg.p95_ms,
-            p99_ms: agg.p99_ms,
-            min_ms: agg.min_ms,
-            max_ms: agg.max_ms,
+        .iter_mut()
+        .map(|(s, agg)| {
+            agg.sync_percentiles();
+            LatencySummary {
+                strategy: *s,
+                count: agg.count,
+                avg_ms: agg.avg_ms(),
+                ema_ms: agg.ema_ms,
+                p50_ms: agg.p50_ms,
+                p95_ms: agg.p95_ms,
+                p99_ms: agg.p99_ms,
+                min_ms: agg.min_ms,
+                max_ms: agg.max_ms,
+            }
         })
         .collect();
     out.sort_by_key(|r| r.strategy.to_string());
@@ -483,6 +542,7 @@ mod tests {
     fn test_latency_agg_p95_single_sample() {
         let mut agg = LatencyAgg::default();
         agg.record(42, 0.15);
+        agg.sync_percentiles();
         assert_eq!(agg.p95_ms, 42);
     }
 
@@ -492,6 +552,7 @@ mod tests {
         for v in 1..=20u64 {
             agg.record(v, 0.15);
         }
+        agg.sync_percentiles();
         assert_eq!(agg.p95_ms, 19);
     }
 
@@ -547,6 +608,7 @@ mod tests {
         for v in 1..=100u64 {
             agg.record(v, 0.15);
         }
+        agg.sync_percentiles();
         // p50 should be around 50
         assert!(agg.p50_ms >= 48 && agg.p50_ms <= 52, "p50={}", agg.p50_ms);
     }
@@ -557,6 +619,7 @@ mod tests {
         for v in 1..=100u64 {
             agg.record(v, 0.15);
         }
+        agg.sync_percentiles();
         assert!(
             agg.p99_ms >= agg.p95_ms,
             "p99={} p95={}",
@@ -569,6 +632,7 @@ mod tests {
     fn test_latency_agg_p99_single_sample() {
         let mut agg = LatencyAgg::default();
         agg.record(99, 0.15);
+        agg.sync_percentiles();
         assert_eq!(agg.p99_ms, 99);
     }
 
@@ -589,6 +653,7 @@ mod tests {
         // max_ms is the global maximum → 599.
         assert_eq!(agg.max_ms, 599, "max_ms should be 599, got {}", agg.max_ms);
         // p95 is computed from the rolling 512-sample window (last 512: 88..599).
+        agg.sync_percentiles();
         assert!(
             agg.p95_ms >= 88,
             "p95 of window [88,599] should be >= 88, got {}",

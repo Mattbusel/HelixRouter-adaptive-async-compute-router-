@@ -59,16 +59,26 @@ pub struct RouterConfig {
     /// Maximum compute cost for which a job is executed inline (on the calling task).
     /// Jobs with `compute_cost <= inline_threshold` run inline without spawning.
     /// Must be strictly less than `spawn_threshold`. Default: `8_000`.
+    ///
+    /// **Safe range**: `1_000`–`20_000`. Values above `spawn_threshold` are rejected.
     pub inline_threshold: u64,
     /// Maximum compute cost for which a job is spawned as a Tokio task.
     /// Jobs above this cost are routed to the CPU pool or dropped under pressure.
     /// Must be strictly greater than `inline_threshold`. Default: `60_000`.
+    ///
+    /// **Safe range**: `50_000`–`200_000`. Increase to push more work to CPU pool;
+    /// decrease to keep async tasks short.
     pub spawn_threshold: u64,
     /// Bounded capacity of the CPU worker queue (channel depth).
     /// Must be >= `cpu_parallelism`. Default: `512`.
+    ///
+    /// **Safe range**: `cpu_parallelism`–`4096`.
     pub cpu_queue_cap: usize,
     /// Number of concurrent CPU-bound workers (blocking thread pool slots).
     /// Default: `8`.
+    ///
+    /// **Safe range**: `4`–`16`. Values above the host's physical core count will
+    /// cause oversubscription (a startup warning is emitted when this occurs).
     pub cpu_parallelism: usize,
     /// Number of busy CPU workers above which Batch/Drop strategies are forced.
     /// When `cpu_busy >= backpressure_busy_threshold`, incoming jobs are batched
@@ -76,6 +86,9 @@ pub struct RouterConfig {
     pub backpressure_busy_threshold: usize,
     /// Maximum number of jobs accumulated before a batch is flushed.
     /// Must be >= 1. Default: `8`.
+    ///
+    /// **Safe range**: `4`–`32`. Larger batches amortise dispatch overhead but
+    /// increase tail latency.
     pub batch_max_size: usize,
     /// Maximum time (ms) a batch waits before flushing even if not full.
     /// Default: `10`.
@@ -83,11 +96,17 @@ pub struct RouterConfig {
     /// Smoothing factor for the exponential moving average of observed latency.
     /// Must be in `(0, 1]`. Higher values weight recent observations more.
     /// Default: `0.15`.
+    ///
+    /// **Safe range**: `0.05`–`0.30`. Values near 1.0 make the EMA highly
+    /// reactive; values near 0.0 smooth aggressively but respond slowly.
     #[serde(default = "default_ema_alpha")]
     pub ema_alpha: f64,
     /// Fractional step for adaptive spawn_threshold increases, in `(0.0, 1.0]`.
     /// A value of 0.10 means "raise threshold by 10% of its current value".
     /// Default: `0.10`.
+    ///
+    /// **Safe range**: `0.01`–`0.50`. Larger values react faster to pressure
+    /// but may overshoot; smaller values converge slowly.
     #[serde(default = "default_adaptive_step")]
     pub adaptive_step: f64,
     /// P95 latency budget (ms) for the CpuPool strategy.

@@ -323,11 +323,16 @@ async fn sse_decisions(
                         }
                     }
                 }
+                // Err arm covers BroadcastStreamRecvError::Lagged: the subscriber
+                // fell behind and old events were dropped from the channel buffer.
+                // Returning None here skips the gap silently so a slow SSE client
+                // cannot stall job submission by filling the broadcast channel.
                 Err(_) => None,
             }
         });
     Sse::new(stream)
 }
+
 
 // ===== JSON stats =====
 
@@ -498,14 +503,28 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
         sample_count: neural_snap.sample_count,
         avg_reward: neural_snap.avg_reward,
         epsilon: neural_snap.epsilon,
+        is_warmed_up: neural_snap.is_warmed_up,
     };
-    let text = prometheus_text_with_neural(
+    let mut text = prometheus_text_with_neural(
         snap.completed,
         snap.dropped,
         &snap.routed,
         &summaries,
         Some(&neural_metrics),
     );
+    // Batch observability counters.
+    text.push_str("# TYPE helix_batch_enqueued counter\n");
+    let mut sorted_enqueued: Vec<_> = snap.batch_enqueued.iter().collect();
+    sorted_enqueued.sort_by_key(|(k, _)| *k);
+    for (kind, count) in sorted_enqueued {
+        text.push_str(&format!("helix_batch_enqueued{{kind=\"{kind}\"}} {count}\n"));
+    }
+    text.push_str("# TYPE helix_batch_flushed counter\n");
+    let mut sorted_flushed: Vec<_> = snap.batch_flushed.iter().collect();
+    sorted_flushed.sort_by_key(|(k, _)| *k);
+    for (kind, count) in sorted_flushed {
+        text.push_str(&format!("helix_batch_flushed{{kind=\"{kind}\"}} {count}\n"));
+    }
 
     let mut resp = (StatusCode::OK, text).into_response();
     resp.headers_mut().insert(

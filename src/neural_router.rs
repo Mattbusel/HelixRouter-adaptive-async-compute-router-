@@ -17,6 +17,7 @@
 //! - Exploration schedule annealing (epsilon is fixed at construction time)
 
 use crate::types::{Job, JobKind, Strategy};
+use tracing::info;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -89,7 +90,10 @@ impl Default for NeuralRouterConfig {
             epsilon: 0.10,
             drop_pressure_threshold: 0.80,
             min_samples_before_learning: 10,
-            epsilon_decay: 0.0,
+            // Default 0.05: reduce exploration by 5% every 100 samples so the
+            // router converges toward exploitation as it accumulates evidence.
+            // Set to 0.0 to disable decay entirely.
+            epsilon_decay: 0.05,
             max_compute_cost: MAX_COMPUTE_COST,
             max_latency_budget_ms: MAX_LATENCY_BUDGET_MS,
         }
@@ -153,7 +157,13 @@ fn index_to_strategy(i: usize) -> Strategy {
         IDX_BATCH => Strategy::Batch,
         IDX_DROP => Strategy::Drop,
         // Safety: only called with values 0..N_STRATEGIES produced internally.
-        _ => Strategy::Inline,
+        _ => {
+            debug_assert!(
+                false,
+                "index_to_strategy: index {i} is out of range 0..{N_STRATEGIES}; defaulting to Inline"
+            );
+            Strategy::Inline
+        }
     }
 }
 
@@ -437,6 +447,14 @@ impl NeuralRouter {
         self.total_reward += reward;
         self.sample_count += 1;
 
+        // Log the warm-up transition once so operators know when neural routing activates.
+        if self.sample_count == self.config.min_samples_before_learning as u64 {
+            info!(
+                sample_count = self.sample_count,
+                "neural router warm-up complete: learned strategy selection now active"
+            );
+        }
+
         // Epsilon decay: every 100 samples reduce exploration rate by the
         // configured fraction, floored at 0.01 so some exploration is retained.
         if self.config.epsilon_decay > 0.0 && self.sample_count % 100 == 0 {
@@ -459,7 +477,12 @@ impl NeuralRouter {
         let s_idx = strategy_index(outcome.strategy);
 
         for (w, f) in self.weights[s_idx].iter_mut().zip(features.iter()) {
-            *w += self.config.learning_rate * reward * f;
+            let delta = self.config.learning_rate * reward * f;
+            // Guard against NaN/Inf: skip the update if either the existing weight
+            // or the computed delta is non-finite to prevent weight matrix corruption.
+            if delta.is_finite() && w.is_finite() {
+                *w += delta;
+            }
         }
     }
 
@@ -592,6 +615,8 @@ impl NeuralRouter {
         if self.sample_count < self.config.min_samples_before_learning as u64 {
             self.sample_count = self.config.min_samples_before_learning as u64;
         }
+
+        info!("neural router warm-up: heuristic weights pre-seeded; strategy selection active from first job");
     }
 }
 
@@ -1207,6 +1232,8 @@ mod tests {
         assert!((cfg.epsilon - 0.10).abs() < 1e-12);
         assert!((cfg.drop_pressure_threshold - 0.80).abs() < 1e-12);
         assert_eq!(cfg.min_samples_before_learning, 10);
+        // epsilon_decay default is now 0.05 (improvement #1)
+        assert!((cfg.epsilon_decay - 0.05).abs() < 1e-12);
     }
 
     #[test]
@@ -1555,6 +1582,43 @@ mod tests {
             (router.config.epsilon - 0.50).abs() < 1e-10,
             "epsilon should not change with decay=0"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // NaN/Inf guard tests (improvement #2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_weight_update_skips_nan_reward() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            learning_rate: f64::NAN,
+            ..Default::default()
+        });
+        router.weights = [[0.0; N_FEATURES]; N_STRATEGIES];
+        let job = make_job(JobKind::HashMix, 100, 0.5, 500);
+        router.record_outcome(&job, 0.5, within_budget_outcome(Strategy::Inline, 500));
+        // With NaN learning rate, delta = NaN*reward*feature, should be skipped
+        for &w in router.weights[IDX_INLINE].iter() {
+            assert_eq!(w, 0.0, "weights should remain zero when delta is NaN");
+        }
+    }
+
+    #[test]
+    fn test_weight_update_skips_inf_learning_rate() {
+        let mut router = NeuralRouter::new(NeuralRouterConfig {
+            min_samples_before_learning: 1,
+            learning_rate: f64::INFINITY,
+            ..Default::default()
+        });
+        router.weights = [[0.0; N_FEATURES]; N_STRATEGIES];
+        let job = make_job(JobKind::HashMix, 100, 0.5, 500);
+        router.record_outcome(&job, 0.5, within_budget_outcome(Strategy::Inline, 500));
+        // Inf * reward * feature is Inf — non-finite delta should be skipped
+        for &w in router.weights[IDX_INLINE].iter() {
+            // weight stays finite (either 0.0 or unchanged)
+            assert!(w.is_finite(), "weights must remain finite, got {w}");
+        }
     }
 
     // -----------------------------------------------------------------------

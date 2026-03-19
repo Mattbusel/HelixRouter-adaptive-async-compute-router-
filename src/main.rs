@@ -57,6 +57,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = RouterConfig::default();
     let router = Router::new(cfg);
 
+    // Auto-load neural weights from a previous run to avoid cold-start convergence lag.
+    // Falls back silently to the heuristic warm-start if the file is absent or invalid.
+    let weights_path =
+        std::env::var("HELIX_WEIGHTS_PATH").unwrap_or_else(|_| "helix_weights.json".to_string());
+    match std::fs::read_to_string(&weights_path) {
+        Ok(json) => match serde_json::from_str::<neural_router::WeightSnapshot>(&json) {
+            Ok(snap) => {
+                router.restore_neural_weights(snap).await;
+                tracing::info!(path = %weights_path, "neural weights restored from previous run");
+            }
+            Err(e) => tracing::warn!(
+                path = %weights_path,
+                err = %e,
+                "neural weights file found but could not be parsed; using heuristic init"
+            ),
+        },
+        Err(_) => tracing::debug!(
+            path = %weights_path,
+            "no neural weights file found; starting with heuristic init"
+        ),
+    }
+
     // Config hot-reload: if HELIX_CONFIG_PATH is set, watch that file and
     // push updates into the router whenever the file changes.
     if let Ok(config_path) = std::env::var("HELIX_CONFIG_PATH") {
@@ -173,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Persist neural router weights so the next startup avoids cold-start lag.
     let weights_path =
         std::env::var("HELIX_WEIGHTS_PATH").unwrap_or_else(|_| "helix_weights.json".to_string());
-    let snap = router.neural_snapshot().await;
+    let snap = router.weight_snapshot().await;
     match serde_json::to_string_pretty(&snap) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&weights_path, &json) {
