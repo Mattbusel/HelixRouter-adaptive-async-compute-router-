@@ -119,6 +119,11 @@ pub struct RouterConfig {
     /// Default: `1.5`.
     #[serde(default = "default_adaptive_p95_threshold_factor")]
     pub adaptive_p95_threshold_factor: f64,
+    /// Whether adaptive spawn_threshold adjustment is enabled.
+    /// When `false`, the adaptive threshold logic is bypassed and the configured
+    /// `spawn_threshold` is always used. Default: `true`.
+    #[serde(default = "default_enable_adaptive_threshold")]
+    pub enable_adaptive_threshold: bool,
 }
 
 /// Default schema version returned when the `version` field is absent from a deserialised config.
@@ -141,6 +146,10 @@ pub fn default_cpu_p95_budget_ms() -> u64 {
 pub fn default_adaptive_p95_threshold_factor() -> f64 {
     1.5
 }
+/// Default enable_adaptive_threshold (`true`) — adaptive threshold is on by default.
+pub fn default_enable_adaptive_threshold() -> bool {
+    true
+}
 
 impl Default for RouterConfig {
     fn default() -> Self {
@@ -157,6 +166,7 @@ impl Default for RouterConfig {
             adaptive_step: default_adaptive_step(),
             cpu_p95_budget_ms: default_cpu_p95_budget_ms(),
             adaptive_p95_threshold_factor: default_adaptive_p95_threshold_factor(),
+            enable_adaptive_threshold: default_enable_adaptive_threshold(),
         }
     }
 }
@@ -205,6 +215,9 @@ pub struct RouterConfigPatch {
     /// Override config version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    /// Override enable_adaptive_threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_adaptive_threshold: Option<bool>,
 }
 
 impl RouterConfig {
@@ -241,8 +254,10 @@ impl RouterConfig {
         if self.cpu_queue_cap == 0 {
             return Err(ConfigError("cpu_queue_cap must be >= 1".to_string()));
         }
-        if self.batch_max_size == 0 {
-            return Err(ConfigError("batch_max_size must be >= 1".to_string()));
+        if self.batch_max_size < 2 {
+            return Err(ConfigError(
+                "batch_max_size must be >= 2 to enable batching".to_string(),
+            ));
         }
         if !(0.0 < self.ema_alpha && self.ema_alpha <= 1.0) {
             return Err(ConfigError(format!(
@@ -547,12 +562,13 @@ mod tests {
             cpu_queue_cap: 1,
             cpu_parallelism: 1,
             backpressure_busy_threshold: 1,
-            batch_max_size: 1,
+            batch_max_size: 2, // minimum valid value (>= 2 required for batching)
             batch_max_delay_ms: 0,
             ema_alpha: 1.0,
             adaptive_step: 1.0,
             cpu_p95_budget_ms: 1,
             adaptive_p95_threshold_factor: 1.0,
+            enable_adaptive_threshold: true,
         };
         assert!(cfg.validate().is_ok());
     }
@@ -780,5 +796,59 @@ mod tests {
         cfg.inline_threshold = 8_000;
         cfg.spawn_threshold = 60_000;
         assert!(cfg.validate().is_ok(), "inline < spawn must be valid");
+    }
+
+    // ── Improvement #10: batch_max_size >= 2 ────────────────────────────────
+
+    #[test]
+    fn test_batch_max_size_one_is_invalid() {
+        let mut cfg = RouterConfig::default();
+        cfg.batch_max_size = 1;
+        let result = cfg.validate();
+        assert!(result.is_err(), "batch_max_size=1 must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.0.contains("batch_max_size"),
+            "error should mention batch_max_size, got: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn test_batch_max_size_two_is_valid() {
+        let mut cfg = RouterConfig::default();
+        cfg.batch_max_size = 2;
+        assert!(cfg.validate().is_ok(), "batch_max_size=2 should be valid (minimum)");
+    }
+
+    #[test]
+    fn test_batch_max_size_zero_is_invalid() {
+        let mut cfg = RouterConfig::default();
+        cfg.batch_max_size = 0;
+        assert!(cfg.validate().is_err(), "batch_max_size=0 must be rejected");
+    }
+
+    // ── Improvement #11: enable_adaptive_threshold ──────────────────────────
+
+    #[test]
+    fn test_enable_adaptive_threshold_default_is_true() {
+        let cfg = RouterConfig::default();
+        assert!(cfg.enable_adaptive_threshold, "default should be true");
+    }
+
+    #[test]
+    fn test_enable_adaptive_threshold_false_is_valid() {
+        let mut cfg = RouterConfig::default();
+        cfg.enable_adaptive_threshold = false;
+        assert!(cfg.validate().is_ok(), "enable_adaptive_threshold=false must be valid");
+    }
+
+    #[test]
+    fn test_enable_adaptive_threshold_roundtrips_json() {
+        let mut cfg = RouterConfig::default();
+        cfg.enable_adaptive_threshold = false;
+        let j = serde_json::to_string(&cfg).unwrap();
+        let back: RouterConfig = serde_json::from_str(&j).unwrap();
+        assert!(!back.enable_adaptive_threshold);
     }
 }

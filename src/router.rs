@@ -57,6 +57,10 @@ pub struct NeuralSnapshot {
     pub weights: [[f64; 7]; 5],
     /// Current exploration rate (epsilon) — decreases as the router learns.
     pub epsilon: f64,
+    /// Welford online variance of the reward signal — higher = more volatile routing quality.
+    pub reward_variance: f64,
+    /// Per-strategy outcome counts: `[Inline, Spawn, CpuPool, Batch, Drop]`.
+    pub per_strategy_counts: [u64; 5],
 }
 
 // ===== RoutingDecision (live feed) =====
@@ -107,6 +111,10 @@ pub struct RouterStats {
     pub blocking_panics: u64,
     /// Current number of jobs queued for the CPU pool (channel backlog).
     pub cpu_queue_depth: usize,
+    /// Total number of adaptive threshold decay events since process start.
+    pub adaptive_decay_count: u64,
+    /// Total number of batch buffer misses (unknown job kind) since process start.
+    pub batch_miss_count: u64,
 }
 
 // ===== Internal types =====
@@ -227,6 +235,10 @@ struct Inner {
     blocking_panics: std::sync::atomic::AtomicU64,
     /// Approximate current depth of the CPU work queue (jobs submitted but not yet started).
     cpu_queue_depth: std::sync::atomic::AtomicU64,
+    /// Counter incremented whenever the adaptive spawn_threshold decays (healthy p95).
+    adaptive_decay_count: AtomicU64,
+    /// Counter incremented when a batch buffer lookup returns None (unknown job kind).
+    batch_miss_count: AtomicU64,
 
     // ── Batch observability counters (per job kind) ───────────────────────
     batch_enqueued_hashmix: AtomicU64,
@@ -321,6 +333,8 @@ impl Router {
             consecutive_raises: AtomicU64::new(0),
             blocking_panics: std::sync::atomic::AtomicU64::new(0),
             cpu_queue_depth: std::sync::atomic::AtomicU64::new(0),
+            adaptive_decay_count: AtomicU64::new(0),
+            batch_miss_count: AtomicU64::new(0),
             batch_enqueued_hashmix: AtomicU64::new(0),
             batch_enqueued_primecount: AtomicU64::new(0),
             batch_enqueued_montecarlo: AtomicU64::new(0),
@@ -382,13 +396,17 @@ impl Router {
                 let score = {
                     let m = inner4.metrics.lock().await;
                     let internal = m.pressure.score(queue_frac);
-                    let eot = inner4.eot_pressure_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+                    // Use Acquire ordering when loading EOT pressure so we see the latest
+                    // value written by set_eot_pressure (which uses Release ordering).
+                    let eot = inner4.eot_pressure_milli.load(Ordering::Acquire) as f64 / 1000.0;
                     internal.max(eot)
                 };
                 // Bit-cast f64 → u64 for lock-free atomic storage.
+                // Use Release ordering so consumers reading with Acquire see a
+                // consistent pressure_cache value after its computation.
                 inner4
                     .pressure_cache
-                    .store(score.to_bits(), Ordering::Relaxed);
+                    .store(score.to_bits(), Ordering::Release);
                 let _ = cpu_busy; // used above via cfg.cpu_parallelism.saturating_sub
             }
             info!("pressure cache refresher exiting");
@@ -471,6 +489,9 @@ impl Router {
         if let Some(v) = patch.adaptive_p95_threshold_factor {
             candidate.adaptive_p95_threshold_factor = v;
         }
+        if let Some(v) = patch.enable_adaptive_threshold {
+            candidate.enable_adaptive_threshold = v;
+        }
         // Validate before committing — roll back on error.
         // This single validate() call enforces ALL invariants atomically, including:
         //   - inline_threshold < spawn_threshold  (cross-field invariant)
@@ -533,6 +554,8 @@ impl Router {
             batch_flushed,
             blocking_panics: self.inner.blocking_panics.load(Ordering::Relaxed),
             cpu_queue_depth: self.inner.cpu_queue_depth.load(Ordering::Relaxed) as usize,
+            adaptive_decay_count: self.inner.adaptive_decay_count.load(Ordering::Relaxed),
+            batch_miss_count: self.inner.batch_miss_count.load(Ordering::Relaxed),
         }
     }
 
@@ -618,10 +641,16 @@ impl Router {
     /// # Panics
     /// This function never panics.
     pub fn set_eot_pressure(&self, pressure: f64) {
+        // Guard against non-finite values before storing.
+        if !pressure.is_finite() {
+            warn!("Received non-finite EOT pressure: {}; ignoring", pressure);
+            return;
+        }
         let milli = (pressure.clamp(0.0, 1.0) * 1000.0) as u64;
+        // Use Release ordering so readers using Acquire see the updated value.
         self.inner
             .eot_pressure_milli
-            .store(milli, Ordering::Relaxed);
+            .store(milli, Ordering::Release);
     }
 
     /// Read the currently injected EOT pressure (0.0–1.0).
@@ -687,6 +716,12 @@ impl Router {
             cfg.validate().is_ok(),
             "update_config_field produced invalid config"
         );
+        if updated {
+            // Keep cfg_arc in sync so the hot submit() path sees the new config.
+            let new_arc = Arc::new(cfg.clone());
+            drop(cfg); // release the write lock before acquiring cfg_arc write lock
+            *self.inner.cfg_arc.write().await = new_arc;
+        }
         updated
     }
 
@@ -737,6 +772,25 @@ impl Router {
             );
         }
 
+        // Zero-cost jobs are trivially cheap and should always be routed inline.
+        // Log a warning once so operators know about zero-cost submissions.
+        // We do NOT allow zero-cost jobs to reach the neural router's feature
+        // discrimination logic since compute_cost=0 yields a degenerate feature vector.
+        if job.compute_cost == 0 {
+            warn!(
+                job_id = job.id,
+                kind = %job.kind,
+                "job has compute_cost=0; routing inline unconditionally"
+            );
+            self.bump_route(Strategy::Inline).await;
+            let t0 = Instant::now();
+            let out = execute_job(&job);
+            let ms = t0.elapsed().as_millis() as u64;
+            self.record_latency(Strategy::Inline, ms).await;
+            self.inner.completed.fetch_add(1, Ordering::Relaxed);
+            return Some(out);
+        }
+
         // Hot path: clone the Arc (pointer copy, not struct copy) instead of
         // acquiring the RwLock and cloning the full RouterConfig struct.
         let cfg: Arc<RouterConfig> = self.inner.cfg_arc.read().await.clone();
@@ -760,8 +814,9 @@ impl Router {
         // Hot path: read the pre-computed pressure from the atomic cache instead of
         // locking metrics. The background refresher updates this every 100 ms.
         // Fall back to the live computation only on the very first call (cache = 0.0).
+        // Use Acquire so we observe the value fully written by the Release store in the refresher.
         let pressure = {
-            let cached = f64::from_bits(self.inner.pressure_cache.load(Ordering::Relaxed));
+            let cached = f64::from_bits(self.inner.pressure_cache.load(Ordering::Acquire));
             if cached > 0.0 {
                 cached
             } else {
@@ -815,7 +870,9 @@ impl Router {
         let job_for_neural = job.clone();
         let budget_ms = job.latency_budget_ms;
 
-        // Broadcast decision and append to routing log
+        // Broadcast decision and append to routing log.
+        // Hold the routing_log lock across both operations so SSE and REST
+        // always see a consistent state (no event visible in SSE but missing from log).
         let decision = RoutingDecision {
             job_id: job.id,
             strategy,
@@ -824,9 +881,9 @@ impl Router {
             pressure,
             decision_source,
         };
-        let _ = self.inner.decision_tx.send(decision.clone());
         {
             let mut log = self.inner.routing_log.lock().await;
+            let _ = self.inner.decision_tx.send(decision.clone());
             log.push_back(decision);
             if log.len() > 50 {
                 log.pop_front();
@@ -911,7 +968,13 @@ impl Router {
                         .await;
                     None
                 } else {
-                    self.inner.cpu_queue_depth.fetch_add(1, Ordering::Relaxed);
+                    let new_depth = self.inner.cpu_queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
+                    if new_depth > 100_000 {
+                        warn!(
+                            cpu_queue_depth = new_depth,
+                            "cpu_queue_depth exceeded 100,000 — possible queue backlog; consider scaling up"
+                        );
+                    }
                     let t0 = Instant::now();
                     let out = match rx.await {
                         Ok(v) => v,
@@ -948,7 +1011,15 @@ impl Router {
 
                 let buf = match self.inner.batches.get(&job.kind) {
                     Some(b) => b,
-                    None => return None,
+                    None => {
+                        warn!(
+                            job_id = job.id,
+                            kind = %job.kind,
+                            "batch buffer not found for job kind; treating as drop"
+                        );
+                        self.inner.batch_miss_count.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
                 };
 
                 {
@@ -1005,6 +1076,10 @@ impl Router {
     ///   Resets the consecutive-raise counter to 0 on any decay tick.
     pub async fn maybe_adapt_threshold(&self) {
         let cfg = self.inner.cfg.read().await.clone();
+        // Respect the enable_adaptive_threshold flag: skip adaptation when disabled.
+        if !cfg.enable_adaptive_threshold {
+            return;
+        }
         let mut metrics = self.inner.metrics.lock().await;
 
         if let Some(agg) = metrics.latency.get_mut(&Strategy::CpuPool) {
@@ -1036,7 +1111,9 @@ impl Router {
                     *threshold,
                     raises + 1
                 );
-            } else if p95 < cfg.cpu_p95_budget_ms {
+            } else if p95 < (cfg.cpu_p95_budget_ms as f64 * 1.1) as u64 {
+                // Hysteresis band: reset consecutive_raises when p95 is below threshold * 1.1
+                // (not just strictly below budget) to prevent flapping near the boundary.
                 // Decay: gently lower the threshold when latency is healthy so it
                 // doesn't creep upward indefinitely.  Rate = 10% of the raise rate.
                 // Reset the consecutive-raise counter so the next load spike starts
@@ -1050,6 +1127,8 @@ impl Router {
                     let new_val = ((*threshold as f64) * (1.0 - decay_step)) as u64;
                     let new_val = new_val.max(floor);
                     *threshold = new_val;
+                    // Increment decay counter for Prometheus observability.
+                    self.inner.adaptive_decay_count.fetch_add(1, Ordering::Relaxed);
                     info!("adaptive: decayed spawn_threshold to {}", *threshold);
                 }
             }
@@ -1108,6 +1187,8 @@ impl Router {
             is_warmed_up: neural.is_warmed_up(),
             weights: *neural.weights(),
             epsilon: neural.epsilon(),
+            reward_variance: neural.reward_variance(),
+            per_strategy_counts: *neural.per_strategy_counts(),
         }
     }
 
@@ -2354,5 +2435,90 @@ mod tests {
         let stats = router.stats_snapshot().await;
         assert_eq!(stats.completed + stats.dropped, 1);
         let _ = out; // result is consumed
+    }
+
+    // ── Improvement #11: enable_adaptive_threshold ───────────────────────────
+
+    #[tokio::test]
+    async fn test_adaptive_threshold_disabled_does_not_change() {
+        let mut cfg = RouterConfig::default();
+        cfg.enable_adaptive_threshold = false;
+        let router = Router::new(cfg.clone());
+
+        // Record enough latency to trigger adaptive adjustment.
+        {
+            let mut metrics = router.inner.metrics.lock().await;
+            for _ in 0..20 {
+                // Record very high latency to trigger a raise.
+                metrics.record_latency(Strategy::CpuPool, 10_000);
+            }
+        }
+
+        let before = *router.inner.adaptive_spawn_threshold.lock().await;
+        router.maybe_adapt_threshold().await;
+        let after = *router.inner.adaptive_spawn_threshold.lock().await;
+
+        assert_eq!(
+            before, after,
+            "adaptive threshold must not change when enable_adaptive_threshold=false"
+        );
+    }
+
+    // ── Improvement #14: adaptive_decay_count ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_adaptive_decay_count_increments_on_decay() {
+        let cfg = RouterConfig::default();
+        let router = Router::new(cfg.clone());
+
+        // First raise the threshold.
+        {
+            let mut threshold = router.inner.adaptive_spawn_threshold.lock().await;
+            *threshold = cfg.spawn_threshold * 2;
+        }
+
+        // Record low latency to trigger decay.
+        {
+            let mut metrics = router.inner.metrics.lock().await;
+            for _ in 0..20 {
+                metrics.record_latency(Strategy::CpuPool, 1); // very fast → decay
+            }
+        }
+
+        let before = router.inner.adaptive_decay_count.load(Ordering::Relaxed);
+        router.maybe_adapt_threshold().await;
+        let after = router.inner.adaptive_decay_count.load(Ordering::Relaxed);
+
+        assert!(
+            after >= before,
+            "adaptive_decay_count should not decrease"
+        );
+        // If threshold > floor and p95 is below budget * 1.1, decay should have fired.
+        let threshold = *router.inner.adaptive_spawn_threshold.lock().await;
+        if threshold > cfg.spawn_threshold {
+            assert_eq!(after, before + 1, "decay_count should increment on decay");
+        }
+    }
+
+    // ── Improvement #9: zero-cost job ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_zero_cost_job_routes_inline() {
+        let router = Router::new(RouterConfig::default());
+        let job = Job {
+            id: 999,
+            kind: JobKind::HashMix,
+            inputs: vec![1],
+            compute_cost: 0,
+            scaling_potential: 0.5,
+            latency_budget_ms: 100,
+        };
+        let result = router.submit(job).await;
+        // Zero-cost jobs should complete inline (not drop).
+        assert!(result.is_some(), "zero-cost job must complete, not drop");
+        let stats = router.stats_snapshot().await;
+        // Should have been routed as Inline.
+        let inline_count = stats.routed.get(&Strategy::Inline).copied().unwrap_or(0);
+        assert!(inline_count > 0, "zero-cost job should be counted as Inline");
     }
 }

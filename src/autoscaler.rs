@@ -154,7 +154,11 @@ impl Autoscaler {
                 let instant_rate = dj as f64 / dt as f64;
                 if self.rate_ema == 0.0 {
                     self.rate_ema = instant_rate;
-                    self.rate_variance = 0.0;
+                    // Initialise with a small non-zero prior so that the first sample
+                    // contributes to variance tracking. A zero variance on the first
+                    // sample would cause under-provisioning on sudden bursts because
+                    // the dynamic horizon would not shorten to account for volatility.
+                    self.rate_variance = 0.01;
                 } else {
                     let diff = instant_rate - self.rate_ema;
                     self.rate_ema =

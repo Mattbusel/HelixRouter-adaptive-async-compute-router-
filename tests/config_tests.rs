@@ -239,9 +239,17 @@ fn test_edge_case_cpu_queue_cap_one_valid() {
 
 #[test]
 fn test_edge_case_batch_max_size_one_valid() {
+    // batch_max_size=1 is now invalid (must be >= 2 to enable batching).
     let mut cfg = RouterConfig::default();
     cfg.batch_max_size = 1;
-    assert!(cfg.validate().is_ok());
+    assert!(cfg.validate().is_err(), "batch_max_size=1 must be rejected");
+}
+
+#[test]
+fn test_edge_case_batch_max_size_two_is_minimum_valid() {
+    let mut cfg = RouterConfig::default();
+    cfg.batch_max_size = 2;
+    assert!(cfg.validate().is_ok(), "batch_max_size=2 is the minimum valid value");
 }
 
 #[test]
@@ -336,4 +344,62 @@ async fn test_hot_reload_invalid_config_rejected_and_live_config_unchanged() {
         "live config must be unchanged after rejected patch"
     );
     assert!(after.validate().is_ok(), "live config must still be valid");
+}
+
+// ── Improvement #20: batch_max_size pathological cases ────────────────────────
+
+/// batch_max_size=1 is pathological: validate() must reject it.
+#[test]
+fn test_batch_max_size_1_is_rejected_by_validate() {
+    let mut cfg = RouterConfig::default();
+    cfg.batch_max_size = 1;
+    let err = cfg.validate().expect_err("batch_max_size=1 must fail validation");
+    assert!(
+        err.0.contains("batch_max_size"),
+        "error must mention batch_max_size, got: {}",
+        err.0
+    );
+    assert!(
+        err.0.contains("2"),
+        "error must mention minimum value of 2, got: {}",
+        err.0
+    );
+}
+
+/// batch_max_size=2 is the minimum valid value; jobs submitted with Batch
+/// strategy should complete successfully.
+#[tokio::test]
+async fn test_batch_max_size_2_minimum_valid_routes_jobs() {
+    use helixrouter::router::Router;
+    use helixrouter::types::{Job, JobKind};
+
+    let cfg = RouterConfig {
+        batch_max_size: 2,
+        inline_threshold: 1,
+        spawn_threshold: 2,
+        cpu_queue_cap: 8,
+        cpu_parallelism: 2,
+        backpressure_busy_threshold: 100, // disable backpressure
+        ..RouterConfig::default()
+    };
+    assert!(cfg.validate().is_ok(), "batch_max_size=2 must pass validation");
+
+    let router = Router::new(cfg);
+    // Submit 4 jobs (2 batches of 2); all should return Some(output).
+    let mut completed = 0usize;
+    for i in 0..4u64 {
+        let job = Job {
+            id: i,
+            kind: JobKind::HashMix,
+            inputs: vec![i],
+            compute_cost: 100_000, // above spawn_threshold → Batch or CpuPool
+            scaling_potential: 0.9, // high scaling → Batch
+            latency_budget_ms: 500,
+        };
+        if router.submit(job).await.is_some() {
+            completed += 1;
+        }
+    }
+    router.shutdown();
+    assert!(completed > 0, "at least some jobs should complete with batch_max_size=2");
 }

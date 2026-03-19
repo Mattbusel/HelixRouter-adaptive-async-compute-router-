@@ -47,6 +47,8 @@ pub mod config;
 pub mod metrics;
 pub mod neural_router;
 pub mod router;
+/// Simulator module is only available when the `simulation` feature is enabled.
+#[cfg(feature = "simulation")]
 pub mod simulator;
 pub mod strategies;
 pub mod types;

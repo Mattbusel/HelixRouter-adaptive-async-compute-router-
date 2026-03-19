@@ -423,15 +423,29 @@ async fn set_config(State(router): State<AppState>, Json(cfg): Json<RouterConfig
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Structured error detail for 422 responses.
+#[derive(Debug, Clone, Serialize)]
+struct ErrorDetail {
+    field: Option<String>,
+    code: String,
+    message: String,
+}
+
+/// Wrapper for a list of validation errors returned by `PATCH /api/config`.
+#[derive(Debug, Clone, Serialize)]
+struct ErrorResponse {
+    errors: Vec<ErrorDetail>,
+}
+
 /// PATCH /api/config — apply a partial config update.
 ///
 /// Only fields present in the JSON body are modified; absent fields
 /// retain their current values. Returns the merged config on success.
 ///
-/// Returns **422 Unprocessable Entity** if the resulting config would be
-/// invalid (e.g. `inline_threshold >= spawn_threshold`, `ema_alpha` outside
-/// `(0, 1]`, `cpu_parallelism == 0`). The live config is **not modified**
-/// when validation fails.
+/// Returns **422 Unprocessable Entity** with a structured `{"errors": [...]}` body
+/// if the resulting config would be invalid (e.g. `inline_threshold >= spawn_threshold`,
+/// `ema_alpha` outside `(0, 1]`, `cpu_parallelism == 0`). The live config is
+/// **not modified** when validation fails.
 ///
 /// This is the endpoint that EOT's HelixBridge should target, since
 /// it sends `RouterConfigPatch` with optional fields rather than a
@@ -442,7 +456,16 @@ async fn patch_config(
 ) -> Response {
     match router.patch_config(patch).await {
         Ok(merged) => Json(merged).into_response(),
-        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+        Err(e) => {
+            let body = ErrorResponse {
+                errors: vec![ErrorDetail {
+                    field: None,
+                    code: "validation_error".to_string(),
+                    message: e.to_string(),
+                }],
+            };
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
+        }
     }
 }
 
@@ -508,34 +531,60 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
         epsilon: neural_snap.epsilon,
         is_warmed_up: neural_snap.is_warmed_up,
     };
-    let mut text = prometheus_text_with_neural(
+    // Pre-allocate a large enough buffer to avoid repeated reallocations.
+    // This avoids creating many small heap allocations via format!() in the hot path.
+    let base = prometheus_text_with_neural(
         snap.completed,
         snap.dropped,
         &snap.routed,
         &summaries,
         Some(&neural_metrics),
     );
+    let mut text = String::with_capacity(base.len() + 4096);
+    text.push_str(&base);
     // Batch observability counters.
     text.push_str("# TYPE helix_batch_enqueued counter\n");
     let mut sorted_enqueued: Vec<_> = snap.batch_enqueued.iter().collect();
     sorted_enqueued.sort_by_key(|(k, _)| *k);
     for (kind, count) in sorted_enqueued {
-        text.push_str(&format!("helix_batch_enqueued{{kind=\"{kind}\"}} {count}\n"));
+        use std::fmt::Write as _;
+        let _ = write!(text, "helix_batch_enqueued{{kind=\"{kind}\"}} {count}\n");
     }
     text.push_str("# TYPE helix_batch_flushed counter\n");
     let mut sorted_flushed: Vec<_> = snap.batch_flushed.iter().collect();
     sorted_flushed.sort_by_key(|(k, _)| *k);
     for (kind, count) in sorted_flushed {
-        text.push_str(&format!("helix_batch_flushed{{kind=\"{kind}\"}} {count}\n"));
+        use std::fmt::Write as _;
+        let _ = write!(text, "helix_batch_flushed{{kind=\"{kind}\"}} {count}\n");
     }
     // Blocking panic counter.
     text.push_str("# HELP helix_blocking_panics_total Number of blocking CPU tasks that panicked\n");
     text.push_str("# TYPE helix_blocking_panics_total counter\n");
-    text.push_str(&format!("helix_blocking_panics_total {}\n", snap.blocking_panics));
+    {
+        use std::fmt::Write as _;
+        let _ = write!(text, "helix_blocking_panics_total {}\n", snap.blocking_panics);
+    }
     // CPU queue depth gauge.
     text.push_str("# HELP helix_cpu_queue_depth Current number of jobs queued for CPU pool\n");
     text.push_str("# TYPE helix_cpu_queue_depth gauge\n");
-    text.push_str(&format!("helix_cpu_queue_depth {}\n", snap.cpu_queue_depth));
+    {
+        use std::fmt::Write as _;
+        let _ = write!(text, "helix_cpu_queue_depth {}\n", snap.cpu_queue_depth);
+    }
+    // Adaptive decay counter.
+    text.push_str("# HELP helix_adaptive_decay_total Total adaptive spawn_threshold decay events\n");
+    text.push_str("# TYPE helix_adaptive_decay_total counter\n");
+    {
+        use std::fmt::Write as _;
+        let _ = write!(text, "helix_adaptive_decay_total {}\n", snap.adaptive_decay_count);
+    }
+    // Batch miss counter.
+    text.push_str("# HELP helix_batch_miss_total Total batch buffer misses (unknown job kind)\n");
+    text.push_str("# TYPE helix_batch_miss_total counter\n");
+    {
+        use std::fmt::Write as _;
+        let _ = write!(text, "helix_batch_miss_total {}\n", snap.batch_miss_count);
+    }
 
     let mut resp = (StatusCode::OK, text).into_response();
     resp.headers_mut().insert(
@@ -858,6 +907,8 @@ mod tests {
             is_warmed_up: true,
             weights: [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]; 5],
             epsilon: 0.10,
+            reward_variance: 0.0,
+            per_strategy_counts: [0u64; 5],
         };
 
         let json = serde_json::to_string(&snap).expect("serialize NeuralSnapshot");
@@ -890,6 +941,8 @@ mod tests {
             is_warmed_up: false,
             weights: [[0.0; 7]; 5],
             epsilon: 0.10,
+            reward_variance: 0.0,
+            per_strategy_counts: [0u64; 5],
         };
 
         let json = serde_json::to_string(&snap).expect("serialize");

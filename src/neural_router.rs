@@ -131,6 +131,10 @@ pub struct NeuralRouter {
     sample_count: u64,
     /// Running sum of all rewards observed.
     total_reward: f64,
+    /// Welford online variance of rewards (M2 accumulator).
+    reward_m2: f64,
+    /// Per-strategy outcome count for observability.
+    per_strategy_counts: [u64; N_STRATEGIES],
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +235,8 @@ impl NeuralRouter {
             weights,
             sample_count: 0,
             total_reward: 0.0,
+            reward_m2: 0.0,
+            per_strategy_counts: [0u64; N_STRATEGIES],
         }
     }
 
@@ -276,7 +282,9 @@ impl NeuralRouter {
             JobKind::MonteCarloRisk => (0.0_f64, 0.0_f64, 1.0_f64),
         };
 
-        let scaling_potential = job.scaling_potential as f64;
+        // Clamp scaling_potential to [0, 1] to prevent out-of-spec values
+        // from corrupting the feature vector and distorting learned weights.
+        let scaling_potential = (job.scaling_potential as f64).clamp(0.0, 1.0);
 
         let budget_norm = (job.latency_budget_ms.min(max_budget as u64) as f64) / max_budget;
 
@@ -447,6 +455,20 @@ impl NeuralRouter {
         self.total_reward += reward;
         self.sample_count += 1;
 
+        // Welford online variance of rewards.
+        let mean = if self.sample_count == 1 {
+            reward
+        } else {
+            self.total_reward / self.sample_count as f64
+        };
+        let delta = reward - (self.total_reward - reward) / (self.sample_count - 1).max(1) as f64;
+        let delta2 = reward - mean;
+        self.reward_m2 += delta * delta2;
+
+        // Per-strategy count tracking.
+        let s_idx_count = strategy_index(outcome.strategy);
+        self.per_strategy_counts[s_idx_count] += 1;
+
         // Log the warm-up transition once so operators know when neural routing activates.
         if self.sample_count == self.config.min_samples_before_learning as u64 {
             info!(
@@ -551,6 +573,30 @@ impl NeuralRouter {
     /// This function never panics.
     pub fn epsilon(&self) -> f64 {
         self.config.epsilon
+    }
+
+    /// Return the Welford online variance of the reward signal.
+    ///
+    /// Returns `0.0` if fewer than 2 outcomes have been recorded.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn reward_variance(&self) -> f64 {
+        if self.sample_count < 2 {
+            0.0
+        } else {
+            self.reward_m2 / (self.sample_count - 1) as f64
+        }
+    }
+
+    /// Return the per-strategy outcome counts as an array indexed by strategy.
+    ///
+    /// Index order: `[Inline, Spawn, CpuPool, Batch, Drop]`.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn per_strategy_counts(&self) -> &[u64; N_STRATEGIES] {
+        &self.per_strategy_counts
     }
 
     /// Serialize the current learned state into a portable [`WeightSnapshot`].

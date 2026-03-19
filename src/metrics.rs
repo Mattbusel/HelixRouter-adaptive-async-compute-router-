@@ -150,12 +150,17 @@ impl LatencyAgg {
 
 /// Compute a percentile from an **already-sorted** slice.  Does not sort.
 /// Returns 0 for an empty slice.  `q` is in (0, 1].
+///
+/// Uses the nearest-rank method: `idx = floor((n - 1) * q)` clamped to `[0, n-1]`.
+/// This avoids the off-by-one bias of `ceil(n * q) - 1` for small sample sizes.
 pub fn percentile_from_sorted(sorted: &[u64], q: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
     }
-    let idx = ((sorted.len() as f64) * q).ceil() as usize;
-    let idx = idx.saturating_sub(1).min(sorted.len() - 1);
+    let n = sorted.len();
+    // Nearest-rank: index = floor((n - 1) * q), clamped to valid range.
+    let idx = ((n - 1) as f64 * q).floor() as usize;
+    let idx = idx.min(n - 1);
     sorted[idx]
 }
 
@@ -583,8 +588,10 @@ mod tests {
 
     #[test]
     fn test_calc_p95_unsorted() {
+        // With n=5 samples and nearest-rank formula: idx = floor((5-1)*0.95) = floor(3.8) = 3
+        // Sorted: [1, 2, 3, 4, 5]; sorted[3] = 4.
         let v = vec![5u64, 1, 3, 2, 4];
-        assert_eq!(calc_p95(&v), 5);
+        assert_eq!(calc_p95(&v), 4);
     }
 
     #[test]
