@@ -251,3 +251,9 @@ pub mod circuit_mesh;
 
 /// Per-route/per-client sliding-window rate limiter with burst allowance and prefix matching.
 pub mod rate_limiter;
+
+/// JSON schema validation, size limits, and header requirements.
+pub mod request_validator;
+
+/// Configurable retry with jitter for idempotency-safe requests.
+pub mod retry_middleware;
