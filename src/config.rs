@@ -84,7 +84,7 @@ impl Default for SLAConfig {
 /// max_latency_ms = 500
 /// priority = "low"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SLAMap(pub HashMap<String, SLAConfig>);
 
 impl SLAMap {

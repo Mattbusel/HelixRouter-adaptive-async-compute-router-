@@ -29,6 +29,7 @@ fn cheap_job(id: u64) -> Job {
         compute_cost: 100,
         scaling_potential: 0.1,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     }
 }
 
@@ -40,6 +41,7 @@ fn heavy_job(id: u64) -> Job {
         compute_cost: 200_000,
         scaling_potential: 0.9,
         latency_budget_ms: 500,
+        deadline_ms: 0,
     }
 }
 
@@ -75,6 +77,7 @@ async fn router_drops_jobs_when_threshold_zero_and_low_scaling() {
         compute_cost: 100,
         scaling_potential: 0.0, // below 0.65 → Drop under backpressure
         latency_budget_ms: 50,
+        deadline_ms: 0,
     };
 
     // With threshold=0, any number of busy workers (including 0) is "at or above"
@@ -142,6 +145,7 @@ fn choose_strategy_drops_at_exactly_busy_threshold() {
         compute_cost: 100,
         scaling_potential: 0.0, // below 0.65
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
     let strategy = choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold);
     assert_eq!(strategy, Strategy::Drop);
@@ -159,6 +163,7 @@ fn choose_strategy_batches_at_exactly_busy_threshold_with_high_scaling() {
         compute_cost: 100,
         scaling_potential: 0.9, // above 0.65
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
     let strategy = choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold);
     assert_eq!(strategy, Strategy::Batch);
@@ -175,6 +180,7 @@ fn choose_strategy_routes_normally_one_below_busy_threshold() {
         compute_cost: cfg.inline_threshold - 1,
         scaling_potential: 0.0,
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
     // One below threshold → not in backpressure → normal cost-based routing
     let strategy = choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold - 1);

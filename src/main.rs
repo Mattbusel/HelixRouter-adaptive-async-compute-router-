@@ -39,11 +39,12 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 /// then rename it over `path`. This prevents corruption if the process crashes
 /// mid-write (rename is atomic on POSIX; best-effort on Windows).
 fn atomic_write(path: &str, data: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
     let target = std::path::Path::new(path);
     let dir = target.parent().unwrap_or_else(|| std::path::Path::new("."));
     // Create the temp file in the same directory so rename stays on the same filesystem.
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    std::io::Write::write_all(&mut tmp, data.as_bytes())?;
+    tmp.write_all(data.as_bytes())?;
     // Persist (sync to OS) then rename atomically over the target path.
     tmp.persist(target).map_err(|e| e.error)?;
     Ok(())

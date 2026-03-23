@@ -736,6 +736,25 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
         use std::fmt::Write as _;
         let _ = write!(text, "helix_batch_miss_total {}\n", snap.batch_miss_count);
     }
+    // SLA violation counters per job kind.
+    {
+        use std::fmt::Write as _;
+        text.push_str("# HELP helix_sla_violations_total Total SLA violations per job kind\n");
+        text.push_str("# TYPE helix_sla_violations_total counter\n");
+        let sla = router.sla_violation_counts();
+        let _ = write!(text, "helix_sla_violations_total{{kind=\"hash_mix\"}} {}\n", sla.hash_mix);
+        let _ = write!(text, "helix_sla_violations_total{{kind=\"prime_count\"}} {}\n", sla.prime_count);
+        let _ = write!(text, "helix_sla_violations_total{{kind=\"monte_carlo_risk\"}} {}\n", sla.monte_carlo_risk);
+        text.push_str("# HELP helix_deadline_exceeded_total Total jobs rejected due to expired deadline\n");
+        text.push_str("# TYPE helix_deadline_exceeded_total counter\n");
+        let _ = write!(text, "helix_deadline_exceeded_total {}\n", snap.deadline_exceeded);
+        text.push_str("# HELP helix_kind_routed_total Total jobs routed per job kind\n");
+        text.push_str("# TYPE helix_kind_routed_total counter\n");
+        let kr = router.kind_routing_stats();
+        let _ = write!(text, "helix_kind_routed_total{{kind=\"hash_mix\"}} {}\n", kr.hash_mix);
+        let _ = write!(text, "helix_kind_routed_total{{kind=\"prime_count\"}} {}\n", kr.prime_count);
+        let _ = write!(text, "helix_kind_routed_total{{kind=\"monte_carlo_risk\"}} {}\n", kr.monte_carlo_risk);
+    }
 
     let mut resp = (StatusCode::OK, text).into_response();
     resp.headers_mut().insert(

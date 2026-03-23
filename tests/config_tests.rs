@@ -288,6 +288,7 @@ async fn test_hot_reload_while_jobs_in_flight_no_deadlock() {
                 compute_cost: 100,
                 scaling_potential: 0.5,
                 latency_budget_ms: 50,
+                deadline_ms: 0,
             })
             .await
         }));
@@ -395,6 +396,7 @@ async fn test_batch_max_size_2_minimum_valid_routes_jobs() {
             compute_cost: 100_000, // above spawn_threshold → Batch or CpuPool
             scaling_potential: 0.9, // high scaling → Batch
             latency_budget_ms: 500,
+            deadline_ms: 0,
         };
         if router.submit(job).await.is_some() {
             completed += 1;
