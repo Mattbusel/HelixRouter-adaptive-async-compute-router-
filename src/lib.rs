@@ -26,6 +26,8 @@
 //! | [`admission`] | Pre-router admission gate: load ceiling, priority fast-lane, per-caller token bucket |
 //! | [`streaming`] | Streaming partial-result channels per job (broadcast fan-out) |
 //! | [`canary`] | Canary deployment: N% traffic split, auto-promote/rollback on quality metrics |
+//! | [`adaptive_circuit_breaker`] | Adaptive circuit breaker: time-of-day thresholds, graduated half-open recovery, history-driven timeout |
+//! | [`priority_balancer`] | Priority-aware load balancer: routes tasks by capacity, priority, affinity, and health |
 //!
 //! ## Quick start
 //!
@@ -48,6 +50,7 @@
 //! }
 //! ```
 
+pub mod adaptive_circuit_breaker;
 pub mod admission;
 pub mod autoscaler;
 pub mod canary;
@@ -59,6 +62,7 @@ pub mod deadline;
 pub mod downstream_pressure;
 pub mod metrics;
 pub mod neural_router;
+pub mod priority_balancer;
 pub mod router;
 /// Simulator module is only available when the `simulation` feature is enabled.
 #[cfg(feature = "simulation")]
