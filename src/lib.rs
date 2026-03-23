@@ -128,3 +128,9 @@ pub mod load_shed;
 
 /// Per-client sliding-window rate limiter: timestamp-based windows, burst allowance, stale cleanup.
 pub mod sliding_rate_limiter;
+
+/// Service registry with health-based routing and multiple load-balancing algorithms.
+pub mod service_registry;
+
+/// Bulkhead pattern for resource isolation between request categories.
+pub mod bulkhead;
