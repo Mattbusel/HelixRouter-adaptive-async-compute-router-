@@ -83,6 +83,7 @@ pub async fn serve_with_downstream(
         .route("/api/downstream/pressure", get(get_downstream_pressure))
         .route("/api/stream/decisions", get(sse_decisions))
         .route("/api/neural", get(get_neural))
+        .route("/api/dag", get(get_dag_graph))
         .with_state(shared)
         .layer(axum::Extension(downstream));
 
