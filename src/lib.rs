@@ -230,3 +230,9 @@ pub mod canary_deployer;
 
 /// Structured request/response logging with sampling strategies, PII redaction, and JSON-lines export.
 pub mod request_logger;
+
+/// API gateway: authentication, API versioning, route rules, and per-client sliding-window throttling.
+pub mod api_gateway;
+
+/// WebSocket proxy: connection management, topic-based message routing, idle eviction, and broadcast fan-out.
+pub mod websocket_proxy;
