@@ -140,3 +140,9 @@ pub mod middleware;
 
 /// Dynamic configuration with hot-reload, schema validation, and atomic swap.
 pub mod dynamic_config;
+
+/// Automatic failover with primary/secondary endpoint management, health tracking, and recovery.
+pub mod failover;
+
+/// Request coalescing: deduplicate identical in-flight requests via FNV-1a keying and oneshot fan-out.
+pub mod request_coalescing;
