@@ -122,3 +122,9 @@ pub mod canary_controller;
 
 /// Async connection pool: RAII guards, idle eviction, min-idle replenishment, pool stats.
 pub mod connection_pool;
+
+/// Adaptive load shedding: queue-depth and p99-latency-driven request dropping with priority awareness.
+pub mod load_shed;
+
+/// Per-client sliding-window rate limiter: timestamp-based windows, burst allowance, stale cleanup.
+pub mod sliding_rate_limiter;
