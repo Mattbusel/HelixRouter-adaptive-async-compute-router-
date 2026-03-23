@@ -161,3 +161,9 @@ pub mod traffic_shaper;
 
 /// Profile endpoint performance over time with percentile stats and trend detection.
 pub mod endpoint_profiler;
+
+/// Proactive cache warming based on traffic patterns: TopK, FrequencyThreshold, PredictiveFromHistory, ScheduledBatch.
+pub mod cache_warmer;
+
+/// Service dependency graph with failure propagation, critical path, impact radius, and recovery ordering.
+pub mod dependency_graph;
