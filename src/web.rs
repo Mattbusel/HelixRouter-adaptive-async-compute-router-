@@ -684,6 +684,97 @@ async fn get_neural(State(router): State<AppState>) -> impl IntoResponse {
     Json(router.neural_snapshot().await)
 }
 
+// ===== Predictive Autoscaler Forecast =====
+
+/// Response body for `GET /api/autoscaler/forecast`.
+#[derive(Serialize)]
+struct AutoscalerForecastResponse {
+    /// Current CPU pool size reported by the router.
+    current_pool_size: usize,
+    /// Recommended target CPU pool size, 60 seconds ahead.
+    target_pool_size: usize,
+    /// Forecast confidence in `[0.0, 1.0]`.
+    confidence: f64,
+    /// Human-readable explanation of the recommendation.
+    reason: String,
+    /// Look-ahead window in milliseconds (always 60 000).
+    lookahead_ms: u64,
+    /// 60-point load forecast sparkline (one value per future second).
+    sparkline: Vec<f64>,
+    /// Raw forecasted job rate in jobs/second.
+    forecast_rate: f64,
+    /// Number of samples ingested by the autoscaler so far.
+    sample_count: usize,
+    /// Whether the Holt-Winters warm-up period has completed.
+    is_warmed_up: bool,
+    /// Scaling action: `"scale_up"`, `"scale_down"`, or `"hold"`.
+    action: String,
+}
+
+/// `GET /api/autoscaler/forecast` — Holt-Winters 60-second ahead load forecast.
+///
+/// Returns a [`AutoscalerForecastResponse`] containing the predictive
+/// autoscaler's current recommendation, a sparkline suitable for dashboard
+/// widgets, and metadata about the autoscaler's warm-up state.
+///
+/// This endpoint is served by a per-request [`crate::predictive_autoscaler::PredictiveAutoscaler`]
+/// that is seeded with the router's current load statistics.  Until the
+/// Holt-Winters warm-up period completes (`is_warmed_up: false`), the
+/// recommendation is always `Hold` with `confidence: 0.0`.
+async fn get_autoscaler_forecast(State(router): State<AppState>) -> impl IntoResponse {
+    use crate::predictive_autoscaler::{
+        LoadSample, PredictiveAutoscaler, PredictiveAutoscalerConfig, ScalingAction,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let stats = router.stats_snapshot().await;
+    let cfg = router.config().await;
+    let current_pool_size = cfg.cpu_parallelism;
+
+    // Seed the autoscaler with a synthetic history derived from the router's
+    // cumulative completed-job counter.  We generate one sample per second for
+    // the past 90 seconds using the global completion rate as a proxy.
+    let mut scaler = PredictiveAutoscaler::new(PredictiveAutoscalerConfig::default());
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Approximate: assume the current completed count accrued evenly over the
+    // past 90 seconds to warm up the Holt-Winters filter.
+    let total_completed = stats.completed;
+    let window = 90u64;
+    for i in 0..window {
+        let t = now_secs.saturating_sub(window - i);
+        let frac = (i + 1) as f64 / window as f64;
+        scaler.observe(LoadSample {
+            timestamp_secs: t,
+            total_jobs: (total_completed as f64 * frac) as u64,
+            pressure_score: stats.pressure_score,
+        });
+    }
+
+    let rec = scaler.recommend(current_pool_size);
+    let action_str = match &rec.action {
+        ScalingAction::ScaleUp(n) => format!("scale_up({n})"),
+        ScalingAction::ScaleDown(n) => format!("scale_down({n})"),
+        ScalingAction::Hold => "hold".to_string(),
+    };
+
+    Json(AutoscalerForecastResponse {
+        current_pool_size,
+        target_pool_size: rec.target_pool_size,
+        confidence: rec.confidence,
+        reason: rec.reason,
+        lookahead_ms: rec.lookahead_ms,
+        sparkline: rec.sparkline,
+        forecast_rate: rec.forecast_rate,
+        sample_count: scaler.sample_count(),
+        is_warmed_up: scaler.is_warmed_up(),
+        action: action_str,
+    })
+}
+
 // ===== Strategy Explainer =====
 
 /// Query parameters for `GET /explain/latest`.

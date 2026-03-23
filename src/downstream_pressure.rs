@@ -166,11 +166,16 @@ impl DownstreamPressureMonitor {
         }
 
         let key = telemetry.service_name.clone();
-        let arc = self
-            .services
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(ServiceState::new(&telemetry))))
-            .clone();
+        // The RefMut returned by or_insert_with holds a DashMap shard lock;
+        // drop it before locking the inner Mutex to prevent lock ordering issues.
+        let arc = {
+            let entry = self
+                .services
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(ServiceState::new(&telemetry))));
+            entry.value().clone()
+            // `entry` (RefMut + shard lock) is dropped here before arc.lock()
+        };
 
         match arc.lock() {
             Ok(mut state) => state.update(&telemetry),

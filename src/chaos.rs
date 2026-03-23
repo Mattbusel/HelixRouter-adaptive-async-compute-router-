@@ -298,12 +298,20 @@ pub struct ChaosSnapshot {
 /// transparent passthrough.
 ///
 /// Cheap to clone — all state behind `Arc`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChaosLayer {
     router: Router,
     inner: Arc<Mutex<ChaosState>>,
     /// Separate atomic counter so `total_submitted` is readable without the lock.
     submitted_counter: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for ChaosLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChaosLayer")
+            .field("submitted_counter", &self.submitted_counter)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChaosLayer {

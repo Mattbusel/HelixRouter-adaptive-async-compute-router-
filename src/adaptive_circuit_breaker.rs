@@ -203,35 +203,48 @@ impl AdaptiveCircuitBreaker {
     pub fn record_failure(&mut self) {
         self.push_history(true);
 
-        match &mut self.state {
-            BreakerState::Closed { failure_count } => {
-                *failure_count += 1;
-                let threshold = self.adaptive_threshold();
-                let current   = *failure_count;
-                if current >= threshold {
-                    let timeout = self.adaptive_timeout();
-                    self.state = BreakerState::Open {
-                        opened_at: Instant::now(),
-                        cooldown:  timeout,
-                    };
-                }
-            }
-            BreakerState::HalfOpen { .. } => {
-                // Failed during probe — extend cooldown by 1.5×.
-                let new_timeout = {
-                    let last = self.last_cooldown_or_base();
-                    Duration::from_secs_f64(last.as_secs_f64() * 1.5)
-                        .min(Duration::from_secs(300)) // cap at 5 min
-                };
+        // Increment failure counter if Closed. We extract the count first
+        // so we can release the mutable borrow on self.state before calling
+        // self.adaptive_threshold() (which needs a shared borrow of self).
+        let closed_count: Option<u64> = if let BreakerState::Closed { failure_count } = &mut self.state {
+            *failure_count += 1;
+            Some(*failure_count)
+        } else {
+            None
+        };
+
+        if let Some(current) = closed_count {
+            // Now self.state is not mutably borrowed — safe to call &self methods.
+            let threshold = self.adaptive_threshold();
+            if current >= threshold {
+                let timeout = self.adaptive_timeout();
                 self.state = BreakerState::Open {
                     opened_at: Instant::now(),
-                    cooldown:  new_timeout,
+                    cooldown: timeout,
                 };
             }
-            BreakerState::Open { .. } => {
-                // Already open — update history but don't reset timer.
-            }
         }
+
+        // Handle HalfOpen: failed probe — extend cooldown by 1.5×.
+        // We must check in a separate block to avoid conflicting borrows.
+        let half_open_timeout: Option<Duration> =
+            if let BreakerState::HalfOpen { .. } = &self.state {
+                let last = self.last_cooldown_or_base();
+                Some(
+                    Duration::from_secs_f64(last.as_secs_f64() * 1.5)
+                        .min(Duration::from_secs(300)), // cap at 5 min
+                )
+            } else {
+                None
+            };
+
+        if let Some(new_timeout) = half_open_timeout {
+            self.state = BreakerState::Open {
+                opened_at: Instant::now(),
+                cooldown: new_timeout,
+            };
+        }
+        // BreakerState::Open: already open — history updated by push_history above.
     }
 
     // -----------------------------------------------------------------------

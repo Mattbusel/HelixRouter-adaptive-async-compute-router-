@@ -164,11 +164,16 @@ impl JobCostModel {
             strategy: sample.strategy,
         };
         // `entry().or_insert_with()` atomically inserts the default if absent.
-        let arc = self
-            .stats
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(KindStats::new())))
-            .clone();
+        // The RefMut returned by or_insert_with holds a shard lock; we must
+        // drop it before locking the inner Mutex to avoid holding two locks.
+        let arc = {
+            let entry = self
+                .stats
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(KindStats::new())));
+            entry.value().clone()
+            // `entry` (RefMut + shard lock) is dropped here before arc.lock()
+        };
 
         // The lock is a `std::sync::Mutex`, never held across `.await`.
         match arc.lock() {
