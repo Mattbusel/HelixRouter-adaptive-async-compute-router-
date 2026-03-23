@@ -206,3 +206,9 @@ pub mod rate_limiter_v2;
 
 /// Priority queue for requests with preemption and fairness: Strict, WeightedFair, RoundRobin policies.
 pub mod request_prioritizer;
+
+/// Service registry with capability advertisement, health tracking, weighted selection, and stale eviction.
+pub mod endpoint_catalog;
+
+/// In-flight request deduplication by FNV-1a content hash: single computation, shared result fan-out.
+pub mod request_deduplicator;
