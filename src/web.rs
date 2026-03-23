@@ -126,6 +126,8 @@ pub async fn serve_with_all_traced(
         .route("/api/traces/:trace_id", get(get_traces_by_id))
         .route("/api/dedup/stats", get(get_dedup_stats))
         .route("/api/sla/stats", get(get_sla_stats))
+        .route("/api/result-cache/stats", get(get_result_cache_stats))
+        .route("/api/flow/stats", get(get_flow_stats))
         .with_state(shared)
         .layer(axum::Extension(downstream))
         .layer(axum::Extension(explainer))
@@ -1129,6 +1131,44 @@ async fn get_sla_stats(State(router): State<AppState>) -> impl IntoResponse {
         dequeued: stats.dequeued,
         expired: stats.expired,
         by_class,
+    })
+}
+
+/// `GET /api/result-cache/stats` — return result cache statistics as JSON.
+async fn get_result_cache_stats(State(router): State<AppState>) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct ResultCacheStatsResponse {
+        entries: usize,
+        hits: u64,
+        misses: u64,
+        evictions: u64,
+        hit_rate: f64,
+    }
+    let stats = router.result_cache_stats().await;
+    Json(ResultCacheStatsResponse {
+        entries: stats.entries,
+        hits: stats.hits,
+        misses: stats.misses,
+        evictions: stats.evictions,
+        hit_rate: stats.hit_rate,
+    })
+}
+
+/// `GET /api/flow/stats` — return flow controller statistics as JSON.
+async fn get_flow_stats(State(router): State<AppState>) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct FlowStatsResponse {
+        admitted: u64,
+        throttled: u64,
+        rejected: u64,
+        current_tokens: f64,
+    }
+    let stats = router.flow_stats();
+    Json(FlowStatsResponse {
+        admitted: stats.admitted,
+        throttled: stats.throttled,
+        rejected: stats.rejected,
+        current_tokens: stats.current_tokens,
     })
 }
 

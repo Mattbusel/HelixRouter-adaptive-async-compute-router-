@@ -291,6 +291,14 @@ struct Inner {
 
     // ── SLA priority queue ────────────────────────────────────────────────
     sla_queue: Mutex<crate::sla_queue::SlaQueue>,
+
+    // ── Flow control ──────────────────────────────────────────────────────
+    /// Global token-bucket admission gate (separate from per-model rate limits).
+    flow_controller: crate::flow_control::FlowController,
+
+    // ── Result cache ──────────────────────────────────────────────────────
+    /// Content-addressed cache of completed job results.
+    result_cache: Mutex<crate::result_cache::ResultCache>,
 }
 
 // ===== Router =====
@@ -395,6 +403,12 @@ impl Router {
             epsilon_history: Mutex::new(std::collections::VecDeque::with_capacity(60)),
             deduplicator: Mutex::new(crate::dedup::JobDeduplicator::with_default_ttl()),
             sla_queue: Mutex::new(crate::sla_queue::SlaQueue::new()),
+            flow_controller: crate::flow_control::FlowController::new(
+                crate::flow_control::FlowConfig::default(),
+            ),
+            result_cache: Mutex::new(crate::result_cache::ResultCache::new(
+                crate::result_cache::CacheConfig::default(),
+            )),
         });
 
         let inner2 = inner.clone();
@@ -630,6 +644,21 @@ impl Router {
             adaptive_decay_count: self.inner.adaptive_decay_count.load(Ordering::Relaxed),
             batch_miss_count: self.inner.batch_miss_count.load(Ordering::Relaxed),
         }
+    }
+
+    /// Return a snapshot of flow-control statistics.
+    ///
+    /// Reports admitted/throttled/rejected counts and the current token level of
+    /// the global token-bucket admission gate.
+    pub fn flow_stats(&self) -> crate::flow_control::FlowStats {
+        self.inner.flow_controller.stats()
+    }
+
+    /// Return a snapshot of result-cache statistics.
+    ///
+    /// Reports cache hit/miss/eviction counts and the current hit rate.
+    pub async fn result_cache_stats(&self) -> crate::result_cache::CacheStats {
+        self.inner.result_cache.lock().await.stats()
     }
 
     /// Return per-strategy latency summaries (EMA, p50/p95/p99, min/max).
@@ -897,6 +926,35 @@ impl Router {
             return Some(out);
         }
 
+        // ── Result cache check ────────────────────────────────────────────
+        // Before routing, check whether we have a cached result for this job.
+        // A cache hit bypasses all routing logic and returns the result instantly.
+        {
+            let mut cache = self.inner.result_cache.lock().await;
+            if let Some(cached) = cache.get(&job) {
+                // Re-parse the cached string back into Output values.
+                // If parsing fails we fall through to normal routing.
+                let outputs: Vec<crate::types::Output> = cached
+                    .result
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| {
+                        if let Some(v) = s.strip_prefix("u64:") {
+                            v.parse::<u64>().ok().map(crate::types::Output::U64)
+                        } else if let Some(v) = s.strip_prefix("f64:") {
+                            v.parse::<f64>().ok().map(crate::types::Output::F64)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !outputs.is_empty() {
+                    self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                    return Some(outputs);
+                }
+            }
+        }
+
         // Hot path: clone the Arc (pointer copy, not struct copy) instead of
         // acquiring the RwLock and cloning the full RouterConfig struct.
         let cfg: Arc<RouterConfig> = self.inner.cfg_arc.read().await.clone();
@@ -1027,6 +1085,12 @@ impl Router {
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
                     .await;
                 self.check_sla_violation(job_kind, ms).await;
+                // Store in result cache for future identical jobs.
+                {
+                    let result_str = crate::result_cache::ResultCache::outputs_to_string(&out);
+                    let mut cache = self.inner.result_cache.lock().await;
+                    cache.insert(&job, result_str);
+                }
                 Some(out)
             }
 

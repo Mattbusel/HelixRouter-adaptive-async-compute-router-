@@ -98,3 +98,9 @@ pub mod dedup;
 
 /// SLA-aware priority queue with dynamic urgency boosting relative to SLA deadline.
 pub mod sla_queue;
+
+/// Token-bucket flow controller: global RPS admission gate with per-kind sub-limits.
+pub mod flow_control;
+
+/// Content-addressed LRU result cache: instant responses for identical re-submitted jobs.
+pub mod result_cache;

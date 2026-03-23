@@ -34,6 +34,8 @@ mod bandit;
 mod tracing_span;
 mod dedup;
 mod sla_queue;
+mod flow_control;
+mod result_cache;
 
 use config::{watch_config_with_callback, RouterConfig};
 use router::Router;

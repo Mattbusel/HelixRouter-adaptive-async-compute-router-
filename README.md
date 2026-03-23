@@ -1358,3 +1358,93 @@ if let Some(sla_job) = queue.pop() {
 // Drain expired jobs
 let expired = queue.expired();
 ```
+
+---
+
+## Flow Control
+
+The `flow_control` module provides a token-bucket admission gate at the router level, operating independently of per-model rate limits.
+
+### How It Works
+
+Each call to `try_admit` refills the bucket based on elapsed wall-clock time, then classifies the request:
+
+| Condition | Result |
+|-----------|--------|
+| Tokens > 20% of burst | `Admitted` |
+| Tokens <= 20% of burst | `Throttled { retry_after_ms }` |
+| Tokens < 1.0 | `Rejected` |
+
+### Usage
+
+```rust,no_run
+use helixrouter::flow_control::{FlowConfig, FlowController};
+use std::collections::HashMap;
+
+let config = FlowConfig {
+    global_rps: 500.0,
+    burst: 100,
+    per_kind_rps: {
+        let mut m = HashMap::new();
+        m.insert("prime_count".to_string(), 50.0); // cap heavy jobs
+        m
+    },
+};
+let fc = FlowController::new(config);
+
+match fc.try_admit("hash_mix") {
+    helixrouter::flow_control::AdmitResult::Admitted => { /* dispatch job */ }
+    helixrouter::flow_control::AdmitResult::Throttled { retry_after_ms } => {
+        eprintln!("retry in {retry_after_ms}ms");
+    }
+    helixrouter::flow_control::AdmitResult::Rejected => {
+        eprintln!("load shed");
+    }
+}
+
+let stats = fc.stats();
+println!("admitted={} throttled={} rejected={}", stats.admitted, stats.throttled, stats.rejected);
+```
+
+Stats are also available via `GET /api/flow/stats`.
+
+---
+
+## Result Cache
+
+The `result_cache` module caches completed job results so identical re-submitted jobs get instant responses without re-executing the compute kernel.
+
+### Design
+
+- **Content-addressed**: cache key is the FNV-1a hash of `kind + inputs + compute_cost`.
+- **LRU eviction**: `VecDeque` tracks insertion order; `HashMap` provides O(1) lookup.
+- **TTL expiry**: `evict_expired()` removes entries older than the configured TTL.
+- **Wired into `Router::submit`**: cache is checked before dispatching; result is stored after inline execution.
+
+### Usage
+
+```rust,no_run
+use helixrouter::result_cache::{CacheConfig, ResultCache};
+use std::time::Duration;
+
+let mut cache = ResultCache::new(CacheConfig {
+    max_entries: 2048,
+    ttl: Duration::from_secs(600),
+});
+
+// Cache stats are also served at GET /api/result-cache/stats
+```
+
+### Stats Endpoint
+
+`GET /api/result-cache/stats` returns:
+
+```json
+{
+  "entries": 42,
+  "hits": 1200,
+  "misses": 800,
+  "evictions": 10,
+  "hit_rate": 0.6
+}
+```
