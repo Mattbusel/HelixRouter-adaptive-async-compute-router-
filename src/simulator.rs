@@ -107,6 +107,7 @@ impl Simulator {
             compute_cost,
             scaling_potential: self.rng.gen_range(0.0..=1.0),
             latency_budget_ms: self.rng.gen_range(5..=80),
+            deadline_ms: 0,
         }
     }
 }

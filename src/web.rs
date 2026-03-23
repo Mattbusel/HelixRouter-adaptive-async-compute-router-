@@ -747,7 +747,7 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
         let _ = write!(text, "helix_sla_violations_total{{kind=\"monte_carlo_risk\"}} {}\n", sla.monte_carlo_risk);
         text.push_str("# HELP helix_deadline_exceeded_total Total jobs rejected due to expired deadline\n");
         text.push_str("# TYPE helix_deadline_exceeded_total counter\n");
-        let _ = write!(text, "helix_deadline_exceeded_total {}\n", snap.deadline_exceeded);
+        let _ = write!(text, "helix_deadline_exceeded_total {}\n", router.deadline_exceeded_count());
         text.push_str("# HELP helix_kind_routed_total Total jobs routed per job kind\n");
         text.push_str("# TYPE helix_kind_routed_total counter\n");
         let kr = router.kind_routing_stats();

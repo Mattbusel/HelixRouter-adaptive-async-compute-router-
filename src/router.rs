@@ -2687,6 +2687,7 @@ mod tests {
             compute_cost: 0,
             scaling_potential: 0.5,
             latency_budget_ms: 100,
+            deadline_ms: 0,
         };
         let result = router.submit(job).await;
         // Zero-cost jobs should complete inline (not drop).

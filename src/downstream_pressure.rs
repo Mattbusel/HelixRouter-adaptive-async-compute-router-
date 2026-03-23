@@ -31,7 +31,7 @@
 //! - Persisting telemetry history.
 //! - HTTP serving (handler is in web.rs, which uses this type via `Arc`).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -134,7 +134,7 @@ impl ServiceState {
 /// Cheap to clone — the inner map is behind `DashMap`'s internal `Arc`.
 #[derive(Clone, Default)]
 pub struct DownstreamPressureMonitor {
-    services: DashMap<String, Mutex<ServiceState>>,
+    services: DashMap<String, Arc<Mutex<ServiceState>>>,
 }
 
 impl DownstreamPressureMonitor {
@@ -166,12 +166,13 @@ impl DownstreamPressureMonitor {
         }
 
         let key = telemetry.service_name.clone();
-        let entry = self
+        let arc = self
             .services
             .entry(key)
-            .or_insert_with(|| Mutex::new(ServiceState::new(&telemetry)));
+            .or_insert_with(|| Arc::new(Mutex::new(ServiceState::new(&telemetry))))
+            .clone();
 
-        match entry.value().lock() {
+        match arc.lock() {
             Ok(mut state) => state.update(&telemetry),
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
@@ -191,7 +192,9 @@ impl DownstreamPressureMonitor {
         let mut count = 0usize;
 
         for entry in self.services.iter() {
-            let score = match entry.value().lock() {
+            let arc = entry.value().clone();
+            drop(entry);
+            let score = match arc.lock() {
                 Ok(state) => {
                     if state.is_stale() {
                         continue;

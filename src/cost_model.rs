@@ -23,7 +23,7 @@
 //! - HTTP serving.
 //! - Neural-router weight updates (see: neural_router.rs).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -143,7 +143,7 @@ pub struct JobCostModel {
     /// DashMap<StatsKey, Mutex<KindStats>>
     /// DashMap provides concurrent shard-level locking; the inner Mutex
     /// serialises the circular-buffer update within each shard.
-    stats: DashMap<StatsKey, Mutex<KindStats>>,
+    stats: DashMap<StatsKey, Arc<Mutex<KindStats>>>,
 }
 
 impl JobCostModel {
@@ -164,13 +164,14 @@ impl JobCostModel {
             strategy: sample.strategy,
         };
         // `entry().or_insert_with()` atomically inserts the default if absent.
-        let entry = self
+        let arc = self
             .stats
             .entry(key)
-            .or_insert_with(|| Mutex::new(KindStats::new()));
+            .or_insert_with(|| Arc::new(Mutex::new(KindStats::new())))
+            .clone();
 
         // The lock is a `std::sync::Mutex`, never held across `.await`.
-        match entry.value().lock() {
+        match arc.lock() {
             Ok(mut s) => s.push(sample.duration_ns, sample.success),
             Err(poisoned) => {
                 // Recover from a poisoned mutex (should never happen, but handle safely).
@@ -191,10 +192,14 @@ impl JobCostModel {
         };
         match self.stats.get(&key) {
             None => 0,
-            Some(entry) => match entry.value().lock() {
-                Ok(s) => s.ema_ns(),
-                Err(poisoned) => poisoned.into_inner().ema_ns(),
-            },
+            Some(entry) => {
+                let arc = entry.value().clone();
+                drop(entry);
+                match arc.lock() {
+                    Ok(s) => s.ema_ns(),
+                    Err(poisoned) => poisoned.into_inner().ema_ns(),
+                }
+            }
         }
     }
 
