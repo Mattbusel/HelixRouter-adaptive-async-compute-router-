@@ -239,6 +239,170 @@ lb.update_worker("worker-gpu-1", updated);
 
 ---
 
+## Predictive Autoscaler v2 (Holt-Winters)
+
+The `predictive_autoscaler` module replaces the OLS-based linear trend with **Exponential Triple Smoothing (Holt-Winters)**, enabling accurate 60-second-ahead load forecasting that separates level, trend, and seasonality components.
+
+### Components
+
+| Component | Symbol | Description |
+|-----------|--------|-------------|
+| Level | L_t | Smoothed baseline load (alpha = 0.20) |
+| Trend | T_t | Rate of change of level (beta = 0.10) |
+| Seasonality | S_t | Repeating 60-second cycle deviations (gamma = 0.15) |
+
+### Forecast formula
+
+```
+ŷ_{t+h} = (L_t + h·T_t) + S_{t−60+((h−1) mod 60)}
+```
+
+The autoscaler is **proactive**: it recommends `ScaleUp(n)` or `ScaleDown(n)` *before* load arrives, not after the CPU pool is already saturated.
+
+### Scaling actions
+
+| Action | Trigger |
+|--------|---------|
+| `ScaleUp(n)` | Forecast > 80% of current capacity |
+| `ScaleDown(n)` | Forecast < 30% of current capacity |
+| `Hold` | Forecast within bounds |
+
+### Dashboard widget
+
+The `/api/autoscaler/forecast` endpoint returns a 60-point sparkline suitable for a live dashboard:
+
+```bash
+curl http://127.0.0.1:8081/api/autoscaler/forecast
+```
+
+```json
+{
+  "current_pool_size": 8,
+  "target_pool_size": 12,
+  "confidence": 0.91,
+  "reason": "forecast 95.3 jobs/s > scale-up threshold 64.0; adding 4 worker(s)",
+  "lookahead_ms": 60000,
+  "forecast_rate": 95.3,
+  "sparkline": [88.1, 89.4, 90.2, ..., 95.3],
+  "is_warmed_up": true,
+  "action": "scale_up(4)"
+}
+```
+
+### Usage
+
+```rust
+use helixrouter::predictive_autoscaler::{
+    LoadSample, PredictiveAutoscaler, PredictiveAutoscalerConfig,
+};
+
+let mut scaler = PredictiveAutoscaler::new(PredictiveAutoscalerConfig {
+    alpha: 0.20,        // level smoothing
+    beta: 0.10,         // trend smoothing
+    gamma: 0.15,        // seasonal smoothing
+    jobs_per_worker: 10.0,
+    scale_up_fraction: 0.80,
+    scale_down_fraction: 0.30,
+    ..PredictiveAutoscalerConfig::default()
+});
+
+// Feed observations (e.g. from a 1-second tick).
+scaler.observe(LoadSample { timestamp_secs: 1700000000, total_jobs: 500, pressure_score: 0.4 });
+// … feed 60+ more …
+
+let rec = scaler.recommend(8 /* current pool size */);
+println!("Action: {:?}, target: {}", rec.action, rec.target_pool_size);
+```
+
+---
+
+## Job Affinity Routing
+
+The `affinity` module adds **stateful sticky routing** — jobs from the same logical group are steered toward the same execution strategy, leveraging warm CPU caches and branch predictor state from prior runs.
+
+### How it works
+
+1. Each job carries a `JobKind` and a caller-supplied **affinity key** (e.g. `"session-42"` or `"user-id-99"`).
+2. The key is hashed with **FNV-1a** (64-bit, zero-allocation) to produce a stable `group_id`.
+3. The `AffinityRouter` looks up the `group_id` in its in-memory table.
+4. If an entry exists and has not expired (TTL), the **preferred strategy** from that entry is returned and the Router uses it instead of the normal heuristic.
+5. After each routing decision the Router calls `record(group_id, kind, strategy)` to update the table.
+6. Entries older than `ttl_secs` are evicted, either lazily on lookup or eagerly via `evict_stale()`.
+
+### Configuration
+
+```rust
+use helixrouter::affinity::{AffinityConfig, AffinityRouter};
+
+let router = AffinityRouter::new(AffinityConfig {
+    enabled: true,
+    ttl_secs: 120,    // evict entries after 2 minutes of inactivity
+    max_groups: 1024, // LRU eviction when full
+});
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Disable to bypass affinity routing entirely |
+| `ttl_secs` | `120` | Seconds of inactivity before eviction |
+| `max_groups` | `1024` | Maximum affinity groups in memory |
+
+### Monitoring
+
+```rust
+let stats = router.stats();
+println!("Hit rate: {:.1}%", stats.hit_rate() * 100.0);
+println!("Hits: {}, Misses: {}, Evictions: {}",
+         stats.hits(), stats.misses(), stats.evictions());
+```
+
+### Usage example
+
+```rust
+use helixrouter::affinity::{AffinityConfig, AffinityRouter, group_id};
+use helixrouter::types::{JobKind, Strategy};
+
+let affinity = AffinityRouter::new(AffinityConfig::default());
+
+// Derive a group ID for this session's jobs.
+let gid = group_id(JobKind::MonteCarloRisk, "user-99");
+
+// Check if a preferred strategy exists before routing.
+if let Some(strategy) = affinity.lookup(gid) {
+    println!("Using cached strategy: {strategy}");
+} else {
+    // Route normally, then record the outcome.
+    let chosen_strategy = Strategy::CpuPool;
+    affinity.record(gid, JobKind::MonteCarloRisk, chosen_strategy);
+}
+```
+
+---
+
+## Performance Tuning Guide
+
+### Strategy thresholds
+
+| Knob | Effect | Recommendation |
+|------|--------|----------------|
+| `inline_threshold` | Raises → more jobs run inline (faster, no spawn overhead) | Set to the 95th percentile of your "fast" job `compute_cost` |
+| `spawn_threshold` | Raises → more jobs use `tokio::spawn` instead of CpuPool | Raise when CpuPool P95 is acceptable and pool is not saturated |
+| `cpu_parallelism` | Increases → more concurrent CPU work, more RAM | Match to physical CPU core count minus 2 |
+| `batch_max_delay_ms` | Lower → fresher batch results, more overhead | Keep at 5–15 ms for real-time use cases |
+
+### Affinity routing
+
+Enable affinity routing when you have long-running sessions that submit the same job kind repeatedly.  The warm-cache effect is most pronounced for `CpuPool` jobs that touch large working sets (e.g. `MonteCarloRisk`).  Disable when jobs are truly stateless and one-shot.
+
+### Predictive autoscaler tuning
+
+- **alpha (level)**: raise to 0.3–0.4 for very bursty workloads.
+- **beta (trend)**: lower to 0.05 when load changes slowly over minutes.
+- **gamma (seasonality)**: raise when you have very regular per-minute cycles (e.g. cron-driven work).
+- **jobs_per_worker**: calibrate empirically by measuring steady-state throughput per worker.
+
+---
+
 ## Configuration Reference
 
 Configuration is loaded from a YAML file or environment variables via `clap`:
