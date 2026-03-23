@@ -33,6 +33,7 @@ fn arb_job() -> impl Strategy<Value = Job> {
             compute_cost: cost,
             scaling_potential: scaling,
             latency_budget_ms: budget,
+            deadline_ms: 0,
         })
 }
 

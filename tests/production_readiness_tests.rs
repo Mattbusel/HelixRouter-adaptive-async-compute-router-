@@ -32,6 +32,7 @@ fn cheap_job() -> Job {
         compute_cost: 100,
         scaling_potential: 0.1,
         latency_budget_ms: 200,
+        deadline_ms: 0,
     }
 }
 
@@ -43,6 +44,7 @@ fn expensive_job() -> Job {
         compute_cost: 100_000,
         scaling_potential: 0.9,
         latency_budget_ms: 1000,
+        deadline_ms: 0,
     }
 }
 
@@ -485,6 +487,7 @@ async fn backpressure_no_drops_when_all_jobs_go_inline() {
             compute_cost: 100, // well under inline_threshold
             scaling_potential: 0.1,
             latency_budget_ms: 500,
+            deadline_ms: 0,
         };
         if router.submit(job).await.is_none() {
             dropped += 1;
@@ -526,6 +529,7 @@ async fn backpressure_drops_when_queue_cap_is_zero() {
             compute_cost: 1_000_000, // far above all thresholds
             scaling_potential: 0.0,  // low scaling => Drop branch when under backpressure
             latency_budget_ms: 1,
+            deadline_ms: 0,
         };
         if router.submit(job).await.is_none() {
             dropped += 1;
@@ -570,6 +574,7 @@ async fn backpressure_stats_dropped_count_is_consistent() {
                 compute_cost: if i % 2 == 0 { 500 } else { 80_000 },
                 scaling_potential: 0.5,
                 latency_budget_ms: 100,
+                deadline_ms: 0,
             };
             r.submit(job).await
         });

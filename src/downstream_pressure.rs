@@ -93,7 +93,11 @@ struct ServiceState {
 
 impl ServiceState {
     fn new(tel: &DownstreamTelemetry) -> Self {
-        let latency_frac = (tel.latency_p99_ms / MAX_LATENCY_MS).clamp(0.0, 1.0);
+        let latency_frac = if tel.latency_p99_ms.is_finite() {
+            (tel.latency_p99_ms / MAX_LATENCY_MS).clamp(0.0, 1.0)
+        } else {
+            1.0 // treat infinity/NaN as maximum pressure
+        };
         let queue_frac = (tel.queue_depth as f64 / MAX_QUEUE_DEPTH).clamp(0.0, 1.0);
         let error_rate = tel.error_rate.clamp(0.0, 1.0);
         Self {
@@ -105,7 +109,11 @@ impl ServiceState {
     }
 
     fn update(&mut self, tel: &DownstreamTelemetry) {
-        let latency_frac = (tel.latency_p99_ms / MAX_LATENCY_MS).clamp(0.0, 1.0);
+        let latency_frac = if tel.latency_p99_ms.is_finite() {
+            (tel.latency_p99_ms / MAX_LATENCY_MS).clamp(0.0, 1.0)
+        } else {
+            1.0 // treat infinity/NaN as maximum pressure
+        };
         let queue_frac = (tel.queue_depth as f64 / MAX_QUEUE_DEPTH).clamp(0.0, 1.0);
         let error_rate = tel.error_rate.clamp(0.0, 1.0);
 

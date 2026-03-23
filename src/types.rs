@@ -10,8 +10,9 @@ use std::fmt;
 /// Discriminator for the three built-in compute kernels.
 ///
 /// Serialises as a plain string (`"hash_mix"`, `"prime_count"`, `"monte_carlo_risk"`).
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum JobKind {
+    #[default]
     /// FNV-inspired hash-mix: fast, O(inputs + compute_cost/64) iterations.
     HashMix,
     /// Sieve-of-Eratosthenes prime count: allocates O(compute_cost) memory.
@@ -34,10 +35,11 @@ impl fmt::Display for JobKind {
 ///
 /// Serialises as snake_case (`"inline"`, `"spawn"`, `"cpu_pool"`, `"batch"`, `"drop"`).
 /// The `Ord` derivation is intentional and used for deterministic metric ordering only.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
     /// Execute the job synchronously on the current async task. Lowest latency.
+    #[default]
     Inline,
     /// Spawn a new Tokio task. Suitable for moderate compute cost.
     Spawn,
@@ -71,7 +73,7 @@ impl fmt::Display for Strategy {
 /// All fields are required. `compute_cost` is the primary dimension used for
 /// strategy selection; `scaling_potential` biases toward `Batch` for work that
 /// amortises well; `latency_budget_ms` is advisory and surfaced in telemetry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Job {
     /// Caller-assigned monotonic identifier. Used as the PRNG seed for `MonteCarloRisk`.
     pub id: u64,
@@ -115,7 +117,7 @@ pub enum Output {
 /// These events are streamed to subscribers via the SSE endpoint at
 /// `GET /api/stream/decisions` and buffered in the router's routing log.
 /// The web dashboard renders them in real time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[allow(dead_code)]
 pub struct RoutingDecision {
     /// Caller-assigned job identifier, matches [`Job::id`].

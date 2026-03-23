@@ -455,6 +455,7 @@ fn neural_router_all_zero_job_returns_valid_strategy() {
         compute_cost: 0,
         scaling_potential: 0.0,
         latency_budget_ms: 0,
+        deadline_ms: 0,
     };
     let strategy = router.choose(&job, 0.0);
     let valid = matches!(
@@ -478,6 +479,7 @@ fn neural_router_feature_vector_all_zero_job_is_in_range() {
         compute_cost: 0,
         scaling_potential: 0.0,
         latency_budget_ms: 0,
+        deadline_ms: 0,
     };
     let fv = NeuralRouter::feature_vector(&job, 0.0);
     assert_eq!(fv.len(), 7);
@@ -499,6 +501,7 @@ fn neural_router_feature_vector_saturated_inputs_in_range() {
         compute_cost: u64::MAX,
         scaling_potential: 1.0,
         latency_budget_ms: u64::MAX,
+        deadline_ms: 0,
     };
     let fv = NeuralRouter::feature_vector(&job, 1.0);
     assert_eq!(fv.len(), 7);
@@ -524,6 +527,7 @@ fn neural_router_feature_vector_pressure_one_maps_to_one() {
         compute_cost: 0,
         scaling_potential: 0.0,
         latency_budget_ms: 1,
+        deadline_ms: 0,
     };
     let fv = NeuralRouter::feature_vector(&job, 1.0);
     // pressure is the last feature (index 6)
@@ -544,6 +548,7 @@ fn neural_router_feature_vector_pressure_zero_maps_to_zero() {
         compute_cost: 0,
         scaling_potential: 0.0,
         latency_budget_ms: 1,
+        deadline_ms: 0,
     };
     let fv = NeuralRouter::feature_vector(&job, 0.0);
     let pressure_feature = fv[6];
@@ -575,6 +580,7 @@ fn strategy_spawn_selected_for_medium_job() {
         compute_cost: cfg.inline_threshold + 1,
         scaling_potential: 0.1,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     };
     let s = choose_strategy(&cfg, &job, 0);
     assert_eq!(s, Strategy::Spawn, "medium-cost job should route Spawn");
@@ -591,6 +597,7 @@ fn strategy_cpupool_selected_for_heavy_low_scaling_job() {
         compute_cost: cfg.spawn_threshold,
         scaling_potential: 0.1, // below 0.70
         latency_budget_ms: 200,
+        deadline_ms: 0,
     };
     let s = choose_strategy(&cfg, &job, 0);
     assert_eq!(
@@ -611,6 +618,7 @@ fn strategy_batch_selected_for_heavy_high_scaling_job() {
         compute_cost: cfg.spawn_threshold,
         scaling_potential: 0.9, // above 0.70
         latency_budget_ms: 200,
+        deadline_ms: 0,
     };
     let s = choose_strategy(&cfg, &job, 0);
     assert_eq!(
@@ -631,6 +639,7 @@ fn strategy_drop_selected_under_backpressure_low_scaling() {
         compute_cost: 100,
         scaling_potential: 0.0,
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
     let s = choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold);
     assert_eq!(s, Strategy::Drop);
@@ -648,6 +657,7 @@ fn strategy_all_five_variants_are_reachable() {
         compute_cost: cfg.inline_threshold - 1,
         scaling_potential: 0.0,
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
     let spawn_job = Job {
         id: 1,
@@ -656,6 +666,7 @@ fn strategy_all_five_variants_are_reachable() {
         compute_cost: cfg.inline_threshold + 1,
         scaling_potential: 0.1,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     };
     let pool_job = Job {
         id: 2,
@@ -664,6 +675,7 @@ fn strategy_all_five_variants_are_reachable() {
         compute_cost: cfg.spawn_threshold,
         scaling_potential: 0.1,
         latency_budget_ms: 200,
+        deadline_ms: 0,
     };
     let batch_job = Job {
         id: 3,
@@ -672,6 +684,7 @@ fn strategy_all_five_variants_are_reachable() {
         compute_cost: cfg.spawn_threshold,
         scaling_potential: 0.9,
         latency_budget_ms: 200,
+        deadline_ms: 0,
     };
     let drop_job = Job {
         id: 4,
@@ -680,6 +693,7 @@ fn strategy_all_five_variants_are_reachable() {
         compute_cost: 100,
         scaling_potential: 0.0,
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
 
     assert_eq!(choose_strategy(&cfg, &inline_job, 0), Strategy::Inline);
@@ -790,6 +804,7 @@ fn neural_router_record_outcome_zero_cost_job_does_not_panic() {
         compute_cost: 0,
         scaling_potential: 0.0,
         latency_budget_ms: 0,
+        deadline_ms: 0,
     };
     // Must not panic regardless of pressure or outcome
     router.record_outcome(

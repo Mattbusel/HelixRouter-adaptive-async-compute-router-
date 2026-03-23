@@ -19,6 +19,7 @@ fn make_job(id: u64, kind: JobKind, cost: u64, scaling: f32) -> Job {
         compute_cost: cost,
         scaling_potential: scaling,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     }
 }
 
@@ -408,6 +409,7 @@ async fn test_empty_inputs_job_does_not_panic() {
         compute_cost: 100,
         scaling_potential: 0.5,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     };
     let out = router.submit(job).await;
     assert!(out.is_some(), "empty-inputs job should not panic");

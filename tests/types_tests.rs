@@ -15,6 +15,7 @@ fn make_job(id: u64, kind: JobKind, cost: u64) -> Job {
         compute_cost: cost,
         scaling_potential: 0.5,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     }
 }
 fn make_decision(id: u64) -> RoutingDecision {
@@ -27,6 +28,7 @@ fn make_decision(id: u64) -> RoutingDecision {
         cpu_busy: 2,
         pressure_score: 0.3,
         timestamp_ms: 1_700_000_000_000,
+        deadline_exceeded: false,
     }
 }
 #[test]

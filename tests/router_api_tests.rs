@@ -22,6 +22,7 @@ fn cheap_job(id: u64) -> Job {
         compute_cost: 100,
         scaling_potential: 0.2,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     }
 }
 
@@ -236,6 +237,7 @@ fn test_choose_strategy_inline_external() {
         compute_cost: cfg.inline_threshold - 1,
         scaling_potential: 0.0,
         latency_budget_ms: 10,
+        deadline_ms: 0,
     };
     assert_eq!(choose_strategy(&cfg, &job, 0), Strategy::Inline);
 }
@@ -250,6 +252,7 @@ fn test_choose_strategy_drop_under_full_backpressure() {
         compute_cost: 100,
         scaling_potential: 0.0, // below 0.65, should drop
         latency_budget_ms: 10,
+        deadline_ms: 0,
     };
     // Pass cpu_busy = backpressure_busy_threshold to trigger drop
     let strategy = choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold);
@@ -266,6 +269,7 @@ fn test_choose_strategy_batch_under_backpressure_with_high_scaling() {
         compute_cost: 100,
         scaling_potential: 0.9, // above 0.65, should batch
         latency_budget_ms: 10,
+        deadline_ms: 0,
     };
     let strategy = choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold);
     assert_eq!(strategy, Strategy::Batch);

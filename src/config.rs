@@ -692,6 +692,7 @@ mod tests {
             cpu_p95_budget_ms: 1,
             adaptive_p95_threshold_factor: 1.0,
             enable_adaptive_threshold: true,
+            ..RouterConfig::default()
         };
         assert!(cfg.validate().is_ok());
     }

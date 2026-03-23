@@ -44,6 +44,7 @@
 //!         compute_cost: 1_000,
 //!         scaling_potential: 0.5,
 //!         latency_budget_ms: 50,
+//!         deadline_ms: 0,
 //!     };
 //!     let output = router.submit(job).await;
 //!     println!("{output:?}");

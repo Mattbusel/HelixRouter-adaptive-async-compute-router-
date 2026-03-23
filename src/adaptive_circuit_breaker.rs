@@ -416,10 +416,12 @@ mod tests {
 
     #[test]
     fn trips_open_after_threshold_failures() {
-        let mut cb = AdaptiveCircuitBreaker::new(3, Duration::from_secs(60));
+        // base_threshold=6: adaptive halves to 3 under 100% failure rate,
+        // so 2 failures still permitted, trip occurs on 3rd.
+        let mut cb = AdaptiveCircuitBreaker::new(6, Duration::from_secs(60));
         cb.record_failure();
         cb.record_failure();
-        assert!(cb.permit()); // still closed
+        assert!(cb.permit()); // still closed (2 < adaptive_threshold=3)
         cb.record_failure();
         assert!(matches!(cb.state(), BreakerState::Open { .. }));
         assert!(!cb.permit());
@@ -427,7 +429,9 @@ mod tests {
 
     #[test]
     fn success_resets_failure_count() {
-        let mut cb = AdaptiveCircuitBreaker::new(3, Duration::from_secs(60));
+        // base_threshold=6: adaptive halves to 3 under 100% failure rate,
+        // so 2 failures don't trip the breaker.
+        let mut cb = AdaptiveCircuitBreaker::new(6, Duration::from_secs(60));
         cb.record_failure();
         cb.record_failure();
         cb.record_success();

@@ -28,6 +28,7 @@ fn test_routing_decision_strategy_field() {
         cpu_busy: 2,
         pressure_score: 0.1,
         timestamp_ms: 0,
+        deadline_exceeded: false,
     };
     assert_eq!(d.strategy, Strategy::Inline);
 }
@@ -59,6 +60,7 @@ fn test_job_clone() {
         compute_cost: 500,
         scaling_potential: 0.3,
         latency_budget_ms: 20,
+        deadline_ms: 0,
     };
     let j2 = j.clone();
     assert_eq!(j.id, j2.id);

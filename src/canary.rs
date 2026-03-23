@@ -263,12 +263,14 @@ impl CanaryInner {
         if self.effective_pct <= 0.0 { return RoutedTo::Stable; }
         if self.effective_pct >= 1.0 { return RoutedTo::Canary; }
 
-        // Spread traffic deterministically using a counter.
-        // Using 1000 slots for sub-percent granularity.
-        let slot = self.route_counter % 1000;
+        // Bresenham-style interleaving: route every Nth job to canary where
+        // N ≈ 1/canary_pct. This distributes canary traffic uniformly across
+        // all jobs rather than batching them at the start of a cycle.
+        let period = (1.0 / self.effective_pct).round() as u64;
+        let period = period.max(1);
+        let is_canary = self.route_counter % period == 0;
         self.route_counter += 1;
-        let canary_slots = (self.effective_pct * 1000.0).round() as u64;
-        if slot < canary_slots { RoutedTo::Canary } else { RoutedTo::Stable }
+        if is_canary { RoutedTo::Canary } else { RoutedTo::Stable }
     }
 
     /// Record result for the given cohort and check promotion/rollback.

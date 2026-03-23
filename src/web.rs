@@ -1182,6 +1182,10 @@ mod tests {
                 min_ms: 1,
                 max_ms: 5,
             }],
+            kind_routing: KindRoutingStats { hash_mix: 0, prime_count: 0, monte_carlo_risk: 0 },
+            sla_violations: SLAViolationCounts { hash_mix: 0, prime_count: 0, monte_carlo_risk: 0 },
+            deadline_exceeded: 0,
+            epsilon_history: vec![],
         };
 
         let json = serde_json::to_string(&resp).expect("serialize StatsResponse");
@@ -1257,6 +1261,10 @@ mod tests {
                 },
             ],
             latency_by_strategy: vec![],
+            kind_routing: KindRoutingStats { hash_mix: 0, prime_count: 0, monte_carlo_risk: 0 },
+            sla_violations: SLAViolationCounts { hash_mix: 0, prime_count: 0, monte_carlo_risk: 0 },
+            deadline_exceeded: 0,
+            epsilon_history: vec![],
         };
         let json = serde_json::to_string(&resp).expect("serialize");
         assert!(
@@ -1358,6 +1366,10 @@ mod tests {
             pressure_score: 0.0,
             routed_by_strategy: vec![],
             latency_by_strategy: vec![],
+            kind_routing: KindRoutingStats { hash_mix: 0, prime_count: 0, monte_carlo_risk: 0 },
+            sla_violations: SLAViolationCounts { hash_mix: 0, prime_count: 0, monte_carlo_risk: 0 },
+            deadline_exceeded: 0,
+            epsilon_history: vec![],
         };
         let json = serde_json::to_string(&resp).expect("serialize zero StatsResponse");
         assert!(json.contains("\"routed_by_strategy\":[]"));

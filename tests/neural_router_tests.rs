@@ -22,6 +22,7 @@ fn make_job(id: u64, kind: JobKind, compute_cost: u64, scaling: f32, budget_ms: 
         compute_cost,
         scaling_potential: scaling,
         latency_budget_ms: budget_ms,
+        deadline_ms: 0,
     }
 }
 

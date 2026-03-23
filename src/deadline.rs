@@ -605,8 +605,8 @@ mod tests {
         assert!((rate - 0.5).abs() < 0.01, "expected ~0.5 miss rate, got {rate}");
     }
 
-    #[test]
-    fn test_prometheus_text_format() {
+    #[tokio::test]
+    async fn test_prometheus_text_format() {
         // Smoke test: ensure prometheus text is non-empty and contains expected labels.
         let router = Router::new(RouterConfig::default());
         let sched = DeadlineScheduler::new(router);

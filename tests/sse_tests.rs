@@ -24,6 +24,7 @@ fn make_job(id: u64, cost: u64) -> Job {
         compute_cost: cost,
         scaling_potential: 0.5,
         latency_budget_ms: 50,
+        deadline_ms: 0,
     }
 }
 
