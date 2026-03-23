@@ -285,6 +285,12 @@ struct Inner {
 
     // ── Neural epsilon history (ring buffer of 60 recent epsilon values) ──
     epsilon_history: Mutex<std::collections::VecDeque<f64>>,
+
+    // ── Job deduplication ─────────────────────────────────────────────────
+    deduplicator: Mutex<crate::dedup::JobDeduplicator>,
+
+    // ── SLA priority queue ────────────────────────────────────────────────
+    sla_queue: Mutex<crate::sla_queue::SlaQueue>,
 }
 
 // ===== Router =====
@@ -387,6 +393,8 @@ impl Router {
             routed_montecarlo: AtomicU64::new(0),
             deadline_exceeded: AtomicU64::new(0),
             epsilon_history: Mutex::new(std::collections::VecDeque::with_capacity(60)),
+            deduplicator: Mutex::new(crate::dedup::JobDeduplicator::with_default_ttl()),
+            sla_queue: Mutex::new(crate::sla_queue::SlaQueue::new()),
         });
 
         let inner2 = inner.clone();
@@ -1382,6 +1390,21 @@ impl Router {
     /// Used by the dashboard to display the epsilon decay curve over time.
     pub async fn epsilon_history(&self) -> Vec<f64> {
         self.inner.epsilon_history.lock().await.iter().copied().collect()
+    }
+
+    /// Return a snapshot of the job deduplicator statistics.
+    ///
+    /// Shows total submissions, duplicate count, active in-flight entries,
+    /// and the deduplication rate.
+    pub async fn dedup_stats(&self) -> crate::dedup::DedupStats {
+        self.inner.deduplicator.lock().await.stats()
+    }
+
+    /// Return a snapshot of the SLA priority queue statistics.
+    ///
+    /// Shows total enqueued/dequeued/expired counts, broken down by SLA class.
+    pub async fn sla_stats(&self) -> crate::sla_queue::SlaStats {
+        self.inner.sla_queue.lock().await.stats()
     }
 
     /// Signal all background tasks (CPU dispatcher, batch flusher) to stop.

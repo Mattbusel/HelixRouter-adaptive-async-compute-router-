@@ -124,6 +124,8 @@ pub async fn serve_with_all_traced(
         .route("/explain/latest", get(get_explain_latest))
         .route("/api/traces/recent", get(get_traces_recent))
         .route("/api/traces/:trace_id", get(get_traces_by_id))
+        .route("/api/dedup/stats", get(get_dedup_stats))
+        .route("/api/sla/stats", get(get_sla_stats))
         .with_state(shared)
         .layer(axum::Extension(downstream))
         .layer(axum::Extension(explainer))
@@ -1056,6 +1058,78 @@ async fn get_traces_by_id(
         .map(|s| SpanResponse::from(*s))
         .collect();
     Json(spans)
+}
+
+// ===== Deduplication stats =====
+
+/// `GET /api/dedup/stats` — return current job deduplication statistics.
+///
+/// Returns a JSON object with:
+/// - `total_submitted`  — total `submit()` calls since router start.
+/// - `deduped_count`    — number of those calls that were classified as duplicates.
+/// - `active_entries`   — in-flight entries currently tracked.
+/// - `dedup_rate`       — fraction of submissions that were deduplicated.
+async fn get_dedup_stats(State(router): State<AppState>) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct DedupStatsResponse {
+        total_submitted: u64,
+        deduped_count: u64,
+        active_entries: usize,
+        dedup_rate: f64,
+    }
+    let stats = router.dedup_stats().await;
+    Json(DedupStatsResponse {
+        total_submitted: stats.total_submitted,
+        deduped_count: stats.deduped_count,
+        active_entries: stats.active_entries,
+        dedup_rate: stats.dedup_rate,
+    })
+}
+
+// ===== SLA queue stats =====
+
+/// `GET /api/sla/stats` — return current SLA priority queue statistics.
+///
+/// Returns a JSON object with:
+/// - `enqueued`  — total jobs ever pushed onto the SLA queue.
+/// - `dequeued`  — total jobs popped from the SLA queue.
+/// - `expired`   — total jobs removed as SLA-expired.
+/// - `by_class`  — per-class breakdown (critical/high/normal/batch).
+async fn get_sla_stats(State(router): State<AppState>) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct ClassStatsJson {
+        enqueued: u64,
+        dequeued: u64,
+        expired: u64,
+    }
+    #[derive(serde::Serialize)]
+    struct SlaStatsResponse {
+        enqueued: u64,
+        dequeued: u64,
+        expired: u64,
+        by_class: std::collections::HashMap<String, ClassStatsJson>,
+    }
+    let stats = router.sla_stats().await;
+    let by_class = stats
+        .by_class
+        .into_iter()
+        .map(|(cls, cs)| {
+            (
+                cls.name().to_string(),
+                ClassStatsJson {
+                    enqueued: cs.enqueued,
+                    dequeued: cs.dequeued,
+                    expired: cs.expired,
+                },
+            )
+        })
+        .collect();
+    Json(SlaStatsResponse {
+        enqueued: stats.enqueued,
+        dequeued: stats.dequeued,
+        expired: stats.expired,
+        by_class,
+    })
 }
 
 #[cfg(test)]

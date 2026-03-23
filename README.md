@@ -1239,3 +1239,122 @@ let child = tracer.start_span(trace_id, Some(root_span_id), "child_op", HashMap:
 drop(child);
 drop(root);
 ```
+
+---
+
+## Job Deduplication
+
+HelixRouter includes hash-based in-flight job deduplication in `src/dedup.rs`.
+
+```
+Job submitted
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│          JobDeduplicator                │
+│                                         │
+│  key = FNV-1a(kind_str + payload_hash)  │
+│  payload_hash = FNV-1a(format!("{:?}")) │
+│                                         │
+│  in_flight.contains(key)?               │
+│    No  ──► DedupDecision::New(job)      │  ──► execute job
+│    Yes ──► DedupDecision::Duplicate     │  ──► wait on oneshot::Receiver
+│            { original_id, rx }          │
+└─────────────────────────────────────────┘
+                    │
+    original job completes
+                    │
+                    ▼
+      dedup.complete(job_id, result)
+      ──► fan-out result to all waiters via oneshot::Sender
+```
+
+### Stats endpoint
+
+```
+GET /api/dedup/stats
+→ { "total_submitted": 1000, "deduped_count": 42,
+    "active_entries": 3, "dedup_rate": 0.042 }
+```
+
+### Quick start
+
+```rust,no_run
+use helixrouter::dedup::{JobDeduplicator, DedupDecision};
+use std::time::Duration;
+
+let mut dedup = JobDeduplicator::new(Duration::from_secs(30));
+match dedup.submit(job) {
+    DedupDecision::New(j) => {
+        let result = execute(j).await;
+        dedup.complete(j.id, result);
+    }
+    DedupDecision::Duplicate { rx, .. } => {
+        let result = rx.await.unwrap();
+    }
+}
+```
+
+---
+
+## SLA Priority Queue
+
+`src/sla_queue.rs` provides a `BinaryHeap`-backed priority queue that assigns
+urgency based on age relative to SLA deadline.
+
+```
+SlaClass    SLA (ms)   base_priority
+────────────────────────────────────
+Critical      50           4 000
+High         200           3 000
+Normal     1 000           2 000
+Batch     10 000           1 000
+
+effective_priority = base_priority + age_boost
+age_boost          = (elapsed_ms / sla_ms) × 1 000
+
+A job at 100% of its SLA age adds 1 000 points — one full tier jump.
+```
+
+```
+push(job, SlaClass::High)
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  BinaryHeap<SlaJob>  (max-heap)         │
+│                                         │
+│  pop() ──► drain all, rescore, re-push  │
+│            return highest priority      │
+│                                         │
+│  expired() ──► partition expired jobs   │
+│                out of the heap          │
+└─────────────────────────────────────────┘
+```
+
+### Stats endpoint
+
+```
+GET /api/sla/stats
+→ { "enqueued": 500, "dequeued": 490, "expired": 10,
+    "by_class": {
+      "critical": { "enqueued": 50, "dequeued": 50, "expired": 0 },
+      "high":     { "enqueued": 150, "dequeued": 148, "expired": 2 }, ...
+    }}
+```
+
+### Quick start
+
+```rust,no_run
+use helixrouter::sla_queue::{SlaClass, SlaQueue};
+
+let mut queue = SlaQueue::new();
+queue.push(job, SlaClass::Critical);
+
+// Pop the most urgent job (re-scores all entries first)
+if let Some(sla_job) = queue.pop() {
+    println!("processing job {} (class: {})", sla_job.job.id, sla_job.sla_class.name());
+}
+
+// Drain expired jobs
+let expired = queue.expired();
+```

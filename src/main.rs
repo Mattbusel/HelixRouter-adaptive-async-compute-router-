@@ -32,6 +32,8 @@ mod web;
 mod distributed_router;
 mod bandit;
 mod tracing_span;
+mod dedup;
+mod sla_queue;
 
 use config::{watch_config_with_callback, RouterConfig};
 use router::Router;
