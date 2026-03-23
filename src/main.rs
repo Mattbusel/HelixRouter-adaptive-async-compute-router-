@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod adaptive_circuit_breaker;
 mod admission;
+mod affinity;
 mod autoscaler;
 mod canary;
 mod chaos;
@@ -13,8 +14,10 @@ mod cost_router;
 mod dag;
 mod deadline;
 mod downstream_pressure;
+mod explainer;
 mod metrics;
 mod neural_router;
+mod predictive_autoscaler;
 mod predictor;
 mod priority_balancer;
 mod priority_monitor;
