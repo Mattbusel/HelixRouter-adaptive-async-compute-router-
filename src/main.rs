@@ -30,6 +30,8 @@ mod types;
 mod web;
 #[cfg(feature = "distributed")]
 mod distributed_router;
+mod bandit;
+mod tracing_span;
 
 use config::{watch_config_with_callback, RouterConfig};
 use router::Router;

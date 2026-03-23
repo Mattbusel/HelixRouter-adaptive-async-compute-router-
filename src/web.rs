@@ -31,12 +31,15 @@ use crate::downstream_pressure::{DownstreamPressureMonitor, DownstreamTelemetry}
 use crate::explainer::StrategyExplainer;
 use crate::metrics::{prometheus_text_with_neural, NeuralMetrics};
 use crate::router::{KindRoutingStats, Router, SLAViolationCounts};
+use crate::tracing_span::{CompletedSpan, TraceContext};
 use crate::types::Strategy;
 
 type AppState = Arc<Router>;
 type DownstreamState = Arc<DownstreamPressureMonitor>;
 /// Shared explainer state threaded through Axum extensions.
 pub type ExplainerState = Arc<Mutex<StrategyExplainer>>;
+/// Shared trace store state threaded through Axum extensions.
+pub type TraceState = Arc<TraceContext>;
 
 /// Start the Axum HTTP server and bind it to `addr`.
 ///
@@ -72,7 +75,8 @@ pub async fn serve_with_downstream(
     downstream: DownstreamState,
 ) -> std::io::Result<()> {
     let explainer: ExplainerState = Arc::new(Mutex::new(StrategyExplainer::default()));
-    serve_with_all(router, addr, downstream, explainer).await
+    let trace_ctx: TraceState = Arc::new(TraceContext::new(1000));
+    serve_with_all_traced(router, addr, downstream, explainer, trace_ctx).await
 }
 
 /// Full constructor: accepts a pre-constructed [`StrategyExplainer`] in addition to
@@ -84,6 +88,20 @@ pub async fn serve_with_all(
     addr: SocketAddr,
     downstream: DownstreamState,
     explainer: ExplainerState,
+) -> std::io::Result<()> {
+    let trace_ctx: TraceState = Arc::new(TraceContext::new(1000));
+    serve_with_all_traced(router, addr, downstream, explainer, trace_ctx).await
+}
+
+/// Full constructor with an explicit [`TraceContext`].
+///
+/// Accepts all shared state; trace API endpoints use `trace_ctx`.
+pub async fn serve_with_all_traced(
+    router: Router,
+    addr: SocketAddr,
+    downstream: DownstreamState,
+    explainer: ExplainerState,
+    trace_ctx: TraceState,
 ) -> std::io::Result<()> {
     let shared: AppState = Arc::new(router);
 
@@ -104,9 +122,12 @@ pub async fn serve_with_all(
         .route("/api/dag", get(get_dag_graph))
         .route("/api/autoscaler/forecast", get(get_autoscaler_forecast))
         .route("/explain/latest", get(get_explain_latest))
+        .route("/api/traces/recent", get(get_traces_recent))
+        .route("/api/traces/:trace_id", get(get_traces_by_id))
         .with_state(shared)
         .layer(axum::Extension(downstream))
-        .layer(axum::Extension(explainer));
+        .layer(axum::Extension(explainer))
+        .layer(axum::Extension(trace_ctx));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -980,6 +1001,61 @@ async fn metrics_prom(State(router): State<AppState>) -> Response {
         HeaderValue::from_static("text/plain; version=0.0.4"),
     );
     resp
+}
+
+// ===== Trace API =====
+
+/// JSON-serialisable representation of a completed span returned by the trace API.
+#[derive(Debug, Serialize)]
+struct SpanResponse {
+    trace_id: u64,
+    span_id: u64,
+    parent_span_id: Option<u64>,
+    operation: String,
+    duration_ms: f64,
+    tags: std::collections::HashMap<String, String>,
+}
+
+impl From<&CompletedSpan> for SpanResponse {
+    fn from(s: &CompletedSpan) -> Self {
+        Self {
+            trace_id: s.trace_id,
+            span_id: s.span_id,
+            parent_span_id: s.parent_span_id,
+            operation: s.operation.clone(),
+            duration_ms: s.duration_ms,
+            tags: s.tags.clone(),
+        }
+    }
+}
+
+/// `GET /api/traces/recent` — return the 100 most-recently completed spans.
+///
+/// Returns a JSON array of span objects ordered oldest-first.
+async fn get_traces_recent(
+    Extension(ctx): Extension<TraceState>,
+) -> impl IntoResponse {
+    let store = ctx.store();
+    let guard = store.lock().await;
+    let spans: Vec<SpanResponse> = guard.recent(100).iter().map(|s| SpanResponse::from(*s)).collect();
+    Json(spans)
+}
+
+/// `GET /api/traces/:trace_id` — return all spans for a given trace ID.
+///
+/// `trace_id` must be a `u64` integer. Returns `[]` if no spans are found.
+async fn get_traces_by_id(
+    axum::extract::Path(trace_id): axum::extract::Path<u64>,
+    Extension(ctx): Extension<TraceState>,
+) -> impl IntoResponse {
+    let store = ctx.store();
+    let guard = store.lock().await;
+    let spans: Vec<SpanResponse> = guard
+        .query_by_trace(trace_id)
+        .iter()
+        .map(|s| SpanResponse::from(*s))
+        .collect();
+    Json(spans)
 }
 
 #[cfg(test)]

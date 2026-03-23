@@ -1074,3 +1074,168 @@ The dashboard uses zero external JavaScript dependencies — just vanilla JS and
 6. Open a pull request with a clear title and a description of the change and its motivation.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
+
+---
+
+## UCB1 Bandit Routing
+
+`BanditRouter` implements a UCB1 multi-armed bandit that selects between three
+routing strategies (`Inline`, `Batch`, `Stream`) based on observed rewards.
+
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │                       BanditRouter                           │
+  │                                                              │
+  │  Three arms:  Inline │ Batch │ Stream                        │
+  │                                                              │
+  │  select()                                                    │
+  │     ├─ warm-up phase: round-robin (warm_up_pulls per arm)    │
+  │     └─ UCB1:  score = mean + bonus * sqrt(2*ln(N)/n)         │
+  │                                                              │
+  │  update(strategy, reward ∈ [0,1])                            │
+  │     ├─ accumulate reward for the selected arm                │
+  │     └─ apply decay_factor to all arms (if < 1.0)            │
+  │                                                              │
+  │  stats() → BanditStats { arms, total_pulls, best_arm }       │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+### UCB1 formula
+
+```
+score(arm) = mean_reward(arm)
+           + exploration_bonus * sqrt(2 * ln(total_pulls) / arm_pulls)
+```
+
+Arms that have been pulled fewer times receive a larger exploration bonus,
+ensuring every strategy gets enough trials before exploitation begins.
+
+### Usage
+
+```rust
+use helixrouter::bandit::{BanditRouter, BanditConfig, RoutingStrategy};
+
+let mut bandit = BanditRouter::new(BanditConfig {
+    exploration_bonus: 1.0,
+    warm_up_pulls: 3,
+    decay_factor: 0.99,  // slight decay to track distribution shifts
+    max_reward_history: 1000,
+});
+
+// Select a strategy for the next job
+let strategy = bandit.select();
+
+// After the job completes, provide a reward in [0, 1]
+// (1.0 = perfect, 0.0 = complete failure)
+let reward = if job_succeeded { 1.0 } else { 0.0 };
+bandit.update(strategy, reward);
+
+// Inspect current state
+let stats = bandit.stats();
+println!("Best arm: {}", stats.best_arm);
+println!("Total pulls: {}", stats.total_pulls);
+for arm in &stats.arms {
+    println!("  {:?}: {} pulls, {:.3} mean reward",
+        arm.strategy, arm.pulls, arm.mean_reward);
+}
+```
+
+### Integration with the Router
+
+When `routing_hint` is not specified, wrap `BanditRouter` in a `Mutex` and
+consult it before delegating to the standard strategy-selection logic:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use helixrouter::bandit::{BanditRouter, BanditConfig};
+
+let bandit = Arc::new(Mutex::new(BanditRouter::new(BanditConfig::default())));
+
+// In your submit path:
+let strategy = bandit.lock().await.select();
+// ... execute job with strategy ...
+let reward = compute_reward(&result);
+bandit.lock().await.update(strategy, reward);
+```
+
+---
+
+## Distributed Tracing
+
+`tracing_span` provides lightweight in-process tracing without external dependencies.
+Spans are stored in a ring buffer and queryable by trace ID or recency.
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                          Tracer                                  │
+  │                                                                  │
+  │  start_span(trace_id, parent_id, operation, tags)                │
+  │       │                                                          │
+  │       ▼                                                          │
+  │   SpanGuard  ──── (on drop) ────►  TraceStore (ring buffer)      │
+  │                                         │                        │
+  │                                   query_by_trace(trace_id)       │
+  │                                   recent(n)                      │
+  │                                   p99_latency_ms(operation)      │
+  └──────────────────────────────────────────────────────────────────┘
+```
+
+### HTTP endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/traces/recent` | Last 100 completed spans (JSON array) |
+| `GET /api/traces/:trace_id` | All spans for a given trace ID |
+
+### Usage
+
+```rust
+use std::collections::HashMap;
+use helixrouter::tracing_span::{TraceContext, Tracer, next_id};
+
+// Create a shared context with a 1000-span ring buffer
+let ctx = TraceContext::new(1000);
+let tracer = Tracer::new(ctx.clone());
+
+// Start a root span
+let trace_id = next_id();
+let mut guard = tracer.start_span(trace_id, None, "job_dispatch", HashMap::new());
+guard.tag("job_id", "42");
+guard.tag("strategy", "inline");
+// Span is recorded automatically when guard drops
+drop(guard);
+
+// Query the store (async context needed)
+tokio::runtime::Runtime::new().unwrap().block_on(async {
+    let store = ctx.store();
+    let store = store.lock().await;
+
+    // All spans for this trace
+    let spans = store.query_by_trace(trace_id);
+    println!("{} spans for trace {}", spans.len(), trace_id);
+
+    // P99 latency for an operation
+    if let Some(p99) = store.p99_latency_ms("job_dispatch") {
+        println!("job_dispatch p99: {:.2}ms", p99);
+    }
+
+    // 10 most recent spans
+    for span in store.recent(10) {
+        println!("[{}] {} — {:.2}ms", span.trace_id, span.operation, span.duration_ms);
+    }
+});
+```
+
+### Nesting spans
+
+```rust
+let trace_id = next_id();
+let root = tracer.start_span(trace_id, None, "root", HashMap::new());
+let root_span_id = root.span_id();
+
+let child = tracer.start_span(trace_id, Some(root_span_id), "child_op", HashMap::new());
+// child recorded first (LIFO drop order)
+drop(child);
+drop(root);
+```

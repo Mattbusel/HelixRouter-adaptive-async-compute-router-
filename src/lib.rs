@@ -85,3 +85,10 @@ pub mod web;
 /// Distributed NATS coordination layer — only available with the `distributed` feature.
 #[cfg(feature = "distributed")]
 pub mod distributed_router;
+
+/// UCB1 multi-armed bandit for adaptive routing strategy selection.
+pub mod bandit;
+
+/// Lightweight in-process distributed tracing: spans, contexts, and latency statistics.
+/// Named `tracing_span` to avoid clashing with the `tracing` crate.
+pub mod tracing_span;
