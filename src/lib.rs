@@ -224,3 +224,9 @@ pub mod request_transformer;
 
 /// Service mesh with discovery, mTLS handshake simulation, policy enforcement, and topology inspection.
 pub mod service_mesh;
+
+/// Canary release traffic splitting: incremental promotion, health checks, and auto-rollback.
+pub mod canary_deployer;
+
+/// Structured request/response logging with sampling strategies, PII redaction, and JSON-lines export.
+pub mod request_logger;
