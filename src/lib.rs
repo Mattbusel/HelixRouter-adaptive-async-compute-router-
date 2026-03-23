@@ -176,3 +176,9 @@ pub mod sliding_window_counter;
 
 /// Health-based peer discovery and membership registry.
 pub mod peer_discovery;
+
+/// Protocol adapter: normalize and translate between REST, gRPC-style, and GraphQL-style request formats.
+pub mod protocol_adapter;
+
+/// Circuit breaker registry: manage multiple circuit breakers across services with bulk trip/reset operations.
+pub mod circuit_breaker_registry;
