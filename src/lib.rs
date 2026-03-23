@@ -212,3 +212,9 @@ pub mod endpoint_catalog;
 
 /// In-flight request deduplication by FNV-1a content hash: single computation, shared result fan-out.
 pub mod request_deduplicator;
+
+/// Multiple load balancing strategies: RoundRobin, WeightedRoundRobin, LeastConnections, Random, ConsistentHash.
+pub mod load_balancer;
+
+/// HTTP response caching with ETag support, TTL expiry, and path-prefix/tag invalidation.
+pub mod response_cache;
