@@ -155,3 +155,9 @@ pub mod adaptive_timeout;
 
 /// HMAC-SHA256 request signing: pure-Rust SHA-256, replay protection, key rotation via KeyStore.
 pub mod request_signing;
+
+/// Token-bucket traffic shaper with burst allowance and per-class queues.
+pub mod traffic_shaper;
+
+/// Profile endpoint performance over time with percentile stats and trend detection.
+pub mod endpoint_profiler;
