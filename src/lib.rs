@@ -236,3 +236,9 @@ pub mod api_gateway;
 
 /// WebSocket proxy: connection management, topic-based message routing, idle eviction, and broadcast fan-out.
 pub mod websocket_proxy;
+
+/// HTTP content negotiation: media types, encodings, and language tags per RFC 7231.
+pub mod content_negotiation;
+
+/// Periodic health checks with circuit integration: HTTP/TCP/custom checks, thresholds, and HealthSummary.
+pub mod health_check_runner;
