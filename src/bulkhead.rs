@@ -262,6 +262,194 @@ impl BulkheadRegistry {
     }
 }
 
+// ── Per-service bulkhead (DashMap-backed registry) ────────────────────────────
+
+/// Configuration for a per-service bulkhead.
+#[derive(Debug, Clone)]
+pub struct ServiceBulkheadConfig {
+    /// Maximum concurrent executions.
+    pub max_concurrent: usize,
+    /// Maximum queue depth before rejecting new requests.
+    pub max_queue_size: usize,
+    /// Timeout for acquiring a semaphore permit.
+    pub timeout: Duration,
+}
+
+impl Default for ServiceBulkheadConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 10,
+            max_queue_size: 20,
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Handle for a single registered service bulkhead.
+pub struct BulkheadHandle {
+    /// Service name.
+    pub service_name: String,
+    /// Configuration.
+    pub config: ServiceBulkheadConfig,
+    /// Semaphore controlling concurrent access.
+    pub semaphore: Arc<tokio::sync::Semaphore>,
+    /// Current queue depth (waiting for a permit).
+    pub queue_depth: Arc<AtomicUsize>,
+    /// Total executions completed.
+    total_executed: AtomicU64,
+    /// Total requests rejected.
+    total_rejected: AtomicU64,
+}
+
+impl BulkheadHandle {
+    fn new(service_name: impl Into<String>, config: ServiceBulkheadConfig) -> Self {
+        let permits = config.max_concurrent;
+        Self {
+            service_name: service_name.into(),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+            queue_depth: Arc::new(AtomicUsize::new(0)),
+            total_executed: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+            config,
+        }
+    }
+}
+
+/// Error variants for service bulkhead operations.
+#[derive(Debug)]
+pub enum ServiceBulkheadError {
+    /// No bulkhead registered for that service name.
+    ServiceNotRegistered,
+    /// The queue is full; request rejected before acquiring a permit.
+    QueueFull,
+    /// Timed out waiting for a semaphore permit.
+    Timeout,
+    /// Failed to acquire semaphore (e.g., closed).
+    AcquireError,
+}
+
+impl std::fmt::Display for ServiceBulkheadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceBulkheadError::ServiceNotRegistered => f.write_str("service not registered"),
+            ServiceBulkheadError::QueueFull => f.write_str("queue full"),
+            ServiceBulkheadError::Timeout => f.write_str("bulkhead timeout"),
+            ServiceBulkheadError::AcquireError => f.write_str("semaphore acquire error"),
+        }
+    }
+}
+
+impl std::error::Error for ServiceBulkheadError {}
+
+/// Snapshot of per-service bulkhead statistics.
+#[derive(Debug, Clone)]
+pub struct ServiceBulkheadStats {
+    /// Number of futures currently executing.
+    pub active_count: usize,
+    /// Number of futures waiting for a permit.
+    pub queue_depth: usize,
+    /// Lifetime total executions.
+    pub total_executed: u64,
+    /// Lifetime total rejected requests.
+    pub total_rejected: u64,
+}
+
+/// Per-service bulkhead manager backed by a [`DashMap`].
+///
+/// Register services with [`ServiceBulkheadManager::register_service`], then execute
+/// futures through [`ServiceBulkheadManager::execute`].
+#[derive(Clone, Default)]
+pub struct ServiceBulkheadManager {
+    services: Arc<DashMap<String, Arc<BulkheadHandle>>>,
+}
+
+impl ServiceBulkheadManager {
+    /// Create a new empty manager.
+    pub fn new() -> Self {
+        Self {
+            services: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Register a service with the given configuration.
+    pub fn register_service(&self, name: &str, config: ServiceBulkheadConfig) {
+        self.services
+            .insert(name.to_owned(), Arc::new(BulkheadHandle::new(name, config)));
+    }
+
+    /// Execute `f` through the bulkhead for `service`.
+    ///
+    /// Rejects if the queue depth exceeds `max_queue_size`.
+    /// Times out if a permit cannot be acquired within `config.timeout`.
+    pub async fn execute<F, Fut, T>(
+        &self,
+        service: &str,
+        f: F,
+    ) -> Result<T, ServiceBulkheadError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let handle = self
+            .services
+            .get(service)
+            .ok_or(ServiceBulkheadError::ServiceNotRegistered)?;
+        let handle = Arc::clone(&*handle);
+        drop(handle); // drop the dashmap ref
+        // Re-acquire properly.
+        let handle = {
+            let r = self
+                .services
+                .get(service)
+                .ok_or(ServiceBulkheadError::ServiceNotRegistered)?;
+            Arc::clone(&*r)
+        };
+
+        // Check queue depth.
+        let current_queue = handle.queue_depth.load(Ordering::Acquire);
+        if current_queue >= handle.config.max_queue_size {
+            handle.total_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(ServiceBulkheadError::QueueFull);
+        }
+
+        handle.queue_depth.fetch_add(1, Ordering::Relaxed);
+
+        let permit_result = tokio::time::timeout(
+            handle.config.timeout,
+            handle.semaphore.acquire(),
+        )
+        .await;
+
+        handle.queue_depth.fetch_sub(1, Ordering::Relaxed);
+
+        let _permit = match permit_result {
+            Ok(Ok(p)) => p,
+            Ok(Err(_)) => {
+                handle.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(ServiceBulkheadError::AcquireError);
+            }
+            Err(_) => {
+                handle.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(ServiceBulkheadError::Timeout);
+            }
+        };
+
+        let output = f().await;
+        handle.total_executed.fetch_add(1, Ordering::Relaxed);
+        Ok(output)
+    }
+
+    /// Get statistics for a service, or `None` if not registered.
+    pub fn service_stats(&self, service: &str) -> Option<ServiceBulkheadStats> {
+        self.services.get(service).map(|h| ServiceBulkheadStats {
+            active_count: h.config.max_concurrent - h.semaphore.available_permits(),
+            queue_depth: h.queue_depth.load(Ordering::Relaxed),
+            total_executed: h.total_executed.load(Ordering::Relaxed),
+            total_rejected: h.total_rejected.load(Ordering::Relaxed),
+        })
+    }
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -376,5 +564,63 @@ mod tests {
             let _ = bh.try_execute(async {}).await;
             assert_eq!(bh.stats().total_completed, i + 1);
         }
+    }
+
+    // ── ServiceBulkheadManager tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn service_bulkhead_execute_succeeds() {
+        let mgr = ServiceBulkheadManager::new();
+        mgr.register_service("svc", ServiceBulkheadConfig {
+            max_concurrent: 2,
+            max_queue_size: 10,
+            timeout: Duration::from_secs(5),
+        });
+        let result = mgr.execute("svc", || async { 42u32 }).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42u32);
+    }
+
+    #[tokio::test]
+    async fn service_bulkhead_unregistered_returns_error() {
+        let mgr = ServiceBulkheadManager::new();
+        let result = mgr.execute("unknown", || async { 1u32 }).await;
+        assert!(matches!(result, Err(ServiceBulkheadError::ServiceNotRegistered)));
+    }
+
+    #[tokio::test]
+    async fn service_bulkhead_queue_full_rejection() {
+        let mgr = Arc::new(ServiceBulkheadManager::new());
+        mgr.register_service("tight", ServiceBulkheadConfig {
+            max_concurrent: 1,
+            max_queue_size: 0, // no queue allowed
+            timeout: Duration::from_secs(5),
+        });
+
+        let mgr2 = Arc::clone(&mgr);
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let b2 = Arc::clone(&barrier);
+
+        let _holder = tokio::spawn(async move {
+            mgr2.execute("tight", || async move {
+                b2.wait().await;
+                tokio::time::sleep(Duration::from_secs(10)).await
+            }).await
+        });
+
+        barrier.wait().await;
+
+        // Second request should be rejected (queue depth 0).
+        let result = mgr.execute("tight", || async { () }).await;
+        assert!(matches!(result, Err(ServiceBulkheadError::QueueFull)));
+    }
+
+    #[tokio::test]
+    async fn service_bulkhead_stats() {
+        let mgr = ServiceBulkheadManager::new();
+        mgr.register_service("tracked", ServiceBulkheadConfig::default());
+        let _ = mgr.execute("tracked", || async {}).await;
+        let stats = mgr.service_stats("tracked").unwrap();
+        assert_eq!(stats.total_executed, 1);
     }
 }

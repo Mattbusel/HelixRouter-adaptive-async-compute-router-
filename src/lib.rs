@@ -188,3 +188,6 @@ pub mod compression;
 
 /// Deterministic load testing framework: traffic profiles, LCG simulation, percentile analysis.
 pub mod load_tester;
+
+/// In-flight request deduplication/coalescing via broadcast channels.
+pub mod request_coalescer;
