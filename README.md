@@ -659,6 +659,225 @@ Use `cost_router::cost_prometheus_text(&cost_router).await` and append to `/metr
 
 ---
 
+## Per-Job Cost Model
+
+The `cost_model` module tracks observed execution latency per `(job_kind, strategy)` pair and
+uses exponential moving averages (EMA) to predict future latency. The router can consult these
+predictions to pick the cheapest strategy rather than relying solely on heuristics.
+
+### Data structures
+
+| Type | Purpose |
+|------|---------|
+| `ExecutionSample` | One recorded observation: `job_kind`, `strategy`, `duration_ns`, `success` |
+| `JobCostModel` | Concurrent map of `(job_kind, strategy)` → circular sliding window + EMA |
+
+### How it works
+
+```
+Router::submit(job)
+  |
+  +-- cost_model.record_sample(ExecutionSample { job_kind, strategy, duration_ns, success })
+  |     |
+  |     +-- O(1) DashMap lookup (or insert)
+  |     +-- Arc<Mutex<KindStats>> acquired — shard lock released first
+  |     +-- Circular buffer push (64 samples), EMA update: α=0.15
+  |
+  +-- cost_model.cost_adjusted_strategy(job_kind, pressure)
+        |
+        +-- For each candidate strategy: predicted_latency_ns(job_kind, strategy)
+        +-- Under high pressure (> 0.65): apply 1.30× penalty to CpuPool/Batch
+        +-- Return strategy with lowest pressure-adjusted expected latency
+```
+
+### Example
+
+```rust
+use helixrouter::cost_model::{ExecutionSample, JobCostModel};
+use helixrouter::types::Strategy;
+
+let model = JobCostModel::new();
+
+// Record observations after each job completes
+model.record_sample(ExecutionSample {
+    job_kind: "hash_mix".to_owned(),
+    strategy: Strategy::Inline,
+    duration_ns: 800,
+    success: true,
+});
+
+// Predict expected latency
+let predicted_ns = model.predicted_latency_ns("hash_mix", Strategy::Inline);
+println!("predicted latency: {predicted_ns} ns");
+
+// Pick cheapest strategy given current pressure
+let best = model.cost_adjusted_strategy("hash_mix", 0.3);
+println!("best strategy: {best:?}");
+```
+
+---
+
+## Predictive Downstream Backpressure
+
+The `downstream_pressure` module aggregates telemetry pushed by downstream services and
+exposes a combined pressure score. When the score exceeds 0.75, `should_shed()` returns
+`true` and the router preemptively drops lower-priority jobs **before** its own queues saturate.
+
+### Pressure scoring
+
+Each downstream service contributes a composite score weighted as:
+
+| Component | Weight | Normalisation ceiling |
+|-----------|--------|-----------------------|
+| p99 latency | 40% | 1 000 ms |
+| queue depth | 35% | 10 000 items |
+| error rate | 25% | 1.0 (already 0–1) |
+
+Services that have not sent telemetry within 30 seconds are excluded from the combined score
+(assumed recovered or unreachable).
+
+### HTTP endpoint
+
+```
+POST /api/downstream/telemetry
+Content-Type: application/json
+
+{
+  "service_name": "payment-processor",
+  "latency_p99_ms": 340.5,
+  "queue_depth": 1200,
+  "error_rate": 0.02
+}
+```
+
+Returns `204 No Content`.
+
+```
+GET /api/downstream/pressure
+```
+
+Returns:
+
+```json
+{
+  "combined_pressure": 0.41,
+  "should_shed": false,
+  "services": [
+    {
+      "service_name": "payment-processor",
+      "ema_latency_frac": 0.34,
+      "ema_queue_frac": 0.12,
+      "ema_error_rate": 0.02,
+      "pressure_score": 0.185,
+      "stale": false
+    }
+  ]
+}
+```
+
+### Example
+
+```rust
+use helixrouter::downstream_pressure::{DownstreamPressureMonitor, DownstreamTelemetry};
+use std::sync::Arc;
+
+let monitor = Arc::new(DownstreamPressureMonitor::new());
+
+monitor.update(DownstreamTelemetry {
+    service_name: "payment-processor".to_owned(),
+    latency_p99_ms: 340.5,
+    queue_depth: 1_200,
+    error_rate: 0.02,
+});
+
+println!("pressure: {:.3}", monitor.combined_pressure());
+if monitor.should_shed() {
+    println!("shedding lower-priority jobs");
+}
+```
+
+---
+
+## Distributed Mode (NATS)
+
+The `distributed_router` module wraps the local `Router` with NATS-based coordination so
+multiple HelixRouter instances can share routing state across nodes. Enable it with the
+`distributed` Cargo feature.
+
+### Features
+
+| Capability | NATS subject / bucket |
+|-----------|----------------------|
+| Broadcast every routing decision | `helix.decisions` |
+| Receive peer load metrics | `helix.load.*` |
+| Leader election (TTL key, JetStream KV) | `helix-election` KV bucket |
+| Primary broadcasts strategy override | `helix.override` |
+
+### Architecture
+
+```
+  Node A (primary)                    Node B (replica)
+  ┌────────────────────────┐          ┌──────────────────────────┐
+  │ DistributedRouter      │          │ DistributedRouter        │
+  │  ├─ local Router       │          │  ├─ local Router         │
+  │  ├─ is_primary: true   │          │  ├─ is_primary: false    │
+  │  └─ NATS client        │◄────────►│  └─ NATS client          │
+  └────────────────────────┘  PubSub  └──────────────────────────┘
+                                NATS
+```
+
+### Cargo feature
+
+```toml
+[dependencies]
+helixrouter = { version = "1.1", features = ["distributed"] }
+```
+
+### Example
+
+```rust
+# #[cfg(feature = "distributed")]
+use helixrouter::{
+    config::RouterConfig,
+    router::Router,
+    distributed_router::{DistributedRouter, DistributedRouterConfig},
+    types::Strategy,
+};
+
+# #[cfg(feature = "distributed")]
+async fn example() {
+    let local = Router::new(RouterConfig::default());
+    let cfg = DistributedRouterConfig {
+        node_id: "node-1".to_owned(),
+        nats_url: "nats://127.0.0.1:4222".to_owned(),
+    };
+
+    let dr = DistributedRouter::connect(cfg, local).await.unwrap();
+
+    // Attempt leader election
+    if dr.elect_primary().await.unwrap() {
+        println!("this node is now primary");
+
+        // Broadcast a strategy override to all peers
+        dr.global_strategy_override(Some(Strategy::Batch)).await;
+    }
+
+    // Publish a decision after routing a job
+    dr.publish_decision(42, Strategy::Spawn).await;
+
+    // Read aggregate peer pressure
+    println!("peer pressure: {:.3}", dr.peer_pressure().await);
+}
+```
+
+### Environment
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| NATS connection URL | `nats://127.0.0.1:4222` | Set in `DistributedRouterConfig::nats_url` |
+
+---
+
 ## Dashboard
 
 The live dark dashboard is served at `GET /` and auto-updates every second via SSE.
