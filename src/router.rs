@@ -1659,6 +1659,7 @@ mod tests {
             compute_cost: cost,
             scaling_potential: scaling,
             latency_budget_ms: 50,
+            deadline_ms: 0,
         }
     }
 
@@ -2410,6 +2411,7 @@ mod tests {
                 compute_cost: 100,
                 scaling_potential: 0.3,
                 latency_budget_ms: 500,
+                deadline_ms: 0,
             };
             trained.submit(j).await;
         }

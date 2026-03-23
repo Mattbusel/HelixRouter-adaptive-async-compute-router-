@@ -740,6 +740,7 @@ mod tests {
             compute_cost,
             scaling_potential,
             latency_budget_ms,
+            deadline_ms: 0,
         }
     }
 
@@ -1566,6 +1567,7 @@ mod tests {
             compute_cost: 100,
             scaling_potential: 0.5,
             latency_budget_ms: 200,
+            deadline_ms: 0,
         }
     }
 
