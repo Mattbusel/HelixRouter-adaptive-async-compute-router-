@@ -197,3 +197,9 @@ pub mod health_aggregator;
 
 /// Configurable retry policies with fixed/linear/exponential backoff, LCG jitter, and sync executor.
 pub mod retry_policy;
+
+/// Shadow traffic mirroring with response comparison: LCG sampling, Levenshtein similarity, mismatch stats.
+pub mod traffic_mirror;
+
+/// Hybrid token bucket + sliding window rate limiter: per-client registry, refill, eviction, dual-gate enforcement.
+pub mod rate_limiter_v2;
