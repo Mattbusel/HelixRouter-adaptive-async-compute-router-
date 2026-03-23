@@ -58,6 +58,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
@@ -506,6 +507,136 @@ impl DagExecutor {
             nodes_executed,
             nodes_dropped,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DAG JSON Visualization API
+// ---------------------------------------------------------------------------
+
+/// A node in the JSON graph representation returned by `GET /api/dag`.
+///
+/// Designed to be consumed directly by a browser-side D3.js force-directed
+/// graph — each node carries enough metadata for tooltips and coloring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DagGraphNode {
+    /// Stable node identifier (numeric, matches [`NodeId`] inner value).
+    pub id: usize,
+    /// Caller-assigned job id from [`Job::id`].
+    pub job_id: u64,
+    /// Human-readable job kind label (e.g. `"hash_mix"`).
+    pub kind: String,
+    /// Abstract compute cost of the job.
+    pub compute_cost: u64,
+    /// Number of dependencies (in-degree) for this node.
+    pub dep_count: usize,
+    /// Whether this node is a leaf (no downstream dependants).
+    pub is_leaf: bool,
+    /// Execution status: `"pending"`, `"completed"`, or `"dropped"`.
+    pub status: String,
+}
+
+/// A directed edge in the JSON graph returned by `GET /api/dag`.
+///
+/// Represents the dependency relationship `source → target`
+/// (target may not run until source has completed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DagGraphEdge {
+    /// Source node id (the dependency that must complete first).
+    pub source: usize,
+    /// Target node id (the node that depends on source).
+    pub target: usize,
+}
+
+/// The complete JSON graph payload for `GET /api/dag`.
+///
+/// Drop this into any D3.js `forceSimulation` call:
+/// ```js
+/// const { nodes, edges } = await (await fetch("/api/dag")).json();
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DagGraphPayload {
+    /// All nodes in the graph.
+    pub nodes: Vec<DagGraphNode>,
+    /// All directed edges (source → target).
+    pub edges: Vec<DagGraphEdge>,
+    /// Total node count.
+    pub node_count: usize,
+    /// Total edge count.
+    pub edge_count: usize,
+}
+
+impl JobDag {
+    /// Render the current DAG as a JSON-serialisable graph payload.
+    ///
+    /// This is the backing implementation for the `GET /api/dag` web endpoint.
+    /// The returned [`DagGraphPayload`] contains nodes and edges in a format
+    /// directly consumable by D3.js force-directed graph layouts.
+    ///
+    /// ## Node status
+    /// All nodes are reported as `"pending"` because the DAG has not yet been
+    /// executed through a [`DagExecutor`]. Once execution has begun, callers
+    /// should prefer [`DagResult`]-based snapshots for live status.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// use helixrouter::dag::{JobDag, DagNode};
+    /// use helixrouter::types::{Job, JobKind};
+    ///
+    /// let mut dag = JobDag::new();
+    /// let a = dag.add_node(Job { id: 1, kind: JobKind::HashMix, inputs: vec![],
+    ///     compute_cost: 100, scaling_potential: 0.5, latency_budget_ms: 50, deadline_ms: 0 });
+    /// let b = dag.add_node(Job { id: 2, kind: JobKind::PrimeCount, inputs: vec![],
+    ///     compute_cost: 500, scaling_potential: 0.3, latency_budget_ms: 100, deadline_ms: 0 });
+    /// dag.add_edge(a, b).unwrap();
+    /// let payload = dag.to_graph_payload();
+    /// let json = serde_json::to_string_pretty(&payload).unwrap();
+    /// println!("{json}");
+    /// ```
+    #[must_use]
+    pub fn to_graph_payload(&self) -> DagGraphPayload {
+        let leaf_set = self.leaf_nodes();
+
+        // Build nodes.
+        let mut nodes: Vec<DagGraphNode> = self
+            .nodes
+            .iter()
+            .map(|(&node_id, dag_node)| DagGraphNode {
+                id: node_id.0,
+                job_id: dag_node.job.id,
+                kind: dag_node.job.kind.to_string(),
+                compute_cost: dag_node.job.compute_cost,
+                dep_count: dag_node.depends_on.len(),
+                is_leaf: leaf_set.contains(&node_id),
+                status: "pending".to_string(),
+            })
+            .collect();
+
+        // Sort by node id for deterministic output.
+        nodes.sort_by_key(|n| n.id);
+
+        // Build edges: for each node, emit one edge per dependency.
+        // Each entry in `depends_on` is (source → this node).
+        let mut edges: Vec<DagGraphEdge> = Vec::new();
+        for (&node_id, dag_node) in &self.nodes {
+            for &dep_id in &dag_node.depends_on {
+                edges.push(DagGraphEdge {
+                    source: dep_id.0,
+                    target: node_id.0,
+                });
+            }
+        }
+        edges.sort_by_key(|e| (e.source, e.target));
+
+        let node_count = nodes.len();
+        let edge_count = edges.len();
+
+        DagGraphPayload {
+            nodes,
+            edges,
+            node_count,
+            edge_count,
+        }
     }
 }
 
