@@ -116,3 +116,9 @@ pub mod wfq;
 
 /// Comprehensive router health checks with Healthy/Degraded/Unhealthy status.
 pub mod health;
+
+/// Canary deployment traffic splitting controller: weight-based routing, error tracking, auto-promote/rollback.
+pub mod canary_controller;
+
+/// Async connection pool: RAII guards, idle eviction, min-idle replenishment, pool stats.
+pub mod connection_pool;
