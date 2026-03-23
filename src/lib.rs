@@ -20,6 +20,9 @@
 //! | [`simulator`] | Seeded synthetic workload generation |
 //! | [`web`] | Axum HTTP server, SSE feed, embedded dark dashboard |
 //! | [`types`] | Shared data types: [`Job`](types::Job), [`Strategy`](types::Strategy), [`Output`](types::Output) |
+//! | [`cost_model`] | Per-job-kind execution cost model with EMA sliding window |
+//! | [`downstream_pressure`] | Predictive backpressure aggregation from downstream service telemetry |
+//! | [`distributed_router`] | NATS-based distributed coordination (feature-gated: `distributed`) |
 //!
 //! ## Quick start
 //!
@@ -44,6 +47,11 @@
 
 pub mod autoscaler;
 pub mod config;
+pub mod cost_model;
+pub mod cost_router;
+pub mod dag;
+pub mod deadline;
+pub mod downstream_pressure;
 pub mod metrics;
 pub mod neural_router;
 pub mod router;
@@ -53,3 +61,6 @@ pub mod simulator;
 pub mod strategies;
 pub mod types;
 pub mod web;
+/// Distributed NATS coordination layer — only available with the `distributed` feature.
+#[cfg(feature = "distributed")]
+pub mod distributed_router;

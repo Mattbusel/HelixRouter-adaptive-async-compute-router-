@@ -117,6 +117,28 @@ pub struct RouterStats {
     pub batch_miss_count: u64,
 }
 
+/// Per-job-kind routing statistics snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct KindRoutingStats {
+    /// Total jobs of kind `HashMix` routed since process start.
+    pub hash_mix: u64,
+    /// Total jobs of kind `PrimeCount` routed since process start.
+    pub prime_count: u64,
+    /// Total jobs of kind `MonteCarloRisk` routed since process start.
+    pub monte_carlo_risk: u64,
+}
+
+/// Per-job-kind SLA violation counts snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct SLAViolationCounts {
+    /// SLA violations recorded for `HashMix` jobs.
+    pub hash_mix: u64,
+    /// SLA violations recorded for `PrimeCount` jobs.
+    pub prime_count: u64,
+    /// SLA violations recorded for `MonteCarloRisk` jobs.
+    pub monte_carlo_risk: u64,
+}
+
 // ===== Internal types =====
 
 struct CpuWork {
@@ -247,6 +269,22 @@ struct Inner {
     batch_flushed_hashmix: AtomicU64,
     batch_flushed_primecount: AtomicU64,
     batch_flushed_montecarlo: AtomicU64,
+
+    // ── SLA violation counters (per job kind) ─────────────────────────────
+    sla_violations_hashmix: AtomicU64,
+    sla_violations_primecount: AtomicU64,
+    sla_violations_montecarlo: AtomicU64,
+
+    // ── Per-kind routing counters ─────────────────────────────────────────
+    routed_hashmix: AtomicU64,
+    routed_primecount: AtomicU64,
+    routed_montecarlo: AtomicU64,
+
+    // ── Deadline-exceeded counter ─────────────────────────────────────────
+    deadline_exceeded: AtomicU64,
+
+    // ── Neural epsilon history (ring buffer of 60 recent epsilon values) ──
+    epsilon_history: Mutex<std::collections::VecDeque<f64>>,
 }
 
 // ===== Router =====
@@ -341,6 +379,14 @@ impl Router {
             batch_flushed_hashmix: AtomicU64::new(0),
             batch_flushed_primecount: AtomicU64::new(0),
             batch_flushed_montecarlo: AtomicU64::new(0),
+            sla_violations_hashmix: AtomicU64::new(0),
+            sla_violations_primecount: AtomicU64::new(0),
+            sla_violations_montecarlo: AtomicU64::new(0),
+            routed_hashmix: AtomicU64::new(0),
+            routed_primecount: AtomicU64::new(0),
+            routed_montecarlo: AtomicU64::new(0),
+            deadline_exceeded: AtomicU64::new(0),
+            epsilon_history: Mutex::new(std::collections::VecDeque::with_capacity(60)),
         });
 
         let inner2 = inner.clone();
@@ -408,6 +454,19 @@ impl Router {
                     .pressure_cache
                     .store(score.to_bits(), Ordering::Release);
                 let _ = cpu_busy; // used above via cfg.cpu_parallelism.saturating_sub
+
+                // Snapshot epsilon into the ring buffer (kept to 60 entries = ~6 s history).
+                let eps = {
+                    let neural = inner4.neural.lock().await;
+                    neural.epsilon()
+                };
+                {
+                    let mut hist = inner4.epsilon_history.lock().await;
+                    if hist.len() >= 60 {
+                        hist.pop_front();
+                    }
+                    hist.push_back(eps);
+                }
             }
             info!("pressure cache refresher exiting");
         });
@@ -491,6 +550,12 @@ impl Router {
         }
         if let Some(v) = patch.enable_adaptive_threshold {
             candidate.enable_adaptive_threshold = v;
+        }
+        if let Some(v) = patch.sla {
+            candidate.sla = v;
+        }
+        if let Some(v) = patch.warmup_steps {
+            candidate.warmup_steps = v;
         }
         // Validate before committing — roll back on error.
         // This single validate() call enforces ALL invariants atomically, including:
@@ -772,6 +837,39 @@ impl Router {
             );
         }
 
+        // Deadline enforcement: reject jobs whose deadline has already passed.
+        // Uses wall-clock time via SystemTime; skipped when deadline_ms == 0 (disabled).
+        if job.deadline_ms > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if now_ms >= job.deadline_ms {
+                warn!(
+                    job_id = job.id,
+                    kind = %job.kind,
+                    deadline_ms = job.deadline_ms,
+                    now_ms,
+                    "job deadline exceeded before routing; dropping"
+                );
+                self.inner.deadline_exceeded.fetch_add(1, Ordering::Relaxed);
+                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                self.bump_route(Strategy::Drop).await;
+                // Broadcast a deadline-exceeded decision event.
+                let ts_ms = now_ms;
+                let decision = RoutingDecision {
+                    job_id: job.id,
+                    strategy: Strategy::Drop,
+                    compute_cost: job.compute_cost,
+                    cpu_busy: 0,
+                    pressure: 0.0,
+                    decision_source: "deadline",
+                };
+                let _ = self.inner.decision_tx.send(decision);
+                return None;
+            }
+        }
+
         // Zero-cost jobs are trivially cheap and should always be routed inline.
         // Log a warning once so operators know about zero-cost submissions.
         // We do NOT allow zero-cost jobs to reach the neural router's feature
@@ -869,6 +967,7 @@ impl Router {
         // Clone job so we can record the neural outcome after execution.
         let job_for_neural = job.clone();
         let budget_ms = job.latency_budget_ms;
+        let job_kind = job.kind;
 
         // Broadcast decision and append to routing log.
         // Hold the routing_log lock across both operations so SSE and REST
@@ -909,6 +1008,7 @@ impl Router {
 
             Strategy::Inline => {
                 self.bump_route(Strategy::Inline).await;
+                self.bump_kind_route(job_kind);
                 let t0 = Instant::now();
                 let out = execute_job(&job);
                 let ms = t0.elapsed().as_millis() as u64;
@@ -918,11 +1018,13 @@ impl Router {
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
                     .await;
+                self.check_sla_violation(job_kind, ms).await;
                 Some(out)
             }
 
             Strategy::Spawn => {
                 self.bump_route(Strategy::Spawn).await;
+                self.bump_kind_route(job_kind);
                 let t0 = Instant::now();
                 let j = job.clone();
                 let handle = tokio::spawn(async move { execute_job(&j) });
@@ -944,11 +1046,13 @@ impl Router {
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
                     .await;
+                self.check_sla_violation(job_kind, ms).await;
                 Some(out)
             }
 
             Strategy::CpuPool => {
                 self.bump_route(Strategy::CpuPool).await;
+                self.bump_kind_route(job_kind);
 
                 let (tx, rx) = oneshot::channel::<Vec<Output>>();
                 // Cancellation token: if the client drops rx before the worker
@@ -993,12 +1097,14 @@ impl Router {
                     self.inner.completed.fetch_add(1, Ordering::Relaxed);
                     self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
                         .await;
+                    self.check_sla_violation(job_kind, ms).await;
                     Some(out)
                 }
             }
 
             Strategy::Batch => {
                 self.bump_route(Strategy::Batch).await;
+                self.bump_kind_route(job_kind);
 
                 let (tx, rx) = oneshot::channel::<Vec<Output>>();
                 let seq = self.inner.batch_seq.fetch_add(1, Ordering::Relaxed);
@@ -1058,6 +1164,7 @@ impl Router {
                 self.inner.completed.fetch_add(1, Ordering::Relaxed);
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
                     .await;
+                self.check_sla_violation(job_kind, ms).await;
                 Some(out)
             }
         }
@@ -1141,6 +1248,40 @@ impl Router {
         *self.inner.routed.lock().await.entry(s).or_insert(0) += 1;
     }
 
+    /// Increment the per-kind routing counter for a job.
+    fn bump_kind_route(&self, kind: JobKind) {
+        match kind {
+            JobKind::HashMix => self.inner.routed_hashmix.fetch_add(1, Ordering::Relaxed),
+            JobKind::PrimeCount => self.inner.routed_primecount.fetch_add(1, Ordering::Relaxed),
+            JobKind::MonteCarloRisk => self.inner.routed_montecarlo.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    /// Check whether a job's observed latency violates its SLA, and if so
+    /// increment the per-kind SLA violation counter.
+    async fn check_sla_violation(&self, kind: JobKind, latency_ms: u64) {
+        let cfg = self.inner.cfg.read().await;
+        let kind_str = kind.to_string();
+        let violated = cfg
+            .sla
+            .get(&kind_str)
+            .map(|s| latency_ms > s.max_latency_ms)
+            .unwrap_or(false);
+        if violated {
+            let counter = match kind {
+                JobKind::HashMix => &self.inner.sla_violations_hashmix,
+                JobKind::PrimeCount => &self.inner.sla_violations_primecount,
+                JobKind::MonteCarloRisk => &self.inner.sla_violations_montecarlo,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                kind = %kind_str,
+                latency_ms,
+                "SLA violation: job latency exceeded configured max_latency_ms"
+            );
+        }
+    }
+
     async fn record_latency(&self, s: Strategy, ms: u64) {
         self.inner.metrics.lock().await.record_latency(s, ms);
     }
@@ -1209,6 +1350,38 @@ impl Router {
     pub async fn restore_neural_weights(&self, snap: WeightSnapshot) {
         let mut neural = self.inner.neural.lock().await;
         neural.restore(snap);
+    }
+
+    /// Return per-job-kind routing statistics for dashboard and API use.
+    ///
+    /// Returns counts for `(hash_mix, prime_count, monte_carlo_risk)`.
+    pub fn kind_routing_stats(&self) -> KindRoutingStats {
+        KindRoutingStats {
+            hash_mix: self.inner.routed_hashmix.load(Ordering::Relaxed),
+            prime_count: self.inner.routed_primecount.load(Ordering::Relaxed),
+            monte_carlo_risk: self.inner.routed_montecarlo.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Return per-job-kind SLA violation counts.
+    pub fn sla_violation_counts(&self) -> SLAViolationCounts {
+        SLAViolationCounts {
+            hash_mix: self.inner.sla_violations_hashmix.load(Ordering::Relaxed),
+            prime_count: self.inner.sla_violations_primecount.load(Ordering::Relaxed),
+            monte_carlo_risk: self.inner.sla_violations_montecarlo.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Return the total number of jobs rejected due to expired deadlines.
+    pub fn deadline_exceeded_count(&self) -> u64 {
+        self.inner.deadline_exceeded.load(Ordering::Relaxed)
+    }
+
+    /// Return the recent epsilon history (up to 60 samples at 100 ms interval).
+    ///
+    /// Used by the dashboard to display the epsilon decay curve over time.
+    pub async fn epsilon_history(&self) -> Vec<f64> {
+        self.inner.epsilon_history.lock().await.iter().copied().collect()
     }
 
     /// Signal all background tasks (CPU dispatcher, batch flusher) to stop.

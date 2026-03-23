@@ -14,7 +14,7 @@
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::{header, HeaderValue, StatusCode},
     response::sse::Event,
     response::{Html, IntoResponse, Response, Sse},
@@ -26,28 +26,47 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::config::{RouterConfig, RouterConfigPatch};
+use crate::downstream_pressure::{DownstreamPressureMonitor, DownstreamTelemetry};
 use crate::metrics::{prometheus_text_with_neural, NeuralMetrics};
-use crate::router::Router;
+use crate::router::{KindRoutingStats, Router, SLAViolationCounts};
 use crate::types::Strategy;
 
 type AppState = Arc<Router>;
+type DownstreamState = Arc<DownstreamPressureMonitor>;
 
 /// Start the Axum HTTP server and bind it to `addr`.
 ///
 /// Registers all routes (dashboard, health, metrics, stats, config, SSE,
-/// neural snapshot, EOT telemetry) and serves them until the process exits
-/// or the underlying TCP listener is closed.
+/// neural snapshot, EOT telemetry, downstream pressure telemetry) and serves
+/// them until the process exits or the underlying TCP listener is closed.
 ///
 /// # Parameters
 ///
-/// * `router` — Shared router instance; wrapped in `Arc` for handler access.
-/// * `addr`   — TCP address to bind (e.g. `127.0.0.1:8080`).
+/// * `router`               — Shared router instance; wrapped in `Arc` for handler access.
+/// * `addr`                 — TCP address to bind (e.g. `127.0.0.1:8080`).
+/// * `downstream_monitor`   — Optional downstream pressure monitor.  When `None`,
+///   the `POST /api/downstream/telemetry` endpoint still registers but returns
+///   a no-op response.  Pass `Some(Arc::new(DownstreamPressureMonitor::new()))`
+///   to enable real monitoring.
 ///
 /// # Errors
 ///
 /// Returns `std::io::Error` if binding the TCP listener fails or if Axum's
 /// internal `serve` loop encounters a fatal I/O error.
-pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(
+    router: Router,
+    addr: SocketAddr,
+) -> std::io::Result<()> {
+    serve_with_downstream(router, addr, Arc::new(DownstreamPressureMonitor::new())).await
+}
+
+/// Like [`serve`] but accepts a pre-constructed [`DownstreamPressureMonitor`]
+/// (useful when callers want to share the monitor instance).
+pub async fn serve_with_downstream(
+    router: Router,
+    addr: SocketAddr,
+    downstream: DownstreamState,
+) -> std::io::Result<()> {
     let shared: AppState = Arc::new(router);
 
     let app = AxumRouter::new()
@@ -60,9 +79,12 @@ pub async fn serve(router: Router, addr: SocketAddr) -> std::io::Result<()> {
             get(get_config).post(set_config).patch(patch_config),
         )
         .route("/api/telemetry", post(post_eot_telemetry))
+        .route("/api/downstream/telemetry", post(post_downstream_telemetry))
+        .route("/api/downstream/pressure", get(get_downstream_pressure))
         .route("/api/stream/decisions", get(sse_decisions))
         .route("/api/neural", get(get_neural))
-        .with_state(shared);
+        .with_state(shared)
+        .layer(axum::Extension(downstream));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -165,6 +187,31 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
   </table>
 </div>
 
+<!-- Per-kind routing & SLA -->
+<div class="grid" style="margin-bottom:12px">
+  <div class="card">
+    <h3>Per-Kind Routing</h3>
+    <table>
+      <thead><tr><th>Kind</th><th>Routed</th><th>SLA Violations</th><th>Violation Rate</th></tr></thead>
+      <tbody id="kind-body"></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h3>Deadline & SLA Summary</h3>
+    <div style="font-size:.85rem;margin-top:4px">
+      <div>Deadline exceeded: <span id="deadline-exceeded" style="color:#f87171;font-weight:700">—</span></div>
+      <div style="margin-top:6px">Total SLA violations:
+        <span id="sla-total" style="color:#fbbf24;font-weight:700">—</span>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Neural Router &epsilon; Decay</h3>
+    <canvas id="eps-canvas" width="240" height="80" style="width:100%;height:80px;display:block"></canvas>
+    <div class="muted" style="font-size:.72rem;margin-top:4px">Epsilon (exploration rate) over last 6 s</div>
+  </div>
+</div>
+
 <!-- Routing decisions feed -->
 <div class="card">
   <h3>Live Routing Decisions <span class="muted" style="font-size:.7rem">(last 50)</span>
@@ -236,7 +283,58 @@ async function tick() {
     const total = routed.reduce((s,r)=>s+r.count,0) || 1;
     drawDonut(routed, total);
 
+    // Per-kind routing & SLA table
+    const kr = j.kind_routing ?? {};
+    const sv = j.sla_violations ?? {};
+    const kinds = [
+      {key:'hash_mix',     label:'hash_mix',         routed: kr.hash_mix??0,         violations: sv.hash_mix??0},
+      {key:'prime_count',  label:'prime_count',       routed: kr.prime_count??0,      violations: sv.prime_count??0},
+      {key:'monte_carlo',  label:'monte_carlo_risk',  routed: kr.monte_carlo_risk??0, violations: sv.monte_carlo_risk??0},
+    ];
+    const kbody = document.getElementById('kind-body');
+    kbody.innerHTML = '';
+    kinds.forEach(k => {
+      const rate = k.routed > 0 ? ((k.violations / k.routed)*100).toFixed(1)+'%' : '—';
+      const tr = document.createElement('tr');
+      const vcolor = k.violations > 0 ? '#f87171' : '#34d399';
+      tr.innerHTML = `<td>${k.label}</td><td>${k.routed}</td>` +
+        `<td style="color:${vcolor}">${k.violations}</td><td>${rate}</td>`;
+      kbody.appendChild(tr);
+    });
+
+    // Deadline & SLA summary cards
+    document.getElementById('deadline-exceeded').textContent = j.deadline_exceeded ?? 0;
+    const slaTotal = (sv.hash_mix??0) + (sv.prime_count??0) + (sv.monte_carlo_risk??0);
+    document.getElementById('sla-total').textContent = slaTotal;
+
+    // Epsilon decay sparkline
+    drawEpsilonCurve(j.epsilon_history ?? []);
+
   } catch(e) { console.warn('stats fetch failed', e); }
+}
+
+function drawEpsilonCurve(history) {
+  const canvas = document.getElementById('eps-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (history.length < 2) { return; }
+  const max = Math.max(...history, 0.01);
+  ctx.strokeStyle = '#60a5fa';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  history.forEach((v, i) => {
+    const x = (i / (history.length - 1)) * W;
+    const y = H - (v / max) * (H - 4) - 2;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  // Label current epsilon
+  const last = history[history.length - 1];
+  ctx.fillStyle = '#9aa4b2';
+  ctx.font = '10px ui-monospace,monospace';
+  ctx.fillText('ε='+last.toFixed(4), 4, 12);
 }
 
 function drawDonut(routed, total) {
@@ -366,6 +464,14 @@ struct StatsResponse {
     pressure_score: f64,
     routed_by_strategy: Vec<CountRow>,
     latency_by_strategy: Vec<LatencyRow>,
+    /// Per-job-kind routing counts for the dashboard.
+    kind_routing: KindRoutingStats,
+    /// Per-job-kind SLA violation counts.
+    sla_violations: SLAViolationCounts,
+    /// Total jobs rejected because their deadline had already passed.
+    deadline_exceeded: u64,
+    /// Recent epsilon (exploration rate) history — one sample per 100 ms, up to 60 samples.
+    epsilon_history: Vec<f64>,
 }
 
 async fn stats_json(State(router): State<AppState>) -> impl IntoResponse {
@@ -402,6 +508,10 @@ async fn stats_json(State(router): State<AppState>) -> impl IntoResponse {
         pressure_score: snap.pressure_score,
         routed_by_strategy: routed,
         latency_by_strategy: latency_rows,
+        kind_routing: router.kind_routing_stats(),
+        sla_violations: router.sla_violation_counts(),
+        deadline_exceeded: router.deadline_exceeded_count(),
+        epsilon_history: router.epsilon_history().await,
     })
 }
 
@@ -498,6 +608,47 @@ async fn post_eot_telemetry(
 ) -> impl IntoResponse {
     router.set_eot_pressure(body.pressure);
     StatusCode::NO_CONTENT
+}
+
+// ===== Downstream pressure telemetry =====
+
+/// POST /api/downstream/telemetry — accept pressure telemetry from a downstream service.
+///
+/// Downstream services post a [`DownstreamTelemetry`] JSON body here to report
+/// their current p99 latency, queue depth, and error rate.  HelixRouter aggregates
+/// these signals via the [`DownstreamPressureMonitor`] and uses the combined score
+/// to preemptively shed lower-priority jobs before its own queues saturate.
+///
+/// Returns `204 No Content` on success.
+async fn post_downstream_telemetry(
+    Extension(monitor): Extension<DownstreamState>,
+    Json(body): Json<DownstreamTelemetry>,
+) -> impl IntoResponse {
+    monitor.update(body);
+    StatusCode::NO_CONTENT
+}
+
+/// GET /api/downstream/pressure — return the current downstream pressure snapshot.
+///
+/// Returns a JSON object with:
+/// - `combined_pressure` — aggregate score in `[0.0, 1.0]`.
+/// - `should_shed`       — `true` when pressure exceeds the shedding threshold.
+/// - `services`          — per-service breakdown sorted by descending pressure.
+async fn get_downstream_pressure(
+    Extension(monitor): Extension<DownstreamState>,
+) -> impl IntoResponse {
+    use crate::downstream_pressure::ServicePressureSnapshot;
+    #[derive(serde::Serialize)]
+    struct DownstreamPressureResponse {
+        combined_pressure: f64,
+        should_shed: bool,
+        services: Vec<ServicePressureSnapshot>,
+    }
+    Json(DownstreamPressureResponse {
+        combined_pressure: monitor.combined_pressure(),
+        should_shed: monitor.should_shed(),
+        services: monitor.service_snapshot(),
+    })
 }
 
 // ===== Neural router snapshot =====

@@ -14,12 +14,113 @@
 //! - Distributing config updates across nodes (single-process only).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+
+// ===== SLA Configuration =====
+
+/// Priority level for a job kind's SLA.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SLAPriority {
+    /// High priority — SLA violations are counted as critical.
+    High,
+    /// Normal priority — SLA violations are counted as warnings.
+    Normal,
+    /// Low priority — SLA violations are informational only.
+    Low,
+}
+
+impl Default for SLAPriority {
+    fn default() -> Self {
+        SLAPriority::Normal
+    }
+}
+
+/// Per-job-kind SLA configuration.
+///
+/// Specifies the maximum acceptable latency and priority level.
+/// Violations are tracked in `helix_sla_violations_total{kind}` Prometheus counters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SLAConfig {
+    /// Maximum acceptable end-to-end latency in milliseconds for this job kind.
+    /// Jobs that complete (or are dropped) after exceeding this threshold
+    /// increment the `helix_sla_violations_total` counter.
+    pub max_latency_ms: u64,
+    /// Priority level — surfaced in logs and Prometheus labels.
+    #[serde(default)]
+    pub priority: SLAPriority,
+}
+
+impl Default for SLAConfig {
+    fn default() -> Self {
+        Self {
+            max_latency_ms: 500,
+            priority: SLAPriority::Normal,
+        }
+    }
+}
+
+/// Complete SLA map for all job kinds.
+///
+/// Keys match the `JobKind` display strings: `"hash_mix"`, `"prime_count"`, `"monte_carlo_risk"`.
+///
+/// Example TOML:
+/// ```toml
+/// [sla.hash_mix]
+/// max_latency_ms = 100
+/// priority = "high"
+///
+/// [sla.prime_count]
+/// max_latency_ms = 300
+/// priority = "normal"
+///
+/// [sla.monte_carlo_risk]
+/// max_latency_ms = 500
+/// priority = "low"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SLAMap(pub HashMap<String, SLAConfig>);
+
+impl SLAMap {
+    /// Look up the SLA for a given job kind display name.
+    /// Returns `None` if no SLA is configured for that kind.
+    pub fn get(&self, kind: &str) -> Option<&SLAConfig> {
+        self.0.get(kind)
+    }
+
+    /// Build a default SLA map with sensible defaults for all built-in job kinds.
+    pub fn defaults() -> Self {
+        let mut m = HashMap::new();
+        m.insert(
+            "hash_mix".to_string(),
+            SLAConfig {
+                max_latency_ms: 100,
+                priority: SLAPriority::High,
+            },
+        );
+        m.insert(
+            "prime_count".to_string(),
+            SLAConfig {
+                max_latency_ms: 300,
+                priority: SLAPriority::Normal,
+            },
+        );
+        m.insert(
+            "monte_carlo_risk".to_string(),
+            SLAConfig {
+                max_latency_ms: 500,
+                priority: SLAPriority::Normal,
+            },
+        );
+        SLAMap(m)
+    }
+}
 
 // ===== ConfigError =====
 
@@ -124,6 +225,16 @@ pub struct RouterConfig {
     /// `spawn_threshold` is always used. Default: `true`.
     #[serde(default = "default_enable_adaptive_threshold")]
     pub enable_adaptive_threshold: bool,
+    /// Per-job-kind SLA configuration. Jobs that exceed their kind's `max_latency_ms`
+    /// increment the `helix_sla_violations_total` Prometheus counter.
+    /// Uses built-in defaults when absent from config.
+    #[serde(default = "SLAMap::defaults")]
+    pub sla: SLAMap,
+    /// Number of neural router warmup steps before epsilon-greedy exploitation begins.
+    /// Overrides `NeuralRouterConfig::min_samples_before_learning` when set.
+    /// Default: `10` (matches the neural router's built-in default).
+    #[serde(default = "default_warmup_steps")]
+    pub warmup_steps: usize,
 }
 
 /// Default schema version returned when the `version` field is absent from a deserialised config.
@@ -150,6 +261,10 @@ pub fn default_adaptive_p95_threshold_factor() -> f64 {
 pub fn default_enable_adaptive_threshold() -> bool {
     true
 }
+/// Default warmup steps (`10`) — matches the neural router's built-in minimum samples.
+pub fn default_warmup_steps() -> usize {
+    10
+}
 
 impl Default for RouterConfig {
     fn default() -> Self {
@@ -167,6 +282,8 @@ impl Default for RouterConfig {
             cpu_p95_budget_ms: default_cpu_p95_budget_ms(),
             adaptive_p95_threshold_factor: default_adaptive_p95_threshold_factor(),
             enable_adaptive_threshold: default_enable_adaptive_threshold(),
+            sla: SLAMap::defaults(),
+            warmup_steps: default_warmup_steps(),
         }
     }
 }
@@ -218,6 +335,12 @@ pub struct RouterConfigPatch {
     /// Override enable_adaptive_threshold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_adaptive_threshold: Option<bool>,
+    /// Override SLA map.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sla: Option<SLAMap>,
+    /// Override warmup_steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup_steps: Option<usize>,
 }
 
 impl RouterConfig {

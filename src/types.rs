@@ -87,6 +87,12 @@ pub struct Job {
     pub scaling_potential: f32,
     /// Soft deadline in milliseconds. Recorded in telemetry but not enforced.
     pub latency_budget_ms: u64,
+    /// Optional hard deadline: Unix timestamp in milliseconds by which this job must
+    /// start routing. Jobs submitted with `deadline_ms` set to a non-zero value are
+    /// rejected (treated as `Drop`) when `current_time_ms >= deadline_ms`.
+    /// Set to `0` to disable deadline enforcement for this job.
+    #[serde(default)]
+    pub deadline_ms: u64,
 }
 
 /// The computed result of a job execution.
@@ -128,6 +134,9 @@ pub struct RoutingDecision {
     pub pressure_score: f64,
     /// Unix timestamp in milliseconds when the decision was made.
     pub timestamp_ms: u64,
+    /// Whether this job was rejected because its `deadline_ms` had already passed.
+    #[serde(default)]
+    pub deadline_exceeded: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +213,7 @@ mod tests {
             compute_cost: 5000,
             scaling_potential: 0.8,
             latency_budget_ms: 20,
+            deadline_ms: 0,
         };
         let j = serde_json::to_string(&job).unwrap();
         assert!(j.contains("\"id\":42"));
@@ -243,6 +253,7 @@ mod tests {
             cpu_busy: 2,
             pressure_score: 0.3,
             timestamp_ms: 1_700_000_000_000,
+            deadline_exceeded: false,
         };
         let j = serde_json::to_string(&d).unwrap();
         assert!(j.contains("\"strategy\":\"spawn\""));

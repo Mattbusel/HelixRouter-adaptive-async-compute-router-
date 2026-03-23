@@ -1,6 +1,6 @@
 [package]
 name = "helixrouter"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.81"
 description = "Adaptive async compute routing engine: per-job strategy selection (inline/spawn/pool/batch/drop) driven by live pressure, EMA latency, and online-learned quality estimates."
@@ -27,6 +27,8 @@ default = ["simulation"]
 # Enables the simulator module and its rand dependency.
 # Gate with `cfg(feature = "simulation")` to exclude from pure-library builds.
 simulation = ["dep:rand"]
+# Enables NATS-based distributed coordination (DistributedRouter).
+distributed = ["dep:async-nats"]
 
 [dependencies]
 # async runtime — core, never remove
@@ -47,6 +49,12 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # futures core for stream trait
 futures-core = "0.3"
+# atomic temp-file writes for weight persistence
+tempfile = "3"
+# concurrent hash map — used by cost_model and downstream_pressure modules
+dashmap = "6"
+# NATS async client — optional, only compiled when the `distributed` feature is enabled
+async-nats = { version = "0.37", optional = true }
 
 [dev-dependencies]
 # criterion benchmarks
