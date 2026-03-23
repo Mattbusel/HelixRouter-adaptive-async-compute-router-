@@ -309,3 +309,260 @@ mod tests {
         assert_eq!(dedup.in_flight_count(), 0);
     }
 }
+
+// ── Idempotency-key + fingerprint deduplication ───────────────────────────────
+
+use std::sync::{
+    atomic::AtomicU64 as IdemAtomicU64,
+    RwLock as IdemRwLock,
+};
+use std::collections::HashMap as IdemHashMap;
+
+/// FNV-1a 64-bit hash.
+pub fn fnv1a_hash(data: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// An idempotency-key entry.
+pub struct IdempotencyEntry {
+    /// The idempotency key.
+    pub key: String,
+    /// FNV-1a hash of the original response.
+    pub response_hash: u64,
+    /// When this entry was first recorded.
+    pub created_at: std::time::Instant,
+    /// How long (seconds) before this entry expires.
+    pub ttl_secs: u64,
+    /// Number of duplicate hits since first recording.
+    pub hit_count: IdemAtomicU64,
+}
+
+impl IdempotencyEntry {
+    fn new(key: impl Into<String>, response_hash: u64, ttl_secs: u64) -> Self {
+        Self {
+            key: key.into(),
+            response_hash,
+            created_at: std::time::Instant::now(),
+            ttl_secs,
+            hit_count: IdemAtomicU64::new(0),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.created_at.elapsed().as_secs() >= self.ttl_secs
+    }
+}
+
+/// Method + path + body fingerprint.
+pub struct RequestFingerprint {
+    /// HTTP method.
+    pub method: String,
+    /// Request path.
+    pub path: String,
+    /// FNV-1a hash of the body.
+    pub body_hash: u64,
+}
+
+impl RequestFingerprint {
+    /// Compute a fingerprint from method, path, and body bytes.
+    pub fn compute(method: &str, path: &str, body: &[u8]) -> Self {
+        Self {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            body_hash: fnv1a_hash(body),
+        }
+    }
+
+    /// Compute a composite hash for use as a map key.
+    pub fn composite_hash(&self) -> u64 {
+        let mut buf = Vec::with_capacity(self.method.len() + self.path.len() + 8);
+        buf.extend_from_slice(self.method.as_bytes());
+        buf.extend_from_slice(self.path.as_bytes());
+        buf.extend_from_slice(&self.body_hash.to_le_bytes());
+        fnv1a_hash(&buf)
+    }
+}
+
+/// Decision returned by idempotency/fingerprint deduplication checks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IdemDedupeDecision {
+    /// This request has not been seen before.
+    New,
+    /// This request is a duplicate of a previously recorded one.
+    Duplicate {
+        /// Hash of the original response.
+        original_response_hash: u64,
+        /// Number of times this key/fingerprint has been seen as a duplicate.
+        hit_count: u64,
+    },
+}
+
+/// Statistics for the idempotency/fingerprint deduplicator.
+#[derive(Debug, Clone)]
+pub struct IdemDedupeStats {
+    /// Number of active idempotency key entries.
+    pub total_keys: usize,
+    /// Number of active fingerprint entries.
+    pub total_fingerprints: usize,
+    /// Total duplicate hits across both stores.
+    pub duplicate_count: u64,
+}
+
+/// Idempotency-key and fingerprint-based request deduplicator.
+pub struct IdempotencyDeduplicator {
+    idempotency_store: IdemRwLock<IdemHashMap<String, IdempotencyEntry>>,
+    fingerprint_store: IdemRwLock<IdemHashMap<u64, IdempotencyEntry>>,
+    window_secs: u64,
+}
+
+impl IdempotencyDeduplicator {
+    /// Create a new deduplicator with the given TTL window.
+    pub fn new(window_secs: u64) -> Self {
+        Self {
+            idempotency_store: IdemRwLock::new(IdemHashMap::new()),
+            fingerprint_store: IdemRwLock::new(IdemHashMap::new()),
+            window_secs,
+        }
+    }
+
+    /// Check whether an idempotency key has been seen.
+    pub fn check_idempotency_key(&self, key: &str) -> IdemDedupeDecision {
+        let store = self.idempotency_store.read().unwrap();
+        match store.get(key) {
+            None => IdemDedupeDecision::New,
+            Some(entry) if entry.is_expired() => IdemDedupeDecision::New,
+            Some(entry) => {
+                let hits = entry.hit_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                IdemDedupeDecision::Duplicate {
+                    original_response_hash: entry.response_hash,
+                    hit_count: hits,
+                }
+            }
+        }
+    }
+
+    /// Record a response hash for an idempotency key.
+    pub fn record_idempotency_key(&self, key: &str, response_hash: u64) {
+        let mut store = self.idempotency_store.write().unwrap();
+        store.insert(
+            key.to_owned(),
+            IdempotencyEntry::new(key, response_hash, self.window_secs),
+        );
+    }
+
+    /// Check whether a request fingerprint has been seen.
+    pub fn check_fingerprint(&self, fp: &RequestFingerprint) -> IdemDedupeDecision {
+        let hash = fp.composite_hash();
+        let store = self.fingerprint_store.read().unwrap();
+        match store.get(&hash) {
+            None => IdemDedupeDecision::New,
+            Some(entry) if entry.is_expired() => IdemDedupeDecision::New,
+            Some(entry) => {
+                let hits = entry.hit_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                IdemDedupeDecision::Duplicate {
+                    original_response_hash: entry.response_hash,
+                    hit_count: hits,
+                }
+            }
+        }
+    }
+
+    /// Record a response hash for a fingerprint.
+    pub fn record_fingerprint(&self, fp: &RequestFingerprint, response_hash: u64) {
+        let hash = fp.composite_hash();
+        let mut store = self.fingerprint_store.write().unwrap();
+        store.insert(
+            hash,
+            IdempotencyEntry::new(format!("fp:{hash}"), response_hash, self.window_secs),
+        );
+    }
+
+    /// Remove expired entries from both stores.  Returns the number of entries purged.
+    pub fn purge_expired(&self) -> usize {
+        let mut count = 0;
+        {
+            let mut store = self.idempotency_store.write().unwrap();
+            let before = store.len();
+            store.retain(|_, e| !e.is_expired());
+            count += before - store.len();
+        }
+        {
+            let mut store = self.fingerprint_store.write().unwrap();
+            let before = store.len();
+            store.retain(|_, e| !e.is_expired());
+            count += before - store.len();
+        }
+        count
+    }
+
+    /// Return aggregate statistics.
+    pub fn stats(&self) -> IdemDedupeStats {
+        let ikeys = self.idempotency_store.read().unwrap();
+        let fps = self.fingerprint_store.read().unwrap();
+        let dup_count: u64 = ikeys
+            .values()
+            .map(|e| e.hit_count.load(std::sync::atomic::Ordering::Relaxed))
+            .chain(
+                fps.values()
+                    .map(|e| e.hit_count.load(std::sync::atomic::Ordering::Relaxed)),
+            )
+            .sum();
+        IdemDedupeStats {
+            total_keys: ikeys.len(),
+            total_fingerprints: fps.len(),
+            duplicate_count: dup_count,
+        }
+    }
+}
+
+#[cfg(test)]
+mod idempotency_tests {
+    use super::*;
+
+    #[test]
+    fn fnv_deterministic() {
+        assert_eq!(fnv1a_hash(b"hello"), fnv1a_hash(b"hello"));
+        assert_ne!(fnv1a_hash(b"hello"), fnv1a_hash(b"world"));
+    }
+
+    #[test]
+    fn idempotency_key_roundtrip() {
+        let d = IdempotencyDeduplicator::new(60);
+        assert_eq!(d.check_idempotency_key("k1"), IdemDedupeDecision::New);
+        d.record_idempotency_key("k1", 0xdeadbeef);
+        assert!(matches!(
+            d.check_idempotency_key("k1"),
+            IdemDedupeDecision::Duplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn fingerprint_roundtrip() {
+        let d = IdempotencyDeduplicator::new(60);
+        let fp = RequestFingerprint::compute("GET", "/api", b"body");
+        assert_eq!(d.check_fingerprint(&fp), IdemDedupeDecision::New);
+        d.record_fingerprint(&fp, 0xdeadbeef);
+        assert!(matches!(
+            d.check_fingerprint(&RequestFingerprint::compute("GET", "/api", b"body")),
+            IdemDedupeDecision::Duplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn stats_count() {
+        let d = IdempotencyDeduplicator::new(60);
+        d.record_idempotency_key("k1", 1);
+        d.record_idempotency_key("k2", 2);
+        d.check_idempotency_key("k1");
+        let s = d.stats();
+        assert_eq!(s.total_keys, 2);
+        assert_eq!(s.duplicate_count, 1);
+    }
+}

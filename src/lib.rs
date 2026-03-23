@@ -248,3 +248,6 @@ pub mod tls_terminator;
 
 /// Per-route circuit breakers with mesh-level cascade coordination and dependency-graph propagation.
 pub mod circuit_mesh;
+
+/// Per-route/per-client sliding-window rate limiter with burst allowance and prefix matching.
+pub mod rate_limiter;
