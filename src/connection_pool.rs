@@ -1,760 +1,405 @@
-//! # Async Connection Pool
+//! # Connection Pool
 //!
-//! A generic, tokio-native connection pool for backend endpoints.
+//! Backend connection pool with health-checked eviction.
 //!
-//! ## Features
+//! Provides a synchronous, ID-based connection pool suitable for managing
+//! connections to backend services.  Each connection is tracked by a `u64`
+//! identifier and progresses through a simple state machine:
+//! `Idle → InUse → Idle | Unhealthy → Evicted`.
 //!
-//! - RAII [`PooledConnection`] guard that returns the inner connection on drop.
-//! - Configurable minimum idle size, maximum size, connection/idle/lifetime
-//!   timeouts.
-//! - Background [`ConnectionPool::maintain`] task that prunes stale connections
-//!   and replenishes idle slots down to `min_idle`.
-//! - [`PoolStats`] snapshot for observability.
-//! - Generic over any [`Connectable`] type: implement two methods
-//!   (`is_alive`, `close`) and your type works with the pool.
-//!
-//! ## Example
-//!
-//! ```rust
-//! use helixrouter::connection_pool::{ConnectionPool, Connectable, PoolConfig};
-//!
-//! #[derive(Debug)]
-//! struct FakeConn { alive: bool }
-//!
-//! impl Connectable for FakeConn {
-//!     fn is_alive(&self) -> bool { self.alive }
-//!     fn close(self) { /* drop / shutdown */ }
-//! }
-//!
-//! # tokio_test::block_on(async {
-//! let pool: ConnectionPool<FakeConn> = ConnectionPool::new(
-//!     PoolConfig::default(),
-//!     || async { Ok::<_, String>(FakeConn { alive: true }) },
-//! );
-//!
-//! let conn = pool.acquire().await.unwrap();
-//! println!("alive: {}", conn.is_alive());
-//! drop(conn); // returned to pool
-//! # });
-//! ```
+//! A [`BackendPoolManager`] owns one [`ConnectionPool`] per backend and
+//! provides a unified acquire interface across all registered backends.
 
-use std::{
-    collections::VecDeque,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
-use tokio::sync::{Mutex, Notify};
-use tracing::{debug, warn};
+use dashmap::DashMap;
+use std::sync::Arc;
 
-// ---------------------------------------------------------------------------
-// Connectable trait
-// ---------------------------------------------------------------------------
+// ── ConnectionState ──────────────────────────────────────────────────────────
 
-/// Trait that must be implemented by connection types managed by [`ConnectionPool`].
-pub trait Connectable: Send + 'static {
-    /// Returns `true` if the connection is still usable.
-    fn is_alive(&self) -> bool;
-
-    /// Gracefully close the connection (consuming it).
-    fn close(self);
+/// State of a single pooled connection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionState {
+    /// Available for acquisition.
+    Idle,
+    /// Currently checked out by a caller.
+    InUse,
+    /// Marked unhealthy due to errors; will be evicted on next sweep.
+    Unhealthy,
+    /// Evicted from the pool.
+    Evicted,
 }
 
-// ---------------------------------------------------------------------------
-// PoolConfig
-// ---------------------------------------------------------------------------
+// ── PooledConnection ─────────────────────────────────────────────────────────
+
+/// Internal record representing one connection slot in the pool.
+#[derive(Debug, Clone)]
+pub struct PooledConnection {
+    /// Unique connection identifier.
+    pub id: u64,
+    /// Backend this connection belongs to.
+    pub backend: String,
+    /// Current lifecycle state.
+    pub state: ConnectionState,
+    /// Wall-clock milliseconds when the connection was created.
+    pub created_at_ms: u64,
+    /// Wall-clock milliseconds when the connection was last used.
+    pub last_used_ms: u64,
+    /// Number of times this connection has been acquired.
+    pub use_count: u64,
+    /// Cumulative error count recorded against this connection.
+    pub error_count: u64,
+}
+
+// ── PoolConfig ───────────────────────────────────────────────────────────────
 
 /// Configuration for a [`ConnectionPool`].
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
+    /// Maximum total number of connections (idle + in-use).
+    pub max_connections: usize,
     /// Minimum number of idle connections to maintain.
     pub min_idle: usize,
-    /// Maximum total connections (idle + in-use).
-    pub max_size: usize,
-    /// How long to wait for an available connection before returning
-    /// [`PoolError::Timeout`], in milliseconds.
-    pub connection_timeout_ms: u64,
-    /// How long a connection may sit idle before the maintenance task
-    /// evicts it, in seconds.
-    pub idle_timeout_secs: u64,
-    /// Maximum lifetime of any connection regardless of activity, in seconds.
-    pub max_lifetime_secs: u64,
+    /// Milliseconds a connection may sit idle before eviction.
+    pub max_idle_ms: u64,
+    /// Milliseconds a connection may live from creation before eviction.
+    pub max_lifetime_ms: u64,
+    /// Milliseconds of inactivity after which a health-check is triggered.
+    pub health_check_interval_ms: u64,
 }
 
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            min_idle:              2,
-            max_size:              10,
-            connection_timeout_ms: 5_000,
-            idle_timeout_secs:     60,
-            max_lifetime_secs:     300,
+            max_connections: 10,
+            min_idle: 2,
+            max_idle_ms: 60_000,
+            max_lifetime_ms: 300_000,
+            health_check_interval_ms: 30_000,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// PoolError
-// ---------------------------------------------------------------------------
+// ── PoolStats ─────────────────────────────────────────────────────────────────
 
-/// Errors returned by [`ConnectionPool`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PoolError {
-    /// No connection became available within `connection_timeout_ms`.
-    Timeout,
-    /// The factory failed to create a new connection.
-    CreateFailed(String),
-    /// The pool is at capacity and no connection is available.
-    AtCapacity,
-}
-
-impl std::fmt::Display for PoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PoolError::Timeout          => write!(f, "connection pool timeout"),
-            PoolError::CreateFailed(e)  => write!(f, "connection creation failed: {e}"),
-            PoolError::AtCapacity       => write!(f, "connection pool at capacity"),
-        }
-    }
-}
-
-impl std::error::Error for PoolError {}
-
-// ---------------------------------------------------------------------------
-// PoolStats
-// ---------------------------------------------------------------------------
-
-/// Point-in-time statistics snapshot for a [`ConnectionPool`].
-#[derive(Debug, Clone)]
+/// Aggregate statistics for a [`ConnectionPool`].
+#[derive(Debug, Clone, Default)]
 pub struct PoolStats {
-    /// Current total connections (idle + in-use).
-    pub size: usize,
-    /// Connections currently idle (available for acquisition).
-    pub idle: usize,
-    /// Connections currently checked out.
+    /// Total connections currently in the pool (all states).
+    pub total: usize,
+    /// Connections in `Idle` state.
+    pub available: usize,
+    /// Connections in `InUse` state.
     pub in_use: usize,
-    /// Cumulative total acquisitions since pool creation.
-    pub total_acquired: u64,
-    /// Cumulative total evictions (idle timeout + lifetime + dead).
-    pub total_evicted: u64,
+    /// Connections in `Unhealthy` state.
+    pub unhealthy: usize,
+    /// Cumulative number of connections evicted since pool creation.
+    pub evicted_total: u64,
+    /// Cumulative number of successful acquisitions since pool creation.
+    pub acquired_total: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Slot: internal connection record
-// ---------------------------------------------------------------------------
+// ── ConnectionPool ────────────────────────────────────────────────────────────
 
-struct Slot<T> {
-    conn:        T,
-    created_at:  Instant,
-    last_used:   Instant,
+/// Thread-safe connection pool for a single backend.
+pub struct ConnectionPool {
+    connections: Mutex<Vec<PooledConnection>>,
+    /// Pool configuration.
+    pub config: PoolConfig,
+    /// Backend identifier.
+    pub backend: String,
+    next_id: AtomicU64,
+    total_acquired: AtomicU64,
+    total_released: AtomicU64,
+    evicted_total: AtomicU64,
 }
 
-impl<T> Slot<T> {
-    fn new(conn: T) -> Self {
-        let now = Instant::now();
-        Self { conn, created_at: now, last_used: now }
-    }
-
-    fn is_expired(&self, idle_timeout: Duration, max_lifetime: Duration) -> bool {
-        let now = Instant::now();
-        now.duration_since(self.last_used) > idle_timeout
-            || now.duration_since(self.created_at) > max_lifetime
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Inner pool state
-// ---------------------------------------------------------------------------
-
-struct Inner<T> {
-    available: VecDeque<Slot<T>>,
-    /// Total connections (idle + in-use).
-    total:     usize,
-}
-
-// ---------------------------------------------------------------------------
-// ConnectionPool
-// ---------------------------------------------------------------------------
-
-/// Async connection pool generic over any [`Connectable`] type.
-///
-/// Cheap to clone — all clones share the same inner state.
-pub struct ConnectionPool<T: Connectable> {
-    config:         Arc<PoolConfig>,
-    inner:          Arc<Mutex<Inner<T>>>,
-    notify:         Arc<Notify>,
-    in_use:         Arc<AtomicUsize>,
-    total_acquired: Arc<AtomicU64>,
-    total_evicted:  Arc<AtomicU64>,
-    /// Factory for creating new connections.
-    factory:        Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>> + Send + Sync>,
-}
-
-impl<T: Connectable> Clone for ConnectionPool<T> {
-    fn clone(&self) -> Self {
+impl ConnectionPool {
+    /// Create a new empty pool for `backend`.
+    pub fn new(backend: String, config: PoolConfig) -> Self {
         Self {
-            config:         Arc::clone(&self.config),
-            inner:          Arc::clone(&self.inner),
-            notify:         Arc::clone(&self.notify),
-            in_use:         Arc::clone(&self.in_use),
-            total_acquired: Arc::clone(&self.total_acquired),
-            total_evicted:  Arc::clone(&self.total_evicted),
-            factory:        Arc::clone(&self.factory),
+            connections: Mutex::new(Vec::new()),
+            config,
+            backend,
+            next_id: AtomicU64::new(1),
+            total_acquired: AtomicU64::new(0),
+            total_released: AtomicU64::new(0),
+            evicted_total: AtomicU64::new(0),
         }
     }
-}
-
-impl<T: Connectable> ConnectionPool<T> {
-    /// Create a new pool with the given config and async connection factory.
-    ///
-    /// The factory is called whenever the pool needs to create a new
-    /// connection (either during `acquire` or `maintain`).
-    pub fn new<F, Fut>(config: PoolConfig, factory: F) -> Self
-    where
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
-    {
-        let factory = Arc::new(move || -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>> {
-            Box::pin(factory())
-        });
-
-        Self {
-            config:         Arc::new(config),
-            inner:          Arc::new(Mutex::new(Inner { available: VecDeque::new(), total: 0 })),
-            notify:         Arc::new(Notify::new()),
-            in_use:         Arc::new(AtomicUsize::new(0)),
-            total_acquired: Arc::new(AtomicU64::new(0)),
-            total_evicted:  Arc::new(AtomicU64::new(0)),
-            factory,
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Acquire
-    // ------------------------------------------------------------------
 
     /// Acquire a connection from the pool.
     ///
-    /// 1. Checks for an idle, alive connection.
-    /// 2. If none is idle but `total < max_size`, creates a new one.
-    /// 3. Otherwise waits (up to `connection_timeout_ms`) for one to be
-    ///    released.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PoolError::Timeout`] if no connection becomes available
-    /// within the configured timeout, or [`PoolError::CreateFailed`] if the
-    /// factory fails.
-    pub async fn acquire(&self) -> Result<PooledConnection<T>, PoolError> {
-        let timeout = Duration::from_millis(self.config.connection_timeout_ms);
-        let deadline = Instant::now() + timeout;
+    /// Finds an idle connection and marks it `InUse`.  If none is available
+    /// and the pool has not reached `max_connections`, creates a new one.
+    /// Returns `None` if at capacity with no idle slots.
+    pub fn acquire(&self, now_ms: u64) -> Option<u64> {
+        let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
 
-        loop {
-            // --- Try to pop an idle connection ---
-            {
-                let mut g = self.inner.lock().await;
-                // Drain dead connections first.
-                self.drain_dead(&mut g);
-
-                if let Some(slot) = g.available.pop_front() {
-                    self.in_use.fetch_add(1, Ordering::Relaxed);
-                    self.total_acquired.fetch_add(1, Ordering::Relaxed);
-                    debug!("ConnectionPool: acquired idle connection");
-                    return Ok(PooledConnection::new(slot.conn, Arc::clone(&self.inner), Arc::clone(&self.notify), Arc::clone(&self.in_use), Arc::clone(&self.total_evicted), Arc::clone(&self.config)));
-                }
-
-                // --- Create a new connection if under capacity ---
-                if g.total < self.config.max_size {
-                    g.total += 1;
-                    // Drop the lock before the async factory call.
-                    drop(g);
-
-                    let conn = (self.factory)().await.map_err(|e| {
-                        // Failed to create; decrement total.
-                        // Note: we can't hold `g` here so we use a separate lock.
-                        let pool = self.clone();
-                        tokio::spawn(async move {
-                            pool.inner.lock().await.total -= 1;
-                        });
-                        PoolError::CreateFailed(e)
-                    })?;
-
-                    self.in_use.fetch_add(1, Ordering::Relaxed);
-                    self.total_acquired.fetch_add(1, Ordering::Relaxed);
-                    debug!("ConnectionPool: created new connection");
-                    return Ok(PooledConnection::new(conn, Arc::clone(&self.inner), Arc::clone(&self.notify), Arc::clone(&self.in_use), Arc::clone(&self.total_evicted), Arc::clone(&self.config)));
-                }
-            }
-
-            // --- Wait for a release notification ---
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(PoolError::Timeout);
-            }
-            if tokio::time::timeout(remaining, self.notify.notified()).await.is_err() {
-                return Err(PoolError::Timeout);
-            }
+        // Find an idle connection.
+        if let Some(conn) = conns.iter_mut().find(|c| c.state == ConnectionState::Idle) {
+            conn.state = ConnectionState::InUse;
+            conn.last_used_ms = now_ms;
+            conn.use_count += 1;
+            let id = conn.id;
+            self.total_acquired.fetch_add(1, Ordering::Relaxed);
+            return Some(id);
         }
+
+        // Create new connection if under max.
+        if conns.len() < self.config.max_connections {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            conns.push(PooledConnection {
+                id,
+                backend: self.backend.clone(),
+                state: ConnectionState::InUse,
+                created_at_ms: now_ms,
+                last_used_ms: now_ms,
+                use_count: 1,
+                error_count: 0,
+            });
+            self.total_acquired.fetch_add(1, Ordering::Relaxed);
+            return Some(id);
+        }
+
+        None
     }
 
-    // ------------------------------------------------------------------
-    // Maintain
-    // ------------------------------------------------------------------
-
-    /// Background maintenance: evict stale connections and replenish `min_idle`.
+    /// Release connection `conn_id` back to the pool.
     ///
-    /// Run this in a spawned task on a schedule (e.g. every 30 s):
-    ///
-    /// ```rust,no_run
-    /// # use helixrouter::connection_pool::{ConnectionPool, Connectable, PoolConfig};
-    /// # #[derive(Debug)] struct Dummy;
-    /// # impl Connectable for Dummy { fn is_alive(&self)->bool{true} fn close(self){} }
-    /// # let pool: ConnectionPool<Dummy> = ConnectionPool::new(PoolConfig::default(), || async { Ok(Dummy) });
-    /// let p = pool.clone();
-    /// tokio::spawn(async move {
-    ///     loop {
-    ///         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-    ///         p.maintain().await;
-    ///     }
-    /// });
-    /// ```
-    pub async fn maintain(&self) {
-        let idle_timeout  = Duration::from_secs(self.config.idle_timeout_secs);
-        let max_lifetime  = Duration::from_secs(self.config.max_lifetime_secs);
-
-        let mut to_close: Vec<T> = Vec::new();
-
-        {
-            let mut g = self.inner.lock().await;
-            let before = g.available.len();
-            let mut kept: VecDeque<Slot<T>> = VecDeque::new();
-
-            while let Some(slot) = g.available.pop_front() {
-                if slot.is_expired(idle_timeout, max_lifetime) || !slot.conn.is_alive() {
-                    to_close.push(slot.conn);
-                    g.total = g.total.saturating_sub(1);
-                } else {
-                    kept.push_back(slot);
-                }
-            }
-            g.available = kept;
-
-            let evicted = before - g.available.len();
-            if evicted > 0 {
-                self.total_evicted.fetch_add(evicted as u64, Ordering::Relaxed);
-                debug!(evicted, "ConnectionPool: maintain evicted connections");
+    /// If `had_error` is `true` the connection is marked `Unhealthy`; otherwise
+    /// it reverts to `Idle`.
+    pub fn release(&self, conn_id: u64, now_ms: u64, had_error: bool) {
+        let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = conns.iter_mut().find(|c| c.id == conn_id) {
+            conn.last_used_ms = now_ms;
+            if had_error {
+                conn.error_count += 1;
+                conn.state = ConnectionState::Unhealthy;
+            } else {
+                conn.state = ConnectionState::Idle;
             }
         }
-
-        // Close outside the lock.
-        for conn in to_close {
-            conn.close();
-        }
-
-        // Replenish min_idle.
-        {
-            let g = self.inner.lock().await;
-            let current_idle = g.available.len();
-            let needed = self.config.min_idle.saturating_sub(current_idle);
-            drop(g);
-
-            for _ in 0..needed {
-                let mut g = self.inner.lock().await;
-                if g.total >= self.config.max_size {
-                    break;
-                }
-                g.total += 1;
-                drop(g);
-
-                match (self.factory)().await {
-                    Ok(conn) => {
-                        let mut g = self.inner.lock().await;
-                        g.available.push_back(Slot::new(conn));
-                        debug!("ConnectionPool: maintain replenished idle connection");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "ConnectionPool: maintain failed to create connection");
-                        let mut g = self.inner.lock().await;
-                        g.total = g.total.saturating_sub(1);
-                    }
-                }
-            }
-        }
+        self.total_released.fetch_add(1, Ordering::Relaxed);
     }
 
-    // ------------------------------------------------------------------
-    // Stats
-    // ------------------------------------------------------------------
+    /// Remove connections that are idle-too-long, too-old, or unhealthy.
+    ///
+    /// Returns the number of connections evicted.
+    pub fn evict_stale(&self, now_ms: u64) -> usize {
+        let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        let before = conns.len();
+        conns.retain(|c| {
+            match c.state {
+                ConnectionState::Unhealthy | ConnectionState::Evicted => false,
+                ConnectionState::Idle => {
+                    let idle_age = now_ms.saturating_sub(c.last_used_ms);
+                    let lifetime = now_ms.saturating_sub(c.created_at_ms);
+                    idle_age < self.config.max_idle_ms && lifetime < self.config.max_lifetime_ms
+                }
+                ConnectionState::InUse => {
+                    let lifetime = now_ms.saturating_sub(c.created_at_ms);
+                    lifetime < self.config.max_lifetime_ms
+                }
+            }
+        });
+        let evicted = before - conns.len();
+        self.evicted_total.fetch_add(evicted as u64, Ordering::Relaxed);
+        evicted
+    }
 
-    /// Return a point-in-time statistics snapshot.
-    pub async fn stats(&self) -> PoolStats {
-        let g      = self.inner.lock().await;
-        let idle   = g.available.len();
-        let total  = g.total;
-        let in_use = self.in_use.load(Ordering::Relaxed);
+    /// Perform a health check sweep.
+    ///
+    /// Marks connections as `Unhealthy` if they have not been used within
+    /// `health_check_interval_ms` AND have `error_count > 3`.
+    ///
+    /// Returns the IDs of connections that were marked unhealthy.
+    pub fn health_check_all(&self, now_ms: u64) -> Vec<u64> {
+        let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        let mut marked = Vec::new();
+        for conn in conns.iter_mut() {
+            if conn.state == ConnectionState::Idle {
+                let idle_time = now_ms.saturating_sub(conn.last_used_ms);
+                if idle_time > self.config.health_check_interval_ms && conn.error_count > 3 {
+                    conn.state = ConnectionState::Unhealthy;
+                    marked.push(conn.id);
+                }
+            }
+        }
+        marked
+    }
+
+    /// Number of idle connections available for acquisition.
+    pub fn available_count(&self) -> usize {
+        let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        conns.iter().filter(|c| c.state == ConnectionState::Idle).count()
+    }
+
+    /// Number of connections currently in use.
+    pub fn in_use_count(&self) -> usize {
+        let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        conns.iter().filter(|c| c.state == ConnectionState::InUse).count()
+    }
+
+    /// Total connections tracked (all states).
+    pub fn total_count(&self) -> usize {
+        let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        conns.len()
+    }
+
+    /// Return a statistics snapshot.
+    pub fn stats(&self) -> PoolStats {
+        let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        let available = conns.iter().filter(|c| c.state == ConnectionState::Idle).count();
+        let in_use = conns.iter().filter(|c| c.state == ConnectionState::InUse).count();
+        let unhealthy = conns.iter().filter(|c| c.state == ConnectionState::Unhealthy).count();
         PoolStats {
-            size:           total,
-            idle,
+            total: conns.len(),
+            available,
             in_use,
-            total_acquired: self.total_acquired.load(Ordering::Relaxed),
-            total_evicted:  self.total_evicted.load(Ordering::Relaxed),
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Internal helpers
-    // ------------------------------------------------------------------
-
-    /// Remove dead (not alive) idle connections while holding the lock.
-    fn drain_dead(&self, g: &mut Inner<T>) {
-        let before = g.available.len();
-        let mut kept: VecDeque<Slot<T>> = VecDeque::new();
-        while let Some(slot) = g.available.pop_front() {
-            if slot.conn.is_alive() {
-                kept.push_back(slot);
-            } else {
-                g.total = g.total.saturating_sub(1);
-                slot.conn.close();
-            }
-        }
-        g.available = kept;
-        let evicted = before - g.available.len();
-        if evicted > 0 {
-            self.total_evicted.fetch_add(evicted as u64, Ordering::Relaxed);
+            unhealthy,
+            evicted_total: self.evicted_total.load(Ordering::Relaxed),
+            acquired_total: self.total_acquired.load(Ordering::Relaxed),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// PooledConnection RAII guard
-// ---------------------------------------------------------------------------
+// ── BackendPoolManager ────────────────────────────────────────────────────────
 
-/// RAII guard wrapping a connection borrowed from a [`ConnectionPool`].
-///
-/// On drop the connection is returned to the pool (if still alive) or
-/// discarded (if dead).
-pub struct PooledConnection<T: Connectable> {
-    conn:          Option<T>,
-    pool_inner:    Arc<Mutex<Inner<T>>>,
-    notify:        Arc<Notify>,
-    in_use:        Arc<AtomicUsize>,
-    total_evicted: Arc<AtomicU64>,
-    config:        Arc<PoolConfig>,
+/// Manages one [`ConnectionPool`] per backend.
+pub struct BackendPoolManager {
+    pools: DashMap<String, Arc<ConnectionPool>>,
 }
 
-impl<T: Connectable> PooledConnection<T> {
-    fn new(
-        conn:          T,
-        pool_inner:    Arc<Mutex<Inner<T>>>,
-        notify:        Arc<Notify>,
-        in_use:        Arc<AtomicUsize>,
-        total_evicted: Arc<AtomicU64>,
-        config:        Arc<PoolConfig>,
-    ) -> Self {
-        Self { conn: Some(conn), pool_inner, notify, in_use, total_evicted, config }
-    }
-
-    /// Access the underlying connection.
-    #[must_use]
-    pub fn inner(&self) -> &T {
-        // Safety: `conn` is always `Some` while the guard is live.
-        self.conn.as_ref().unwrap_or_else(|| unreachable!("PooledConnection: conn is None"))
-    }
-
-    /// Access the underlying connection (mutable).
-    pub fn inner_mut(&mut self) -> &mut T {
-        self.conn.as_mut().unwrap_or_else(|| unreachable!("PooledConnection: conn is None"))
-    }
-
-    /// Check if the wrapped connection reports itself as alive.
-    pub fn is_alive(&self) -> bool {
-        self.inner().is_alive()
-    }
-}
-
-impl<T: Connectable> Drop for PooledConnection<T> {
-    fn drop(&mut self) {
-        self.in_use.fetch_sub(1, Ordering::Relaxed);
-
-        if let Some(conn) = self.conn.take() {
-            if conn.is_alive() {
-                // Return to pool on a blocking thread to avoid async-in-drop.
-                let pool_inner    = Arc::clone(&self.pool_inner);
-                let notify        = Arc::clone(&self.notify);
-                let max_size      = self.config.max_size;
-                tokio::spawn(async move {
-                    let mut g = pool_inner.lock().await;
-                    if g.total <= max_size {
-                        g.available.push_back(Slot::new(conn));
-                    } else {
-                        g.total = g.total.saturating_sub(1);
-                        conn.close();
-                    }
-                    notify.notify_one();
-                });
-            } else {
-                // Dead connection: evict and notify waiters.
-                let pool_inner    = Arc::clone(&self.pool_inner);
-                let notify        = Arc::clone(&self.notify);
-                let total_evicted = Arc::clone(&self.total_evicted);
-                tokio::spawn(async move {
-                    pool_inner.lock().await.total = pool_inner.lock().await.total.saturating_sub(1);
-                    total_evicted.fetch_add(1, Ordering::Relaxed);
-                    conn.close();
-                    notify.notify_one();
-                });
-            }
+impl BackendPoolManager {
+    /// Create a new, empty manager.
+    pub fn new() -> Self {
+        Self {
+            pools: DashMap::new(),
         }
     }
+
+    /// Register a backend with the given pool configuration.
+    pub fn register_backend(&self, backend: &str, config: PoolConfig) {
+        self.pools.insert(
+            backend.to_string(),
+            Arc::new(ConnectionPool::new(backend.to_string(), config)),
+        );
+    }
+
+    /// Acquire a connection from the named backend.
+    ///
+    /// Returns `(backend, conn_id)` on success, or `None` if the backend is
+    /// unknown or the pool is at capacity.
+    pub fn acquire_from(&self, backend: &str, now_ms: u64) -> Option<(String, u64)> {
+        let pool = self.pools.get(backend)?;
+        let conn_id = pool.acquire(now_ms)?;
+        Some((backend.to_string(), conn_id))
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+impl Default for BackendPoolManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
-    // ------------------------------------------------------------------
-    // Test connection type
-    // ------------------------------------------------------------------
-
-    #[derive(Debug)]
-    struct FakeConn {
-        id:    u64,
-        alive: bool,
-    }
-
-    impl Connectable for FakeConn {
-        fn is_alive(&self) -> bool { self.alive }
-        fn close(self) {
-            debug!(id = self.id, "FakeConn: closed");
-        }
-    }
-
-    static CONN_ID: AtomicU64 = AtomicU64::new(0);
-
-    fn make_pool(min_idle: usize, max_size: usize) -> ConnectionPool<FakeConn> {
+    fn pool(max: usize) -> ConnectionPool {
         ConnectionPool::new(
+            "backend-a".into(),
             PoolConfig {
-                min_idle,
-                max_size,
-                connection_timeout_ms: 200,
-                idle_timeout_secs:     60,
-                max_lifetime_secs:     300,
-            },
-            || async {
-                Ok(FakeConn {
-                    id:    CONN_ID.fetch_add(1, Ordering::Relaxed),
-                    alive: true,
-                })
+                max_connections: max,
+                min_idle: 0,
+                max_idle_ms: 60_000,
+                max_lifetime_ms: 300_000,
+                health_check_interval_ms: 30_000,
             },
         )
     }
 
-    // ------------------------------------------------------------------
-    // Basic acquire / release
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn acquire_and_release() {
-        let pool = make_pool(0, 5);
-        let conn = pool.acquire().await.unwrap();
-        assert!(conn.is_alive());
-
-        let stats = pool.stats().await;
-        assert_eq!(stats.in_use, 1);
-
-        drop(conn);
-        // Give the spawned return task time to run.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let stats = pool.stats().await;
-        assert_eq!(stats.in_use, 0);
-        assert_eq!(stats.total_acquired, 1);
+    #[test]
+    fn acquire_creates_connection() {
+        let p = pool(5);
+        let id = p.acquire(0).unwrap();
+        assert!(id > 0);
+        assert_eq!(p.in_use_count(), 1);
+        assert_eq!(p.available_count(), 0);
     }
 
-    #[tokio::test]
-    async fn acquire_multiple_sequential() {
-        let pool = make_pool(0, 3);
-        for _ in 0..3 {
-            let conn = pool.acquire().await.unwrap();
-            drop(conn);
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    #[test]
+    fn release_marks_idle() {
+        let p = pool(5);
+        let id = p.acquire(0).unwrap();
+        p.release(id, 100, false);
+        assert_eq!(p.in_use_count(), 0);
+        assert_eq!(p.available_count(), 1);
+    }
+
+    #[test]
+    fn double_acquire_uses_two_connections() {
+        let p = pool(5);
+        let id1 = p.acquire(0).unwrap();
+        let id2 = p.acquire(0).unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(p.in_use_count(), 2);
+    }
+
+    #[test]
+    fn evict_removes_stale() {
+        let p = pool(5);
+        let id = p.acquire(0).unwrap();
+        // Release at t=0, then evict at t=999_999 (beyond max_idle_ms=60_000).
+        p.release(id, 0, false);
+        let evicted = p.evict_stale(999_999);
+        assert_eq!(evicted, 1);
+        assert_eq!(p.total_count(), 0);
+    }
+
+    #[test]
+    fn health_check_marks_unhealthy() {
+        let p = pool(5);
+        let id = p.acquire(0).unwrap();
+        // Simulate 5 errors then release as unhealthy then reset to idle for testing.
+        p.release(id, 0, false); // idle
+        // Manually bump error_count via re-acquire and error-releases.
+        {
+            let mut conns = p.connections.lock().unwrap();
+            if let Some(c) = conns.iter_mut().find(|c| c.id == id) {
+                c.error_count = 5;
+            }
         }
-        let stats = pool.stats().await;
-        assert_eq!(stats.total_acquired, 3);
-        assert_eq!(stats.in_use, 0);
+        // health check at t=60_001 (beyond health_check_interval_ms=30_000), idle since t=0.
+        let marked = p.health_check_all(60_001);
+        assert_eq!(marked, vec![id]);
+        assert_eq!(p.stats().unhealthy, 1);
     }
 
-    // ------------------------------------------------------------------
-    // Max size enforcement
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn max_size_enforced_with_timeout() {
-        let pool = make_pool(0, 2);
-
-        // Check out both available slots.
-        let _c1 = pool.acquire().await.unwrap();
-        let _c2 = pool.acquire().await.unwrap();
-
-        // Third acquire should timeout.
-        let result = pool.acquire().await;
-        assert!(
-            matches!(result, Err(PoolError::Timeout)),
-            "expected Timeout"
-        );
+    #[test]
+    fn pool_at_capacity_returns_none() {
+        let p = pool(2);
+        let _id1 = p.acquire(0).unwrap();
+        let _id2 = p.acquire(0).unwrap();
+        assert!(p.acquire(0).is_none());
     }
 
-    // ------------------------------------------------------------------
-    // Idle reuse
-    // ------------------------------------------------------------------
+    #[test]
+    fn backend_pool_manager_acquire_from() {
+        let mgr = BackendPoolManager::new();
+        mgr.register_backend("svc-a", PoolConfig::default());
+        let result = mgr.acquire_from("svc-a", 0);
+        assert!(result.is_some());
+        let (backend, _id) = result.unwrap();
+        assert_eq!(backend, "svc-a");
 
-    #[tokio::test]
-    async fn idle_connection_reused() {
-        let pool = make_pool(0, 2);
-
-        let c1 = pool.acquire().await.unwrap();
-        drop(c1);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        // Second acquire should reuse the idle connection.
-        let _c2 = pool.acquire().await.unwrap();
-        let stats = pool.stats().await;
-        // Only one connection was ever created.
-        assert!(stats.size <= 2);
-    }
-
-    // ------------------------------------------------------------------
-    // Idle eviction
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn maintain_evicts_idle_expired() {
-        let pool = ConnectionPool::new(
-            PoolConfig {
-                min_idle:              0,
-                max_size:              5,
-                connection_timeout_ms: 500,
-                idle_timeout_secs:     0, // expire immediately
-                max_lifetime_secs:     300,
-            },
-            || async { Ok(FakeConn { id: 0, alive: true }) },
-        );
-
-        // Acquire and release to put a connection in the idle queue.
-        let conn = pool.acquire().await.unwrap();
-        drop(conn);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        pool.maintain().await;
-
-        let stats = pool.stats().await;
-        assert_eq!(stats.idle, 0, "idle connection should have been evicted");
-        assert!(stats.total_evicted > 0);
-    }
-
-    // ------------------------------------------------------------------
-    // Dead connection eviction on acquire
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn dead_connection_evicted_on_acquire() {
-        // Pool that produces a dead connection on first call, alive on second.
-        let call_count = Arc::new(AtomicU64::new(0));
-        let cc = Arc::clone(&call_count);
-
-        let pool: ConnectionPool<FakeConn> = ConnectionPool::new(
-            PoolConfig {
-                min_idle:              0,
-                max_size:              5,
-                connection_timeout_ms: 500,
-                idle_timeout_secs:     60,
-                max_lifetime_secs:     300,
-            },
-            move || {
-                let n = cc.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    Ok(FakeConn { id: n, alive: n != 0 })
-                }
-            },
-        );
-
-        // First acquire: creates alive-false conn, gets evicted, then creates alive-true.
-        // Actually we need to manually put the dead one in the idle queue.
-        // We'll insert a dead slot directly by acquiring a pool that returns dead.
-        let dead_pool: ConnectionPool<FakeConn> = ConnectionPool::new(
-            PoolConfig {
-                min_idle:              0,
-                max_size:              5,
-                connection_timeout_ms: 500,
-                idle_timeout_secs:     60,
-                max_lifetime_secs:     300,
-            },
-            || async { Ok(FakeConn { id: 99, alive: false }) },
-        );
-
-        // This will acquire the dead conn (just created) and immediately return Err
-        // on subsequent acquires since the dead one gets evicted each time.
-        // The factory always returns dead, so eventually Timeout.
-        // Just verify stats show evictions.
-        let c = dead_pool.acquire().await.unwrap();
-        drop(c);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        // The dead conn was returned to idle; next acquire evicts it and tries to create.
-        // Factory still returns dead; pool keeps evicting and creating until timeout.
-        let _ = dead_pool.acquire().await; // may timeout
-
-        let stats = dead_pool.stats().await;
-        // Some evictions should have happened.
-        assert!(
-            stats.total_evicted > 0 || stats.total_acquired >= 1,
-            "expected evictions or at least one acquisition"
-        );
-
-        // Suppress unused variable warning.
-        let _ = pool;
-    }
-
-    // ------------------------------------------------------------------
-    // Stats
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn stats_track_in_use() {
-        let pool = make_pool(0, 5);
-        let c1 = pool.acquire().await.unwrap();
-        let c2 = pool.acquire().await.unwrap();
-
-        let stats = pool.stats().await;
-        assert_eq!(stats.in_use, 2);
-        assert_eq!(stats.total_acquired, 2);
-
-        drop(c1);
-        drop(c2);
-    }
-
-    // ------------------------------------------------------------------
-    // Maintain replenishes min_idle
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn maintain_replenishes_min_idle() {
-        let pool = make_pool(2, 5);
-        pool.maintain().await;
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let stats = pool.stats().await;
-        assert!(
-            stats.idle >= 2,
-            "maintain should have replenished 2 idle connections, got {}",
-            stats.idle
-        );
+        // Unknown backend returns None.
+        assert!(mgr.acquire_from("svc-z", 0).is_none());
     }
 }

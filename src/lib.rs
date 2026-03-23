@@ -203,3 +203,6 @@ pub mod traffic_mirror;
 
 /// Hybrid token bucket + sliding window rate limiter: per-client registry, refill, eviction, dual-gate enforcement.
 pub mod rate_limiter_v2;
+
+/// Priority queue for requests with preemption and fairness: Strict, WeightedFair, RoundRobin policies.
+pub mod request_prioritizer;
