@@ -218,3 +218,9 @@ pub mod load_balancer;
 
 /// HTTP response caching with ETag support, TTL expiry, and path-prefix/tag invalidation.
 pub mod response_cache;
+
+/// Middleware pipeline for request/response transformation: header manipulation, path rewriting, body encoding.
+pub mod request_transformer;
+
+/// Service mesh with discovery, mTLS handshake simulation, policy enforcement, and topology inspection.
+pub mod service_mesh;
