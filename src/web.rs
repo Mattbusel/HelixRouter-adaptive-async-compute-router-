@@ -14,7 +14,7 @@
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     http::{header, HeaderValue, StatusCode},
     response::sse::Event,
     response::{Html, IntoResponse, Response, Sse},
@@ -22,17 +22,21 @@ use axum::{
     Json, Router as AxumRouter,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::config::{RouterConfig, RouterConfigPatch};
 use crate::downstream_pressure::{DownstreamPressureMonitor, DownstreamTelemetry};
+use crate::explainer::StrategyExplainer;
 use crate::metrics::{prometheus_text_with_neural, NeuralMetrics};
 use crate::router::{KindRoutingStats, Router, SLAViolationCounts};
 use crate::types::Strategy;
 
 type AppState = Arc<Router>;
 type DownstreamState = Arc<DownstreamPressureMonitor>;
+/// Shared explainer state threaded through Axum extensions.
+pub type ExplainerState = Arc<Mutex<StrategyExplainer>>;
 
 /// Start the Axum HTTP server and bind it to `addr`.
 ///
@@ -67,6 +71,20 @@ pub async fn serve_with_downstream(
     addr: SocketAddr,
     downstream: DownstreamState,
 ) -> std::io::Result<()> {
+    let explainer: ExplainerState = Arc::new(Mutex::new(StrategyExplainer::default()));
+    serve_with_all(router, addr, downstream, explainer).await
+}
+
+/// Full constructor: accepts a pre-constructed [`StrategyExplainer`] in addition to
+/// a [`DownstreamPressureMonitor`]. Use this variant when you want to share the
+/// explainer instance with other parts of the application (e.g., to record decisions
+/// from the router loop before serving them at `/explain/latest`).
+pub async fn serve_with_all(
+    router: Router,
+    addr: SocketAddr,
+    downstream: DownstreamState,
+    explainer: ExplainerState,
+) -> std::io::Result<()> {
     let shared: AppState = Arc::new(router);
 
     let app = AxumRouter::new()
@@ -84,8 +102,11 @@ pub async fn serve_with_downstream(
         .route("/api/stream/decisions", get(sse_decisions))
         .route("/api/neural", get(get_neural))
         .route("/api/dag", get(get_dag_graph))
+        .route("/api/autoscaler/forecast", get(get_autoscaler_forecast))
+        .route("/explain/latest", get(get_explain_latest))
         .with_state(shared)
-        .layer(axum::Extension(downstream));
+        .layer(axum::Extension(downstream))
+        .layer(axum::Extension(explainer));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -661,6 +682,59 @@ async fn get_downstream_pressure(
 /// router is weighting each (strategy, feature) pair.
 async fn get_neural(State(router): State<AppState>) -> impl IntoResponse {
     Json(router.neural_snapshot().await)
+}
+
+// ===== Strategy Explainer =====
+
+/// Query parameters for `GET /explain/latest`.
+#[derive(Debug, Deserialize)]
+struct ExplainQuery {
+    /// Maximum number of reasons to return. Defaults to 20. Capped at 200.
+    n: Option<usize>,
+}
+
+/// `GET /explain/latest[?n=<count>]` — fetch the last N routing decision reasons.
+///
+/// Returns a JSON array of [`crate::explainer::DecisionReason`] objects, most recent last.
+/// Each object contains the chosen strategy, pressure metrics at decision time, and a
+/// human-readable `explanation_text` sentence describing *why* that strategy was chosen.
+///
+/// This endpoint powers the "Decision Reasoning" panel in the dashboard.
+///
+/// ## Query Parameters
+///
+/// | Name | Type | Default | Description |
+/// |------|------|---------|-------------|
+/// | `n`  | usize | 20 | Number of most-recent reasons to return (capped at 200). |
+///
+/// ## Example
+///
+/// ```http
+/// GET /explain/latest?n=5
+/// ```
+///
+/// ```json
+/// [
+///   {
+///     "job_id": 1042,
+///     "chosen_strategy": "batch",
+///     "pressure_score": 0.72,
+///     "latency_ema_ms": 12.5,
+///     "queue_depth": 80,
+///     "compute_cost": 8000,
+///     "scaling_potential": 0.85,
+///     "timestamp_ms": 1711234567890,
+///     "explanation_text": "Chose Batch because scaling_potential=0.85 is high, ..."
+///   }
+/// ]
+/// ```
+async fn get_explain_latest(
+    Extension(explainer): Extension<ExplainerState>,
+    Query(params): Query<ExplainQuery>,
+) -> impl IntoResponse {
+    let n = params.n.unwrap_or(20).min(200);
+    let guard = explainer.lock().await;
+    Json(guard.latest(n))
 }
 
 // ===== DAG Visualization =====

@@ -50,6 +50,8 @@
 //! }
 //! ```
 
+/// Job affinity routing: stateful sticky-strategy routing via FNV-1a consistent hashing.
+pub mod affinity;
 pub mod adaptive_circuit_breaker;
 pub mod admission;
 pub mod autoscaler;
@@ -61,8 +63,12 @@ pub mod cost_router;
 pub mod dag;
 pub mod deadline;
 pub mod downstream_pressure;
+/// Human-readable explanations for routing decisions; ring-buffer of `DecisionReason` records.
+pub mod explainer;
 pub mod metrics;
 pub mod neural_router;
+/// Holt-Winters exponential triple smoothing predictive autoscaler.
+pub mod predictive_autoscaler;
 pub mod predictor;
 pub mod priority_balancer;
 pub mod priority_monitor;
