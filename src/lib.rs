@@ -23,6 +23,9 @@
 //! | [`cost_model`] | Per-job-kind execution cost model with EMA sliding window |
 //! | [`downstream_pressure`] | Predictive backpressure aggregation from downstream service telemetry |
 //! | [`distributed_router`] | NATS-based distributed coordination (feature-gated: `distributed`) |
+//! | [`admission`] | Pre-router admission gate: load ceiling, priority fast-lane, per-caller token bucket |
+//! | [`streaming`] | Streaming partial-result channels per job (broadcast fan-out) |
+//! | [`canary`] | Canary deployment: N% traffic split, auto-promote/rollback on quality metrics |
 //!
 //! ## Quick start
 //!
@@ -45,7 +48,9 @@
 //! }
 //! ```
 
+pub mod admission;
 pub mod autoscaler;
+pub mod canary;
 pub mod config;
 pub mod cost_model;
 pub mod cost_router;
@@ -59,6 +64,7 @@ pub mod router;
 #[cfg(feature = "simulation")]
 pub mod simulator;
 pub mod strategies;
+pub mod streaming;
 pub mod types;
 pub mod web;
 /// Distributed NATS coordination layer — only available with the `distributed` feature.

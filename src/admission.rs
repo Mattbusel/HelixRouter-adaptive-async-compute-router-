@@ -364,7 +364,7 @@ impl AdmissionGate {
     ///
     /// Returns a value in `[0.0, 1.0]`.
     pub async fn current_load(&self) -> f64 {
-        self.router.pressure_score()
+        self.router.stats_snapshot().await.pressure_score
     }
 
     /// Admission statistics: `(admitted, rejected_overload, rejected_throttle)`.
