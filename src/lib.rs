@@ -167,3 +167,9 @@ pub mod cache_warmer;
 
 /// Service dependency graph with failure propagation, critical path, impact radius, and recovery ordering.
 pub mod dependency_graph;
+
+/// Request classifier: type, size, urgency, and priority scoring for routing decisions.
+pub mod request_classifier;
+
+/// Sliding-window rate counter: bucketed approximation with per-key distributed aggregation.
+pub mod sliding_window_counter;
