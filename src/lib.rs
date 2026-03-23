@@ -182,3 +182,9 @@ pub mod protocol_adapter;
 
 /// Circuit breaker registry: manage multiple circuit breakers across services with bulk trip/reset operations.
 pub mod circuit_breaker_registry;
+
+/// Request/response compression: run-length encoding, dictionary compression, LZ77, and auto-selection by entropy.
+pub mod compression;
+
+/// Deterministic load testing framework: traffic profiles, LCG simulation, percentile analysis.
+pub mod load_tester;
