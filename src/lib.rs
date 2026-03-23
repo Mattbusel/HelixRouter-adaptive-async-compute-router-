@@ -110,3 +110,9 @@ pub mod timeout_mgr;
 
 /// Job retry with exponential backoff and optional jitter.
 pub mod retry;
+
+/// Weighted Fair Queuing with Deficit Round-Robin scheduling across job classes.
+pub mod wfq;
+
+/// Comprehensive router health checks with Healthy/Degraded/Unhealthy status.
+pub mod health;

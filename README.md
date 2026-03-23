@@ -67,6 +67,73 @@ Strategy selection is a pure function that takes less than 100 ns. The `NeuralRo
 
 ---
 
+## Weighted Fair Queuing
+
+The `wfq` module implements multi-class Deficit Round-Robin (DRR) scheduling.
+Each job class has a `weight` (share of bandwidth).  On each round, a class's
+deficit grows by `quantum * weight`; jobs are dequeued while `deficit >=
+job.compute_cost`.  Empty-class deficits are reset to zero to prevent credit
+accumulation.
+
+```rust,no_run
+use helixrouter::wfq::{WfqConfig, WfqClass, WfqScheduler};
+use helixrouter::types::{Job, JobKind};
+
+let config = WfqConfig {
+    classes: vec![
+        WfqClass { name: "hash_mix".to_string(), weight: 3 },
+        WfqClass { name: "prime_count".to_string(), weight: 2 },
+        WfqClass { name: "monte_carlo_risk".to_string(), weight: 1 },
+    ],
+    quantum: 1_000,
+};
+let mut sched = WfqScheduler::new(config);
+
+sched.enqueue(Job { id: 1, kind: JobKind::HashMix, compute_cost: 1_000, ..Default::default() });
+sched.enqueue(Job { id: 2, kind: JobKind::PrimeCount, compute_cost: 1_000, ..Default::default() });
+
+let batch = sched.drain_round(); // returns jobs proportional to weights
+let stats = sched.stats();
+println!("total dequeued: {}", stats.total_dequeued);
+```
+
+---
+
+## Health Dashboard
+
+The `health` module provides composable health checks with `Healthy`,
+`Degraded`, and `Unhealthy` statuses.  Register checks in a
+[`HealthDashboard`](health::HealthDashboard) and expose them as HTTP endpoints
+using [`health_routes`](health::health_routes).
+
+| Endpoint | Status codes | Body |
+|---|---|---|
+| `GET /health` | 200 / 207 / 503 | `{ "status": "..." }` JSON summary |
+| `GET /health/detail` | 200 / 207 / 503 | Full `DashboardReport` JSON |
+
+```rust,no_run
+use std::sync::Arc;
+use helixrouter::health::{
+    HealthDashboard, QueueDepthCheck, ErrorRateCheck, LatencyCheck, DeadlineCheck,
+    health_routes,
+};
+
+let mut dashboard = HealthDashboard::new();
+dashboard.register(QueueDepthCheck::fixed(100, 500, 0));
+dashboard.register(ErrorRateCheck::fixed(5.0, 20.0, 0.0));
+dashboard.register(LatencyCheck::fixed(200, 1_000, 10));
+dashboard.register(DeadlineCheck::fixed(0.1, 0.5, 0.0));
+
+let report = dashboard.run_all();
+println!("overall: {:?}", report.overall);
+
+// Attach to Axum:
+let shared = Arc::new(tokio::sync::RwLock::new(dashboard));
+let app = health_routes(shared);
+```
+
+---
+
 ## 5-Minute Quickstart
 
 ### Prerequisites
