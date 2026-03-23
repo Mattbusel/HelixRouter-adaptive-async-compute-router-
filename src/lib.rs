@@ -134,3 +134,9 @@ pub mod service_registry;
 
 /// Bulkhead pattern for resource isolation between request categories.
 pub mod bulkhead;
+
+/// Composable async middleware chain: request/response interception, auth, logging, timeout, compression.
+pub mod middleware;
+
+/// Dynamic configuration with hot-reload, schema validation, and atomic swap.
+pub mod dynamic_config;

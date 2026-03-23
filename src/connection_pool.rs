@@ -608,7 +608,7 @@ mod tests {
         let result = pool.acquire().await;
         assert!(
             matches!(result, Err(PoolError::Timeout)),
-            "expected Timeout, got {result:?}"
+            "expected Timeout"
         );
     }
 
