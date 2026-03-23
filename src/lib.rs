@@ -242,3 +242,9 @@ pub mod content_negotiation;
 
 /// Periodic health checks with circuit integration: HTTP/TCP/custom checks, thresholds, and HealthSummary.
 pub mod health_check_runner;
+
+/// TLS certificate management simulation: lifecycle tracking, SNI selection, wildcard matching, and expiry alerting.
+pub mod tls_terminator;
+
+/// Per-route circuit breakers with mesh-level cascade coordination and dependency-graph propagation.
+pub mod circuit_mesh;
