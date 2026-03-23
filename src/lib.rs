@@ -191,3 +191,9 @@ pub mod load_tester;
 
 /// In-flight request deduplication/coalescing via broadcast channels.
 pub mod request_coalescer;
+
+/// Weighted health aggregation across multiple endpoints with classified status and staleness detection.
+pub mod health_aggregator;
+
+/// Configurable retry policies with fixed/linear/exponential backoff, LCG jitter, and sync executor.
+pub mod retry_policy;
