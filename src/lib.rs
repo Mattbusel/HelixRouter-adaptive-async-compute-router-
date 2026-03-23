@@ -146,3 +146,12 @@ pub mod failover;
 
 /// Request coalescing: deduplicate identical in-flight requests via FNV-1a keying and oneshot fan-out.
 pub mod request_coalescing;
+
+/// Geographic-aware routing: Haversine distance, latency estimation, load-threshold filtering.
+pub mod geo_routing;
+
+/// Adaptive timeout management: ring-buffer latency windows, P50/P75/P95/P99, safety-factor scaling.
+pub mod adaptive_timeout;
+
+/// HMAC-SHA256 request signing: pure-Rust SHA-256, replay protection, key rotation via KeyStore.
+pub mod request_signing;
