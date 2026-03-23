@@ -79,7 +79,7 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::router::Router;
-use crate::types::{Job, Output};
+use crate::types::Job;
 
 // ---------------------------------------------------------------------------
 // Public types

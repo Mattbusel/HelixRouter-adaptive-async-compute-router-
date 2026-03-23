@@ -276,32 +276,7 @@ impl JobDag {
     /// Returns `None` if the graph contains a cycle (should not happen after
     /// `add_edge` validation, but included for defensive correctness).
     fn topological_order(&self) -> Option<Vec<NodeId>> {
-        // in-degree: count how many predecessors each node has.
-        let mut in_degree: HashMap<NodeId, usize> = self.nodes.keys().map(|&id| (id, 0)).collect();
-
-        for node in self.nodes.values() {
-            for &dep in &node.depends_on {
-                *in_degree.entry(dep).or_insert(0); // ensure dep is present
-            }
-        }
-
-        // Count actual in-degrees (number of nodes that depend ON this node).
-        for node in self.nodes.values() {
-            // Each entry in depends_on means `node` depends on dep,
-            // i.e., dep has an outgoing edge to node.
-            // We want in-degree of `node` = len(depends_on).
-            *in_degree.get_mut(
-                &self
-                    .nodes
-                    .keys()
-                    .find(|&&k| std::ptr::eq(&self.nodes[&k] as *const _, node as *const _))
-                    .copied()
-                    .unwrap_or(NodeId(usize::MAX)),
-            )
-            .unwrap_or(&mut 0) = node.depends_on.len();
-        }
-
-        // Re-build in_degree correctly: in_degree[n] = number of deps n has.
+        // in-degree[n] = number of nodes that n depends on (i.e. must wait for).
         let mut in_degree: HashMap<NodeId, usize> = self
             .nodes
             .iter()

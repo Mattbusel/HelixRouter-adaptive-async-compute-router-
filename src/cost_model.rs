@@ -164,19 +164,26 @@ impl JobCostModel {
             strategy: sample.strategy,
         };
         // `entry().or_insert_with()` atomically inserts the default if absent.
-        // The RefMut returned by or_insert_with holds a shard lock; we must
-        // drop it before locking the inner Mutex to avoid holding two locks.
-        let arc = {
-            let entry = self
+        // The RefMut holds a DashMap shard lock. We use a scoped block to ensure
+        // the RefMut (and thus the shard lock) is fully dropped before we
+        // acquire the inner std::sync::Mutex, preventing lock-ordering deadlocks.
+        //
+        // `Arc::clone(&*ref_mut)` clones the pointer without a lifetime dependency
+        // on the shard, so the resulting `arc` is independent of `self.stats`.
+        let arc: Arc<Mutex<KindStats>> = {
+            let ref_mut = self
                 .stats
                 .entry(key)
                 .or_insert_with(|| Arc::new(Mutex::new(KindStats::new())));
-            entry.value().clone()
-            // `entry` (RefMut + shard lock) is dropped here before arc.lock()
-        };
+            Arc::clone(&*ref_mut)
+        }; // ref_mut (shard lock) dropped here.
 
         // The lock is a `std::sync::Mutex`, never held across `.await`.
-        match arc.lock() {
+        // We bind the lock result and guard to local variables so that the
+        // guard is explicitly dropped (at the closing `}`) before `arc` is
+        // dropped, satisfying the borrow checker's drop order requirements.
+        let push_result = arc.lock();
+        match push_result {
             Ok(mut s) => s.push(sample.duration_ns, sample.success),
             Err(poisoned) => {
                 // Recover from a poisoned mutex (should never happen, but handle safely).
@@ -200,10 +207,13 @@ impl JobCostModel {
             Some(entry) => {
                 let arc = entry.value().clone();
                 drop(entry);
-                match arc.lock() {
+                // Bind the match result to a local before the block ends so
+                // the MutexGuard temporary is dropped before `arc`.
+                let result = match arc.lock() {
                     Ok(s) => s.ema_ns(),
                     Err(poisoned) => poisoned.into_inner().ema_ns(),
-                }
+                };
+                result
             }
         }
     }

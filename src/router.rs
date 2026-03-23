@@ -856,7 +856,7 @@ impl Router {
                 self.inner.dropped.fetch_add(1, Ordering::Relaxed);
                 self.bump_route(Strategy::Drop).await;
                 // Broadcast a deadline-exceeded decision event.
-                let ts_ms = now_ms;
+                let _ts_ms = now_ms;
                 let decision = RoutingDecision {
                     job_id: job.id,
                     strategy: Strategy::Drop,

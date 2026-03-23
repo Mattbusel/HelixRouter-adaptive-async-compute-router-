@@ -166,18 +166,24 @@ impl DownstreamPressureMonitor {
         }
 
         let key = telemetry.service_name.clone();
-        // The RefMut returned by or_insert_with holds a DashMap shard lock;
-        // drop it before locking the inner Mutex to prevent lock ordering issues.
-        let arc = {
-            let entry = self
+        // The RefMut returned by or_insert_with holds a DashMap shard lock.
+        // Use a scoped block to ensure the RefMut is fully dropped before we
+        // acquire the inner std::sync::Mutex, preventing lock-ordering issues.
+        //
+        // `Arc::clone(&*ref_mut)` clones the pointer without a lifetime
+        // dependency on the shard, producing a fully independent Arc.
+        let arc: Arc<Mutex<ServiceState>> = {
+            let ref_mut = self
                 .services
                 .entry(key)
                 .or_insert_with(|| Arc::new(Mutex::new(ServiceState::new(&telemetry))));
-            entry.value().clone()
-            // `entry` (RefMut + shard lock) is dropped here before arc.lock()
-        };
+            Arc::clone(&*ref_mut)
+        }; // ref_mut (shard lock) dropped here.
 
-        match arc.lock() {
+        // Bind the lock result to a local so the MutexGuard is explicitly
+        // dropped before `arc` is dropped at function end.
+        let lock_result = arc.lock();
+        match lock_result {
             Ok(mut state) => state.update(&telemetry),
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();

@@ -206,7 +206,7 @@ impl AdaptiveCircuitBreaker {
         // Increment failure counter if Closed. We extract the count first
         // so we can release the mutable borrow on self.state before calling
         // self.adaptive_threshold() (which needs a shared borrow of self).
-        let closed_count: Option<u64> = if let BreakerState::Closed { failure_count } = &mut self.state {
+        let closed_count: Option<u32> = if let BreakerState::Closed { failure_count } = &mut self.state {
             *failure_count += 1;
             Some(*failure_count)
         } else {
@@ -215,7 +215,7 @@ impl AdaptiveCircuitBreaker {
 
         if let Some(current) = closed_count {
             // Now self.state is not mutably borrowed — safe to call &self methods.
-            let threshold = self.adaptive_threshold();
+            let threshold: u32 = self.adaptive_threshold();
             if current >= threshold {
                 let timeout = self.adaptive_timeout();
                 self.state = BreakerState::Open {
