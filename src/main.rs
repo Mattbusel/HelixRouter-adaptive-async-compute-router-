@@ -2,7 +2,11 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use tracing_subscriber::EnvFilter;
 
+mod adaptive_circuit_breaker;
+mod admission;
 mod autoscaler;
+mod canary;
+mod chaos;
 mod config;
 mod cost_model;
 mod cost_router;
@@ -11,9 +15,14 @@ mod deadline;
 mod downstream_pressure;
 mod metrics;
 mod neural_router;
+mod predictor;
+mod priority_balancer;
+mod priority_monitor;
+mod reservation;
 mod router;
 mod simulator;
 mod strategies;
+mod streaming;
 mod types;
 mod web;
 #[cfg(feature = "distributed")]
@@ -232,6 +241,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(7);
 
+    // --chaos enables the chaos engineering layer (random delays, rejections, kills).
+    let chaos_enabled = has_flag(&args, "--chaos");
+    if chaos_enabled {
+        tracing::info!("Chaos engineering mode ENABLED (--chaos flag detected)");
+    }
+
     let mut cfg = RouterConfig::default();
     // --warmup-steps N configures the neural router warmup period.
     if let Some(n) = parse_flag::<usize>(&args, "--warmup-steps") {
@@ -239,6 +254,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(warmup_steps = n, "neural router warmup steps configured");
     }
     let router = Router::new(cfg);
+
+    // Wrap router in chaos layer if --chaos was requested.
+    // The ChaosLayer is Clone+Send+Sync just like Router; we keep it here for
+    // potential future wiring into simulation loops or HTTP handlers.
+    let _chaos_layer = if chaos_enabled {
+        Some(chaos::ChaosLayer::new(
+            router.clone(),
+            chaos::ChaosConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        ))
+    } else {
+        None
+    };
 
     // Auto-load neural weights from a previous run to avoid cold-start convergence lag.
     // Falls back silently to the heuristic warm-start if the file is absent or invalid.

@@ -54,6 +54,7 @@ pub mod adaptive_circuit_breaker;
 pub mod admission;
 pub mod autoscaler;
 pub mod canary;
+pub mod chaos;
 pub mod config;
 pub mod cost_model;
 pub mod cost_router;
@@ -62,7 +63,10 @@ pub mod deadline;
 pub mod downstream_pressure;
 pub mod metrics;
 pub mod neural_router;
+pub mod predictor;
 pub mod priority_balancer;
+pub mod priority_monitor;
+pub mod reservation;
 pub mod router;
 /// Simulator module is only available when the `simulation` feature is enabled.
 #[cfg(feature = "simulation")]

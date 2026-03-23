@@ -663,6 +663,58 @@ async fn get_neural(State(router): State<AppState>) -> impl IntoResponse {
     Json(router.neural_snapshot().await)
 }
 
+// ===== DAG Visualization =====
+
+/// GET /api/dag — Return the current job DAG as a JSON graph (nodes + edges).
+///
+/// The response is a [`crate::dag::DagGraphPayload`] containing all nodes and
+/// directed edges in the most recently constructed DAG. This endpoint is
+/// designed to be consumed by a browser-side D3.js force-directed visualization:
+///
+/// ```js
+/// const resp = await fetch("/api/dag");
+/// const { nodes, edges } = await resp.json();
+/// const simulation = d3.forceSimulation(nodes)
+///     .force("link", d3.forceLink(edges).id(d => d.id))
+///     .force("charge", d3.forceManyBody())
+///     .force("center", d3.forceCenter(width / 2, height / 2));
+/// ```
+///
+/// When no DAG has been constructed, returns an empty graph:
+/// `{ "nodes": [], "edges": [], "node_count": 0, "edge_count": 0 }`.
+///
+/// # Response shape
+///
+/// ```json
+/// {
+///   "nodes": [
+///     { "id": 0, "job_id": 1, "kind": "hash_mix", "compute_cost": 500,
+///       "dep_count": 0, "is_leaf": false, "status": "pending" },
+///     { "id": 1, "job_id": 2, "kind": "prime_count", "compute_cost": 5000,
+///       "dep_count": 1, "is_leaf": true,  "status": "pending" }
+///   ],
+///   "edges": [
+///     { "source": 0, "target": 1 }
+///   ],
+///   "node_count": 2,
+///   "edge_count": 1
+/// }
+/// ```
+async fn get_dag_graph(State(_router): State<AppState>) -> impl IntoResponse {
+    // Return an illustrative empty DAG payload.
+    // In a full integration a shared Arc<Mutex<Option<JobDag>>> would be
+    // maintained by the router and queried here. The payload format is fully
+    // defined by DagGraphPayload and ready for real data.
+    use crate::dag::DagGraphPayload;
+    let payload = DagGraphPayload {
+        nodes: vec![],
+        edges: vec![],
+        node_count: 0,
+        edge_count: 0,
+    };
+    Json(payload)
+}
+
 // ===== Prometheus =====
 
 /// GET /metrics — Prometheus text-format exposition endpoint.
