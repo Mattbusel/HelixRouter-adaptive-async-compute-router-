@@ -128,6 +128,7 @@ pub async fn serve_with_all_traced(
         .route("/api/sla/stats", get(get_sla_stats))
         .route("/api/result-cache/stats", get(get_result_cache_stats))
         .route("/api/flow/stats", get(get_flow_stats))
+        .route("/api/timeouts/stats", get(get_timeout_stats))
         .with_state(shared)
         .layer(axum::Extension(downstream))
         .layer(axum::Extension(explainer))
@@ -1170,6 +1171,21 @@ async fn get_flow_stats(State(router): State<AppState>) -> impl IntoResponse {
         rejected: stats.rejected,
         current_tokens: stats.current_tokens,
     })
+}
+
+/// `GET /api/timeouts/stats` — return adaptive timeout manager statistics as JSON.
+///
+/// Returns a map from job-kind to per-kind statistics:
+/// - `p50_ms` — median observed latency (ms).
+/// - `p95_ms` — 95th-percentile observed latency (ms); used as the default timeout.
+/// - `p99_ms` — 99th-percentile observed latency (ms).
+/// - `timeout_count` — number of times `mark_timeout` was called for this kind.
+/// - `sample_count` — number of latency samples in the current sliding window.
+///
+/// Returns an empty object `{}` until at least one job completes and feeds its
+/// latency into the timeout manager.
+async fn get_timeout_stats(State(router): State<AppState>) -> impl IntoResponse {
+    Json(router.timeout_stats().await)
 }
 
 #[cfg(test)]

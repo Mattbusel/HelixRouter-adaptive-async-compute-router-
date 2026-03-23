@@ -36,6 +36,8 @@ mod dedup;
 mod sla_queue;
 mod flow_control;
 mod result_cache;
+mod timeout_mgr;
+mod retry;
 
 use config::{watch_config_with_callback, RouterConfig};
 use router::Router;

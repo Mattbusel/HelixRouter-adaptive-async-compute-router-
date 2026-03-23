@@ -1448,3 +1448,181 @@ let mut cache = ResultCache::new(CacheConfig {
   "hit_rate": 0.6
 }
 ```
+
+---
+
+## Adaptive Timeouts
+
+The `timeout_mgr` module learns optimal timeouts per job kind from real execution
+data. Rather than configuring static timeouts per route, HelixRouter observes
+actual job latencies and derives a p95-based timeout that adapts automatically as
+workload characteristics change.
+
+### Architecture
+
+```
+  Job completes (Inline/Spawn/CpuPool)
+           │
+           ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │              TimeoutManager                             │
+  │                                                         │
+  │  per-kind VecDeque<u64>  (cap 100, sliding window)      │
+  │                                                         │
+  │  observe(LatencyObservation)                            │
+  │    └── push latency_ms, evict oldest if len > 100      │
+  │                                                         │
+  │  suggest_timeout(kind) -> Duration                      │
+  │    └── p95 of window × backoff_factor                   │
+  │    └── fallback: 5s when no data                        │
+  │                                                         │
+  │  mark_timeout(kind)                                     │
+  │    └── backoff_factor *= 1.20  (20% increase)           │
+  │                                                         │
+  │  stats() -> HashMap<kind, TimeoutStats>                 │
+  │    └── p50 / p95 / p99 / timeout_count / sample_count  │
+  └─────────────────────────────────────────────────────────┘
+           │
+           ▼
+  GET /api/timeouts/stats   (JSON)
+```
+
+### Usage
+
+```rust,no_run
+use helixrouter::timeout_mgr::{TimeoutManager, LatencyObservation};
+
+let mut mgr = TimeoutManager::new();
+
+// Feed observations as jobs complete.
+for ms in [10u64, 15, 12, 100, 11] {
+    mgr.observe(LatencyObservation {
+        kind: "hash_mix".to_string(),
+        latency_ms: ms,
+        succeeded: true,
+    });
+}
+
+// p95-derived timeout suggestion.
+let t = mgr.suggest_timeout("hash_mix");
+println!("Suggested timeout: {:?}", t);
+
+// After a real timeout event, increase the suggestion by 20%.
+mgr.mark_timeout("hash_mix");
+
+// Inspect per-kind stats.
+let s = mgr.stats();
+println!("{:#?}", s.get("hash_mix"));
+```
+
+### HTTP Endpoint
+
+`GET /api/timeouts/stats` — returns a JSON map of job-kind to per-kind statistics.
+
+```json
+{
+  "HashMix": {
+    "kind": "HashMix",
+    "p50_ms": 12,
+    "p95_ms": 15,
+    "p99_ms": 100,
+    "timeout_count": 0,
+    "sample_count": 5
+  }
+}
+```
+
+---
+
+## Retry with Backoff
+
+The `retry` module wraps job execution with configurable retry logic, exponential
+backoff, and optional jitter. Uses a simple LCG PRNG for deterministic behaviour
+in tests — no additional dependencies required.
+
+### Architecture
+
+```
+  Job fails
+     │
+     ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │              RetryManager                                │
+  │                                                          │
+  │  RetryPolicy                                             │
+  │    max_attempts:       3                                 │
+  │    initial_backoff:    100ms                             │
+  │    max_backoff:        30s                               │
+  │    backoff_multiplier: 2.0                               │
+  │    jitter:             true                              │
+  │                                                          │
+  │  RetryState                                              │
+  │    attempts:    current attempt count                    │
+  │    next_backoff: computed via exponential formula        │
+  │    last_error:  error string from last failure           │
+  │                                                          │
+  │  Backoff formula:                                        │
+  │    backoff = min(initial × multiplier^attempt, max)     │
+  │    if jitter: backoff × LCG-uniform(0.5, 1.5)           │
+  │                                                          │
+  │  On success → RetryStats accumulated                     │
+  │  On exhaustion → RetryError::MaxAttemptsExceeded         │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+```rust,no_run
+use helixrouter::retry::{RetryManager, RetryPolicy, RetryError};
+use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+# tokio_test::block_on(async {
+let policy = RetryPolicy {
+    max_attempts: 4,
+    initial_backoff: Duration::from_millis(50),
+    max_backoff: Duration::from_secs(5),
+    backoff_multiplier: 2.0,
+    jitter: true,
+};
+
+let calls = Arc::new(AtomicU32::new(0));
+let calls2 = Arc::clone(&calls);
+
+let result = RetryManager::execute("my_job", policy, move || {
+    let n = calls2.fetch_add(1, Ordering::SeqCst);
+    async move {
+        if n < 2 {
+            Err(format!("transient error on attempt {n}"))
+        } else {
+            Ok("success".to_string())
+        }
+    }
+})
+.await;
+
+assert_eq!(result.unwrap(), "success");
+println!("Took {} attempts", calls.load(Ordering::SeqCst));
+# });
+```
+
+### Stateful Manager
+
+```rust,no_run
+use helixrouter::retry::{RetryManager, RetryPolicy};
+use std::time::Duration;
+
+# tokio_test::block_on(async {
+let mut mgr = RetryManager::new();
+let policy = RetryPolicy::default();
+
+let _ = mgr.run("job_a", policy.clone(), || async { Ok("done".to_string()) }).await;
+let _ = mgr.run("job_b", policy,         || async { Err::<String,_>("fail".to_string()) }).await;
+
+let stats = mgr.stats();
+println!("Successes: {}", stats.total_successes);
+println!("Failures:  {}", stats.total_failures);
+println!("Avg attempts per job: {:.2}", stats.avg_attempts_per_job);
+# });
+```

@@ -299,6 +299,10 @@ struct Inner {
     // ── Result cache ──────────────────────────────────────────────────────
     /// Content-addressed cache of completed job results.
     result_cache: Mutex<crate::result_cache::ResultCache>,
+
+    // ── Adaptive timeout manager ──────────────────────────────────────────
+    /// Learns optimal per-kind timeouts from observed latency data.
+    timeout_mgr: Mutex<crate::timeout_mgr::TimeoutManager>,
 }
 
 // ===== Router =====
@@ -409,6 +413,7 @@ impl Router {
             result_cache: Mutex::new(crate::result_cache::ResultCache::new(
                 crate::result_cache::CacheConfig::default(),
             )),
+            timeout_mgr: Mutex::new(crate::timeout_mgr::TimeoutManager::new()),
         });
 
         let inner2 = inner.clone();
@@ -659,6 +664,33 @@ impl Router {
     /// Reports cache hit/miss/eviction counts and the current hit rate.
     pub async fn result_cache_stats(&self) -> crate::result_cache::CacheStats {
         self.inner.result_cache.lock().await.stats()
+    }
+
+    /// Return per-kind timeout statistics from the adaptive timeout manager.
+    ///
+    /// Returns a map of job-kind → [`crate::timeout_mgr::TimeoutStats`] containing
+    /// p50/p95/p99 latencies, timeout event counts, and sample window sizes.
+    pub async fn timeout_stats(
+        &self,
+    ) -> std::collections::HashMap<String, crate::timeout_mgr::TimeoutStats> {
+        self.inner.timeout_mgr.lock().await.stats()
+    }
+
+    /// Record a latency observation into the adaptive timeout manager.
+    ///
+    /// Called internally after each job completes so the timeout manager can
+    /// learn from real execution data.
+    pub async fn observe_latency_for_timeout(
+        &self,
+        kind: &str,
+        latency_ms: u64,
+        succeeded: bool,
+    ) {
+        self.inner.timeout_mgr.lock().await.observe(crate::timeout_mgr::LatencyObservation {
+            kind: kind.to_string(),
+            latency_ms,
+            succeeded,
+        });
     }
 
     /// Return per-strategy latency summaries (EMA, p50/p95/p99, min/max).
@@ -1085,6 +1117,17 @@ impl Router {
                 self.record_neural_outcome(&job_for_neural, pressure, strategy, ms, false)
                     .await;
                 self.check_sla_violation(job_kind, ms).await;
+                // Feed observed latency into the adaptive timeout manager.
+                {
+                    let kind_str = format!("{job_kind:?}");
+                    self.inner.timeout_mgr.lock().await.observe(
+                        crate::timeout_mgr::LatencyObservation {
+                            kind: kind_str,
+                            latency_ms: ms,
+                            succeeded: true,
+                        },
+                    );
+                }
                 // Store in result cache for future identical jobs.
                 {
                     let result_str = crate::result_cache::ResultCache::outputs_to_string(&out);

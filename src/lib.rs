@@ -104,3 +104,9 @@ pub mod flow_control;
 
 /// Content-addressed LRU result cache: instant responses for identical re-submitted jobs.
 pub mod result_cache;
+
+/// Adaptive timeout manager: learns p95 latency-derived timeouts per job kind with backoff.
+pub mod timeout_mgr;
+
+/// Job retry with exponential backoff and optional jitter.
+pub mod retry;
