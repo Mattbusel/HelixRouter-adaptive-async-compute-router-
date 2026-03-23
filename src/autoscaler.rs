@@ -1193,3 +1193,471 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round-17 additions: queue-depth + latency-driven autoscaler
+// ---------------------------------------------------------------------------
+
+/// Live metrics snapshot fed into [`DynamicAutoscaler::evaluate`].
+#[derive(Debug, Clone)]
+pub struct ScalingMetrics {
+    /// Number of jobs currently waiting in the queue.
+    pub queue_depth: usize,
+    /// Moving-average request latency in milliseconds.
+    pub avg_latency_ms: u64,
+    /// Fraction of requests that resulted in an error `[0, 1]`.
+    pub error_rate: f64,
+    /// CPU utilisation fraction `[0, 1]`.
+    pub cpu_utilization: f64,
+    /// Number of live instances right now.
+    pub active_instances: u32,
+}
+
+/// Tunables for the queue-depth / latency autoscaler.
+#[derive(Debug, Clone)]
+pub struct ScalingPolicy {
+    /// Minimum number of instances to keep alive.
+    pub min_instances: u32,
+    /// Maximum number of instances allowed.
+    pub max_instances: u32,
+    /// Composite signal threshold above which we scale up (0..1).
+    pub scale_up_threshold: f64,
+    /// Composite signal threshold below which we scale down (0..1).
+    pub scale_down_threshold: f64,
+    /// Minimum milliseconds between consecutive scaling events.
+    pub cooldown_ms: u64,
+    /// How many instances to add per scale-up event.
+    pub scale_up_step: u32,
+    /// How many instances to remove per scale-down event.
+    pub scale_down_step: u32,
+}
+
+impl Default for ScalingPolicy {
+    fn default() -> Self {
+        Self {
+            min_instances: 1,
+            max_instances: 32,
+            scale_up_threshold: 0.70,
+            scale_down_threshold: 0.30,
+            cooldown_ms: 30_000,
+            scale_up_step: 2,
+            scale_down_step: 1,
+        }
+    }
+}
+
+/// Output of [`DynamicAutoscaler::evaluate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalingDecision {
+    /// Add `count` instances.
+    ScaleUp(u32),
+    /// Remove `count` instances.
+    ScaleDown(u32),
+    /// No change recommended.
+    NoChange,
+    /// A scaling event occurred recently; cooldown not yet elapsed.
+    CooldownActive,
+}
+
+impl ScalingDecision {
+    /// Returns the signed change in instance count this decision implies.
+    pub fn instances_delta(&self) -> i32 {
+        match self {
+            Self::ScaleUp(n) => *n as i32,
+            Self::ScaleDown(n) => -(*n as i32),
+            Self::NoChange | Self::CooldownActive => 0,
+        }
+    }
+}
+
+/// Weighted composite signal used to drive scaling decisions.
+///
+/// `signal = queue_weight*queue_factor + latency_weight*latency_factor + error_weight*error_factor`
+///
+/// Each factor is normalised to `[0, 1]`:
+/// - `queue_factor  = min(queue_depth / queue_capacity_hint, 1.0)`
+/// - `latency_factor = min(avg_latency_ms / latency_ceiling_ms, 1.0)`
+/// - `error_factor  = error_rate` (already in `[0,1]`)
+pub struct ScalingSignal {
+    /// Weight applied to queue-depth contribution (default 0.40).
+    pub queue_weight: f64,
+    /// Maximum expected queue depth — used to normalise queue_depth.
+    pub queue_capacity_hint: f64,
+    /// Weight applied to latency contribution (default 0.40).
+    pub latency_weight: f64,
+    /// Latency value (ms) that maps to a factor of 1.0 (default 1000 ms).
+    pub latency_ceiling_ms: f64,
+    /// Weight applied to error-rate contribution (default 0.20).
+    pub error_weight: f64,
+}
+
+impl Default for ScalingSignal {
+    fn default() -> Self {
+        Self {
+            queue_weight: 0.40,
+            queue_capacity_hint: 500.0,
+            latency_weight: 0.40,
+            latency_ceiling_ms: 1_000.0,
+            error_weight: 0.20,
+        }
+    }
+}
+
+impl ScalingSignal {
+    /// Compute composite signal from a metrics snapshot.
+    ///
+    /// Returns a value in `[0, 1]` where 0 = totally underloaded, 1 = overloaded.
+    pub fn compute(&self, metrics: &ScalingMetrics) -> f64 {
+        let queue_factor = (metrics.queue_depth as f64 / self.queue_capacity_hint).min(1.0);
+        let latency_factor =
+            (metrics.avg_latency_ms as f64 / self.latency_ceiling_ms).min(1.0);
+        let error_factor = metrics.error_rate.clamp(0.0, 1.0);
+
+        self.queue_weight * queue_factor
+            + self.latency_weight * latency_factor
+            + self.error_weight * error_factor
+    }
+}
+
+/// Queue-depth + latency-driven autoscaler with cooldown, step control, and history.
+pub struct DynamicAutoscaler {
+    signal: ScalingSignal,
+    history: Vec<(u64, ScalingDecision)>,
+    last_scaled_ms: Option<u64>,
+}
+
+impl DynamicAutoscaler {
+    /// Create a new [`DynamicAutoscaler`] with the default signal weights.
+    pub fn new() -> Self {
+        Self {
+            signal: ScalingSignal::default(),
+            history: Vec::new(),
+            last_scaled_ms: None,
+        }
+    }
+
+    /// Create a new [`DynamicAutoscaler`] with custom signal weights.
+    pub fn with_signal(signal: ScalingSignal) -> Self {
+        Self {
+            signal,
+            history: Vec::new(),
+            last_scaled_ms: None,
+        }
+    }
+
+    /// Evaluate the current metrics against the policy and return a scaling decision.
+    ///
+    /// The cooldown window is enforced: if the last scaling event is within
+    /// `policy.cooldown_ms` of `now_ms`, [`ScalingDecision::CooldownActive`] is returned.
+    pub fn evaluate(
+        &mut self,
+        metrics: &ScalingMetrics,
+        policy: &ScalingPolicy,
+        now_ms: u64,
+    ) -> ScalingDecision {
+        // Enforce cooldown.
+        if let Some(last) = self.last_scaled_ms {
+            if now_ms.saturating_sub(last) < policy.cooldown_ms {
+                return ScalingDecision::CooldownActive;
+            }
+        }
+
+        let composite = self.compute_signal(metrics);
+
+        let decision = if composite >= policy.scale_up_threshold {
+            let headroom = policy.max_instances.saturating_sub(metrics.active_instances);
+            if headroom == 0 {
+                ScalingDecision::NoChange
+            } else {
+                ScalingDecision::ScaleUp(policy.scale_up_step.min(headroom))
+            }
+        } else if composite <= policy.scale_down_threshold {
+            let excess = metrics.active_instances.saturating_sub(policy.min_instances);
+            if excess == 0 {
+                ScalingDecision::NoChange
+            } else {
+                ScalingDecision::ScaleDown(policy.scale_down_step.min(excess))
+            }
+        } else {
+            ScalingDecision::NoChange
+        };
+
+        self.record_scaling_event(&decision, now_ms);
+        decision
+    }
+
+    /// Compute the composite load signal for the given metrics snapshot.
+    ///
+    /// Returns a value in `[0, 1]` where 0 = underloaded, 1 = overloaded.
+    pub fn compute_signal(&self, metrics: &ScalingMetrics) -> f64 {
+        self.signal.compute(metrics)
+    }
+
+    /// Record a scaling event in the internal history.
+    pub fn record_scaling_event(&mut self, decision: &ScalingDecision, now_ms: u64) {
+        // Only update the cooldown timer for decisions that actually changed instance count.
+        match decision {
+            ScalingDecision::ScaleUp(_) | ScalingDecision::ScaleDown(_) => {
+                self.last_scaled_ms = Some(now_ms);
+            }
+            _ => {}
+        }
+        self.history.push((now_ms, decision.clone()));
+    }
+
+    /// Return the last `n` scaling events (oldest first).
+    pub fn scaling_history(&self, last_n: usize) -> Vec<(u64, ScalingDecision)> {
+        let skip = self.history.len().saturating_sub(last_n);
+        self.history[skip..].to_vec()
+    }
+
+    /// Derive a heuristic [`ScalingPolicy`] from a slice of observed metrics snapshots.
+    ///
+    /// Heuristic rules:
+    /// - `scale_up_threshold`  = 75th percentile of computed signals.
+    /// - `scale_down_threshold` = 25th percentile of computed signals.
+    /// - `min_instances` / `max_instances` anchored to 1 and 2× peak active_instances.
+    pub fn recommended_policy(&self, history: &[ScalingMetrics]) -> ScalingPolicy {
+        if history.is_empty() {
+            return ScalingPolicy::default();
+        }
+
+        let mut signals: Vec<f64> = history.iter().map(|m| self.signal.compute(m)).collect();
+        signals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let p25 = percentile_f64(&signals, 0.25);
+        let p75 = percentile_f64(&signals, 0.75);
+
+        let max_active = history
+            .iter()
+            .map(|m| m.active_instances)
+            .max()
+            .unwrap_or(1);
+
+        ScalingPolicy {
+            min_instances: 1,
+            max_instances: (max_active * 2).max(4),
+            scale_up_threshold: p75.clamp(0.50, 0.90),
+            scale_down_threshold: p25.clamp(0.10, 0.45),
+            cooldown_ms: 30_000,
+            scale_up_step: 2,
+            scale_down_step: 1,
+        }
+    }
+}
+
+impl Default for DynamicAutoscaler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Return the value at the given fraction (0..1) of a pre-sorted slice.
+fn percentile_f64(sorted: &[f64], fraction: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * fraction).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+// ---------------------------------------------------------------------------
+// DynamicAutoscaler tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod dynamic_autoscaler_tests {
+    use super::*;
+
+    fn default_policy() -> ScalingPolicy {
+        ScalingPolicy {
+            min_instances: 1,
+            max_instances: 10,
+            scale_up_threshold: 0.70,
+            scale_down_threshold: 0.30,
+            cooldown_ms: 5_000,
+            scale_up_step: 2,
+            scale_down_step: 1,
+        }
+    }
+
+    fn heavy_metrics(instances: u32) -> ScalingMetrics {
+        ScalingMetrics {
+            queue_depth: 800,
+            avg_latency_ms: 1200,
+            error_rate: 0.10,
+            cpu_utilization: 0.90,
+            active_instances: instances,
+        }
+    }
+
+    fn light_metrics(instances: u32) -> ScalingMetrics {
+        ScalingMetrics {
+            queue_depth: 5,
+            avg_latency_ms: 20,
+            error_rate: 0.00,
+            cpu_utilization: 0.05,
+            active_instances: instances,
+        }
+    }
+
+    fn medium_metrics(instances: u32) -> ScalingMetrics {
+        ScalingMetrics {
+            queue_depth: 100,
+            avg_latency_ms: 200,
+            error_rate: 0.02,
+            cpu_utilization: 0.50,
+            active_instances: instances,
+        }
+    }
+
+    #[test]
+    fn scale_up_on_heavy_load() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        let m = heavy_metrics(3);
+        let decision = a.evaluate(&m, &policy, 0);
+        assert!(
+            matches!(decision, ScalingDecision::ScaleUp(_)),
+            "expected ScaleUp, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn scale_down_on_light_load() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        let m = light_metrics(5);
+        let decision = a.evaluate(&m, &policy, 0);
+        assert!(
+            matches!(decision, ScalingDecision::ScaleDown(_)),
+            "expected ScaleDown, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn no_change_at_medium_load() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        let m = medium_metrics(3);
+        let decision = a.evaluate(&m, &policy, 0);
+        assert_eq!(decision, ScalingDecision::NoChange);
+    }
+
+    #[test]
+    fn cooldown_prevents_rapid_rescaling() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        let m = heavy_metrics(3);
+        let _first = a.evaluate(&m, &policy, 0);
+        let second = a.evaluate(&m, &policy, 1_000); // within cooldown
+        assert_eq!(second, ScalingDecision::CooldownActive);
+    }
+
+    #[test]
+    fn cooldown_expires_and_allows_rescaling() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        let m = heavy_metrics(3);
+        let _first = a.evaluate(&m, &policy, 0);
+        let second = a.evaluate(&m, &policy, 6_000); // after cooldown
+        assert!(matches!(second, ScalingDecision::ScaleUp(_)));
+    }
+
+    #[test]
+    fn does_not_exceed_max_instances() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy(); // max = 10, step = 2
+        let m = heavy_metrics(9); // only 1 headroom
+        let decision = a.evaluate(&m, &policy, 0);
+        // Should scale up by 1 (capped to headroom).
+        assert_eq!(decision, ScalingDecision::ScaleUp(1));
+    }
+
+    #[test]
+    fn does_not_go_below_min_instances() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy(); // min = 1
+        let m = light_metrics(1); // already at min
+        let decision = a.evaluate(&m, &policy, 0);
+        assert_eq!(decision, ScalingDecision::NoChange);
+    }
+
+    #[test]
+    fn instances_delta_signs_correct() {
+        assert_eq!(ScalingDecision::ScaleUp(3).instances_delta(), 3);
+        assert_eq!(ScalingDecision::ScaleDown(2).instances_delta(), -2);
+        assert_eq!(ScalingDecision::NoChange.instances_delta(), 0);
+        assert_eq!(ScalingDecision::CooldownActive.instances_delta(), 0);
+    }
+
+    #[test]
+    fn history_records_events() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        a.evaluate(&heavy_metrics(3), &policy, 0);
+        a.evaluate(&heavy_metrics(3), &policy, 1_000); // cooldown
+        let h = a.scaling_history(10);
+        assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn history_last_n_is_bounded() {
+        let mut a = DynamicAutoscaler::new();
+        let policy = default_policy();
+        for i in 0..5u64 {
+            a.evaluate(&medium_metrics(3), &policy, i * 60_000);
+        }
+        let h = a.scaling_history(2);
+        assert!(h.len() <= 2);
+    }
+
+    #[test]
+    fn recommended_policy_from_history() {
+        let a = DynamicAutoscaler::new();
+        let metrics: Vec<ScalingMetrics> = (0..20)
+            .map(|i| ScalingMetrics {
+                queue_depth: i * 10,
+                avg_latency_ms: i as u64 * 50,
+                error_rate: 0.0,
+                cpu_utilization: 0.5,
+                active_instances: 4,
+            })
+            .collect();
+        let policy = a.recommended_policy(&metrics);
+        assert!(policy.min_instances >= 1);
+        assert!(policy.max_instances >= policy.min_instances);
+        assert!(policy.scale_up_threshold > policy.scale_down_threshold);
+    }
+
+    #[test]
+    fn compute_signal_clamped_to_one() {
+        let a = DynamicAutoscaler::new();
+        let extreme = ScalingMetrics {
+            queue_depth: 999_999,
+            avg_latency_ms: 999_999,
+            error_rate: 1.0,
+            cpu_utilization: 1.0,
+            active_instances: 1,
+        };
+        let s = a.compute_signal(&extreme);
+        assert!((s - 1.0).abs() < 1e-9, "expected ~1.0, got {s}");
+    }
+
+    #[test]
+    fn compute_signal_zero_on_no_load() {
+        let a = DynamicAutoscaler::new();
+        let empty = ScalingMetrics {
+            queue_depth: 0,
+            avg_latency_ms: 0,
+            error_rate: 0.0,
+            cpu_utilization: 0.0,
+            active_instances: 1,
+        };
+        let s = a.compute_signal(&empty);
+        assert!(s < 0.01, "expected ~0.0, got {s}");
+    }
+}

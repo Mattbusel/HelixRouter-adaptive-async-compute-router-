@@ -173,3 +173,6 @@ pub mod request_classifier;
 
 /// Sliding-window rate counter: bucketed approximation with per-key distributed aggregation.
 pub mod sliding_window_counter;
+
+/// Health-based peer discovery and membership registry.
+pub mod peer_discovery;
