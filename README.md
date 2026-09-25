@@ -6,13 +6,15 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.81%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-HelixRouter is an **adaptive async compute routing engine** written in Rust. It decides *how* each unit of work executes — inline, spawned, pooled, batched, or dropped — on a per-job basis in sub-microsecond decision time. Routing decisions are driven by live system pressure (CPU worker saturation, queue fill rate, drop-rate EMA), EMA latency history (P50/P95/P99 per strategy, 512-entry rolling window), an online-learned quality model (`NeuralRouter`: epsilon-greedy weight matrix, gradient-ascent updates), and a predictive autoscaler (OLS linear trend over a configurable ring buffer, 30-second load forecast). As of v1.2.0 the engine also includes an `AdaptiveCircuitBreaker` that learns failure patterns and auto-adjusts its thresholds and recovery timeouts, and a `PriorityLoadBalancer` that routes tasks to the best available worker based on priority, capacity, affinity, and health.
+An adaptive job router for Tokio: for every job it decides whether to run it inline, spawn it, send it to a bounded CPU pool, batch it, or drop it, based on the job's cost and latency budget and on live system pressure.
 
----
+Most async services push all work through one executor, so under load cheap requests queue behind expensive ones and everything slows together. HelixRouter makes a per-job decision instead, learns from observed latencies (EMA and P50/P95/P99 per strategy, an epsilon-greedy `NeuralRouter`, an OLS autoscaler forecast) and sheds load before queues saturate. It ships as a library (`helixrouter` on crates.io) and as a binary with a live web dashboard, Prometheus metrics and an SSE feed of routing decisions.
+
+![HelixRouter dashboard](dashboard.png)
 
 ## What is adaptive async compute routing?
 
-Traditional async systems dispatch all work uniformly. Under load every task slows together and the only mitigation is application-layer shedding — long after queues have saturated.
+Traditional async systems dispatch all work uniformly. Under load every task slows together and the only mitigation is application-layer shedding, long after queues have saturated.
 
 HelixRouter asks, before executing any job: "what is the cheapest execution strategy that keeps latency within budget, given current system pressure?" The answer can be any of five strategies:
 
@@ -22,9 +24,67 @@ HelixRouter asks, before executing any job: "what is the cheapest execution stra
 | `Spawn` | Moderate cost, executor headroom | ~µs | Task spawn |
 | `CpuPool` | Heavy CPU work, bounded concurrency | ms–100ms | `spawn_blocking` + semaphore |
 | `Batch` | Amortisable work, high parallelism | Variable | Batch assembly + delay |
-| `Drop` | Backpressure exceeds threshold | N/A — shed load | None |
+| `Drop` | Backpressure exceeds threshold | N/A (load is shed) | None |
 
-Strategy selection is a pure function that takes less than 100 ns. The `NeuralRouter` refines these heuristics over time from observed outcomes.
+Strategy selection (`choose_strategy`) is a pure, synchronous function; `benches/routing.rs` benchmarks it. The `NeuralRouter` refines these heuristics over time from observed outcomes.
+
+---
+
+## Quick start
+
+### Prerequisites
+
+- Rust 1.81+ (install via [rustup](https://rustup.rs))
+- No external system dependencies for the default build
+
+### Build and run
+
+```bash
+git clone https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-.git
+cd HelixRouter-adaptive-async-compute-router-
+
+# Add as a library
+cargo add helixrouter
+
+# Run all tests
+cargo test
+
+# Run benchmarks
+cargo bench
+```
+
+### Minimal library usage
+
+```rust
+use helixrouter::{config::RouterConfig, router::Router, types::{Job, JobKind}};
+
+#[tokio::main]
+async fn main() {
+    let router = Router::new(RouterConfig::default());
+    let job = Job {
+        id: 1,
+        kind: JobKind::HashMix,
+        inputs: vec![42],
+        compute_cost: 1_000,
+        scaling_potential: 0.5,
+        latency_budget_ms: 50,
+        ..Default::default()
+    };
+    let output = router.submit(job).await;
+    println!("{output:?}");
+}
+```
+
+### With the web dashboard
+
+```bash
+cargo run --release                  # serves on 127.0.0.1:8080 (or HELIX_HTTP_ADDR) and runs a job simulation
+cargo run --release -- --port 3000   # choose the port
+# Open http://localhost:3000 for the live dashboard
+# GET http://localhost:3000/metrics                -> Prometheus exposition
+# GET http://localhost:3000/api/stats              -> JSON stats
+# GET http://localhost:3000/api/stream/decisions   -> Server-Sent Events stream of routing decisions
+```
 
 ---
 
@@ -38,16 +98,12 @@ Strategy selection is a pure function that takes less than 100 ns. The `NeuralRo
     |
     +-- [read config + adaptive_threshold]
     |
-    +-- choose_strategy(cfg, job, cpu_busy)   <-- pure, sub-100ns
+    +-- choose_strategy(cfg, job, cpu_busy)   <-- pure heuristic
     |        |
     |        v
     |   NeuralRouter::select()                <-- epsilon-greedy weight matrix
     |        |
     +--------+
-    |
-    +-- AdaptiveCircuitBreaker::permit()      <-- open? reject early
-    |
-    +-- PriorityLoadBalancer::select_worker() <-- pick best healthy worker
     |
     +-- execute (inline / spawn / cpu_pool / batch / drop)
     |
@@ -60,10 +116,12 @@ Strategy selection is a pure function that takes less than 100 ns. The `NeuralRo
 
   Side channels:
     Autoscaler    --> polls metrics, emits capacity recommendations
-    Web server    --> GET /api/metrics, /api/neural, GET /sse/decisions
+    Web server    --> GET /metrics, /api/stats, /api/neural, /api/stream/decisions
     Cost model    --> per-job-kind EMA cost tracker
     Downstream    --> predictive backpressure from service telemetry
 ```
+
+Many of the modules described below (adaptive circuit breaker, priority load balancer, WFQ, DAG executor, deadline scheduler, cost router, bandit, dedup, retry, and others) are standalone building blocks in the same crate that you compose around `Router`; they are not all wired into `Router::submit` itself.
 
 ---
 
@@ -134,69 +192,14 @@ let app = health_routes(shared);
 
 ---
 
-## 5-Minute Quickstart
-
-### Prerequisites
-
-- Rust 1.81+ (install via [rustup](https://rustup.rs))
-- No external system dependencies for the default build
-
-### Build and run
-
-```bash
-git clone https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-.git
-cd HelixRouter-adaptive-async-compute-router-
-
-# Run the simulation binary (default feature = simulation)
-cargo run --release
-
-# Run all tests
-cargo test
-
-# Run benchmarks
-cargo bench
-```
-
-### Minimal library usage
-
-```rust
-use helixrouter::{config::RouterConfig, router::Router, types::{Job, JobKind}};
-
-#[tokio::main]
-async fn main() {
-    let router = Router::new(RouterConfig::default());
-    let job = Job {
-        id: 1,
-        kind: JobKind::HashMix,
-        inputs: vec![42],
-        compute_cost: 1_000,
-        scaling_potential: 0.5,
-        latency_budget_ms: 50,
-    };
-    let output = router.submit(job).await;
-    println!("{output:?}");
-}
-```
-
-### With the web dashboard
-
-```bash
-cargo run --release -- --port 3000
-# Open http://localhost:3000 for the live dark dashboard
-# GET http://localhost:3000/metrics  -> Prometheus exposition
-# GET http://localhost:3000/sse/decisions  -> Server-Sent Events stream
-```
-
----
-
 ## Adaptive Circuit Breaker Guide
 
 `AdaptiveCircuitBreaker` (`src/adaptive_circuit_breaker.rs`) extends the classic three-state circuit breaker with:
 
-- **Time-of-day aware thresholds** — the failure threshold is lowered when recent failure rates are high (trips faster under stress) and raised when rates are low (more lenient during off-peak).
-- **History-driven timeout** — the cooldown for new Open transitions is proportional to the mean of recent recovery durations, so the breaker waits longer if past recoveries were slow.
-- **Graduated half-open recovery** — starts at 10 % load and increases by 20 pp per successful probe batch; never jumps straight to full load.
-- **Failure-in-probe back-off** — a failure during HalfOpen extends the next cooldown by 1.5× (capped at 5 minutes).
+- **Time-of-day aware thresholds**: the failure threshold is lowered when recent failure rates are high (trips faster under stress) and raised when rates are low (more lenient during off-peak).
+- **History-driven timeout**: the cooldown for new Open transitions is proportional to the mean of recent recovery durations, so the breaker waits longer if past recoveries were slow.
+- **Graduated half-open recovery**: starts at 10 % load and increases by 20 pp per successful probe batch; never jumps straight to full load.
+- **Failure-in-probe back-off**: a failure during HalfOpen extends the next cooldown by 1.5× (capped at 5 minutes).
 
 ### Usage
 
@@ -216,7 +219,7 @@ if cb.permit() {
         Err(_) => cb.record_failure(),
     }
 } else {
-    // Circuit is open — use fallback / return cached response.
+    // Circuit is open, use fallback / return cached response.
 }
 
 // Observe current state:
@@ -385,7 +388,7 @@ println!("Action: {:?}, target: {}", rec.action, rec.target_pool_size);
 
 ## Job Affinity Routing
 
-The `affinity` module adds **stateful sticky routing** — jobs from the same logical group are steered toward the same execution strategy, leveraging warm CPU caches and branch predictor state from prior runs.
+The `affinity` module adds **stateful sticky routing**: jobs from the same logical group are steered toward the same execution strategy, leveraging warm CPU caches and branch predictor state from prior runs.
 
 ### How it works
 
@@ -472,47 +475,33 @@ Enable affinity routing when you have long-running sessions that submit the same
 
 ## Configuration Reference
 
-Configuration is loaded from a YAML file or environment variables via `clap`:
+`RouterConfig` (in `src/config.rs`) holds the routing thresholds. The main fields and their defaults:
 
-```yaml
-# Router core
-cpu_parallelism: 8          # Max concurrent CpuPool tasks
-cpu_queue_cap: 64           # CpuPool queue depth before Drop
-batch_size: 16              # Tasks per micro-batch flush
-batch_timeout_ms: 5         # Max wait before flushing a partial batch
-inline_cost_threshold: 500  # compute_cost below this -> prefer Inline
-spawn_cost_threshold: 5000  # compute_cost below this -> prefer Spawn
+| Field | Default | Meaning |
+|---|---|---|
+| `inline_threshold` | `8_000` | Jobs with `compute_cost` at or below this run inline |
+| `spawn_threshold` | `60_000` | Jobs at or below this are spawned as Tokio tasks; above go to the CPU pool |
+| `cpu_parallelism` | `8` | Concurrent CPU-pool workers |
+| `cpu_queue_cap` | `512` | CPU-pool queue depth |
+| `backpressure_busy_threshold` | `7` | Busy CPU workers above which jobs are batched or dropped |
+| `batch_max_size` / `batch_max_delay_ms` | `8` / `10` | Batch flush size and maximum wait |
+| `ema_alpha` | `0.15` | Latency EMA smoothing factor |
+| `adaptive_step`, `cpu_p95_budget_ms`, `adaptive_p95_threshold_factor` | `0.10`, `200`, `1.5` | Raise `spawn_threshold` when CpuPool P95 exceeds budget times factor |
+| `sla`, `warmup_steps` | | Per-job-kind latency SLAs and neural-router warm-up |
 
-# Pressure thresholds
-drop_above_pressure: 0.90   # Shed load above this pressure score
-spawn_above_pressure: 0.60  # Prefer Spawn above this pressure score
+At runtime the config can be read and changed over HTTP (`GET`, `POST` and `PATCH /api/config`), or hot-reloaded from a JSON file.
 
-# Neural router
-neural_epsilon: 0.15        # Exploration rate (decays with experience)
-neural_lr: 0.01             # Gradient ascent learning rate
-neural_warmup: 200          # Observations before neural router is trusted
+The binary reads these environment variables and flags:
 
-# Autoscaler
-autoscaler_window: 60       # Ring buffer depth (seconds) for trend OLS
-autoscaler_horizon: 30      # Forecast horizon (seconds)
-
-# Web server
-port: 3000
-metrics_path: "/metrics"
-
-# Circuit breaker (used by integrations; not wired to Router core by default)
-cb_base_threshold: 5
-cb_base_timeout_secs: 30
-
-# Load balancer
-lb_min_observations_for_affinity: 3
-```
-
-All values can be overridden via environment variables with the `HELIX_` prefix:
-
-```bash
-HELIX_CPU_PARALLELISM=16 HELIX_PORT=8080 cargo run --release
-```
+| Setting | Purpose |
+|---|---|
+| `--port <N>` or `HELIX_HTTP_ADDR` | Listen address (default `127.0.0.1:8080`) |
+| `HELIX_CONFIG_PATH` | JSON `RouterConfig` file, watched and applied every 5 s |
+| `HELIX_WEIGHTS_PATH` | Where neural-router weights are saved and loaded (default `helix_weights.json`) |
+| `HELIX_SIM_JOBS`, `HELIX_SIM_SEED` | Size and seed of the built-in job simulation (defaults 200 and 7) |
+| `--chaos` | Enable the chaos layer (random delays, rejections, kills) |
+| `--simulate <trace.jsonl>` | Offline simulator over a recorded trace, no HTTP server (`--warmup-steps` to tune) |
+| `RUST_LOG` | Log filter |
 
 ---
 
@@ -525,17 +514,17 @@ Most async Rust services dispatch all work through a single executor queue. This
 | **Uniform queue** | All tasks slow together; backlog compounds | Manual restart / shedding long after saturation | None by default |
 | **Round-robin** | Load spreads evenly regardless of job cost; cheap jobs wait behind expensive ones | None | None |
 | **Least-loaded** | Better than round-robin but ignores job characteristics entirely | None | Limited |
-| **HelixRouter** | Each job routed to the cheapest viable strategy in < 100 ns; heavy work isolated to bounded pools; cheap work stays inline; load shed gracefully before queues saturate | Auto-adapts thresholds based on observed P95; neural router learns per-kind preferences | Full Prometheus, SSE decision feed, live dashboard |
+| **HelixRouter** | Each job routed to the cheapest viable strategy; heavy work isolated to bounded pools; cheap work stays inline; load shed gracefully before queues saturate | Auto-adapts thresholds based on observed P95; neural router learns per-kind preferences | Full Prometheus, SSE decision feed, live dashboard |
 
 ### Concrete advantages
 
-- **Sub-µs strategy selection** — `choose_strategy` is a pure function with no allocation, no locks, no I/O. It runs in ~50–100 ns on modern hardware.
-- **Graceful degradation** — when CPU pressure rises the router automatically sheds expensive work (`CpuPool` → `Batch` → `Drop`) while continuing to serve cheap work inline. The system degrades *predictably*, not catastrophically.
-- **Online learning** — the `NeuralRouter` epsilon-greedy model starts from heuristic warm-start weights and refines them from observed outcomes. Within ~200 samples per job kind it typically outperforms the static heuristic by 5–15% on P95 latency.
-- **Zero-config deployment** — `Router::new(RouterConfig::default())` works out of the box. All thresholds are observable and hot-patchable via `PATCH /api/config` without a restart.
-- **DAG-native workloads** — complex pipelines where job B depends on job A's output are expressed as a `JobDag` and executed with automatic topological parallelism. No custom DAG scheduler required.
-- **Hard deadline enforcement** — `DeadlineScheduler` ensures time-sensitive work is never silently delayed; missed deadlines emit observable `DeadlineMissed` SSE events rather than completing late and silently blowing SLOs.
-- **Cost-aware budget control** — `CostRouter` prevents expensive `MonteCarloRisk` jobs from exhausting CPU budget during peak hours while cheap `HashMix` jobs always get inline treatment.
+- **Cheap strategy selection**: `choose_strategy` is a pure function of the job and current pressure, so the routing decision adds very little to each job (see `benches/routing.rs`).
+- **Graceful degradation**: when CPU pressure rises the router automatically sheds expensive work (`CpuPool` → `Batch` → `Drop`) while continuing to serve cheap work inline. The system degrades *predictably*, not catastrophically.
+- **Online learning**: the `NeuralRouter` epsilon-greedy model starts from heuristic warm-start weights and refines them from observed outcomes. 
+- **Zero-config deployment**: `Router::new(RouterConfig::default())` works out of the box. All thresholds are observable and hot-patchable via `PATCH /api/config` without a restart.
+- **DAG-native workloads**: complex pipelines where job B depends on job A's output are expressed as a `JobDag` and executed with automatic topological parallelism. No custom DAG scheduler required.
+- **Hard deadline enforcement**: `DeadlineScheduler` ensures time-sensitive work is never silently delayed; missed deadlines emit observable `DeadlineMissed` SSE events rather than completing late and silently blowing SLOs.
+- **Cost-aware budget control**: `CostRouter` prevents expensive `MonteCarloRisk` jobs from exhausting CPU budget during peak hours while cheap `HashMix` jobs always get inline treatment.
 
 ---
 
@@ -603,7 +592,7 @@ async fn main() {
     dag.add_edge(ingest, enrich_a).expect("no cycle");
     dag.add_edge(ingest, enrich_b).expect("no cycle");
 
-    // Final aggregation — depends on both enrichments
+    // Final aggregation, depends on both enrichments
     let aggregate = dag.add_node(Job {
         id: 4, kind: JobKind::HashMix, inputs: vec![],
         compute_cost: 1_000, scaling_potential: 0.1, latency_budget_ms: 50, deadline_ms: 0,
@@ -623,7 +612,7 @@ async fn main() {
 `Err(DagError::CycleDetected { from, to })` and leaves the DAG unchanged:
 
 ```rust
-dag.add_edge(b, a); // Err — would create a -> b -> a cycle
+dag.add_edge(b, a); // Err, would create a -> b -> a cycle
 ```
 
 ### Visualization API
@@ -795,7 +784,7 @@ score:
 final[s] = alpha × neural_score[s] + (1 - alpha) × cost_score[s]
 ```
 
-Default `alpha = 0.6` — the neural router dominates when warmed up, with the cost
+Default `alpha = 0.6`, the neural router dominates when warmed up, with the cost
 model acting as a safety guardrail.
 
 ### Example
@@ -827,7 +816,7 @@ async fn main() {
         },
     );
 
-    // Cheap job — always gets Inline regardless of budget
+    // Cheap job, always gets Inline regardless of budget
     let cheap = Job {
         id: 1, kind: JobKind::HashMix, inputs: vec![42],
         compute_cost: 100, scaling_potential: 0.1,
@@ -836,7 +825,7 @@ async fn main() {
     let result = cost_router.submit(cheap).await;
     assert!(result.is_ok());
 
-    // Expensive job — blocked when budget is tight
+    // Expensive job, blocked when budget is tight
     let expensive = Job {
         id: 2, kind: JobKind::MonteCarloRisk, inputs: vec![999],
         compute_cost: 900_000, scaling_potential: 0.9,
@@ -911,7 +900,7 @@ Router::submit(job)
   +-- cost_model.record_sample(ExecutionSample { job_kind, strategy, duration_ns, success })
   |     |
   |     +-- O(1) DashMap lookup (or insert)
-  |     +-- Arc<Mutex<KindStats>> acquired — shard lock released first
+  |     +-- Arc<Mutex<KindStats>> acquired, shard lock released first
   |     +-- Circular buffer push (64 samples), EMA update: α=0.15
   |
   +-- cost_model.cost_adjusted_strategy(job_kind, pressure)
@@ -1115,14 +1104,14 @@ The live dark dashboard is served at `GET /` and auto-updates every second via S
 
 ### What it shows
 
-- **Strategy donut chart** — real-time distribution of Inline / Spawn / CpuPool / Batch / Drop decisions
-- **Latency table** — P50 / P95 / P99 / EMA per strategy, updated as jobs complete
-- **Pressure gauge** — composite score (0–1) including CPU saturation, queue fill, drop-rate EMA, and downstream telemetry
-- **Neural router panel** — epsilon (exploration rate), sample count, average reward, per-strategy weight heatmap
-- **Routing decision feed** — last 50 decisions streamed in real time via SSE
-- **Autoscaler recommendations** — OLS forecast of load 30 s ahead; suggested `cpu_parallelism` / `cpu_queue_cap` adjustments
+- **Strategy donut chart**: real-time distribution of Inline / Spawn / CpuPool / Batch / Drop decisions
+- **Latency table**: P50 / P95 / P99 / EMA per strategy, updated as jobs complete
+- **Pressure gauge**: composite score (0–1) including CPU saturation, queue fill, drop-rate EMA, and downstream telemetry
+- **Neural router panel**: epsilon (exploration rate), sample count, average reward, per-strategy weight heatmap
+- **Routing decision feed**: last 50 decisions streamed in real time via SSE
+- **Autoscaler recommendations**: OLS forecast of load 30 s ahead; suggested `cpu_parallelism` / `cpu_queue_cap` adjustments
 
-The dashboard uses zero external JavaScript dependencies — just vanilla JS and CSS, embedded directly in the binary.
+The dashboard uses zero external JavaScript dependencies, just vanilla JS and CSS, embedded directly in the binary.
 
 ---
 
@@ -1130,7 +1119,7 @@ The dashboard uses zero external JavaScript dependencies — just vanilla JS and
 
 1. Fork the repository and create a feature branch from `main`.
 2. Follow the existing module structure: one `pub mod` per file, doc-comment every public item.
-3. All `clippy::unwrap_used` and `clippy::expect_used` are denied in library code — use `?` and `Result`/`Option` propagation. Test modules are exempted via `#[allow]`.
+3. All `clippy::unwrap_used` and `clippy::expect_used` are denied in library code, use `?` and `Result`/`Option` propagation. Test modules are exempted via `#[allow]`.
 4. Run the full test + lint suite before opening a PR:
    ```bash
    cargo test --all-features
@@ -1289,7 +1278,7 @@ tokio::runtime::Runtime::new().unwrap().block_on(async {
 
     // 10 most recent spans
     for span in store.recent(10) {
-        println!("[{}] {} — {:.2}ms", span.trace_id, span.operation, span.duration_ms);
+        println!("[{}] {}, {:.2}ms", span.trace_id, span.operation, span.duration_ms);
     }
 });
 ```
@@ -1380,7 +1369,7 @@ Batch     10 000           1 000
 effective_priority = base_priority + age_boost
 age_boost          = (elapsed_ms / sla_ms) × 1 000
 
-A job at 100% of its SLA age adds 1 000 points — one full tier jump.
+A job at 100% of its SLA age adds 1 000 points, one full tier jump.
 ```
 
 ```
@@ -1584,7 +1573,7 @@ println!("{:#?}", s.get("hash_mix"));
 
 ### HTTP Endpoint
 
-`GET /api/timeouts/stats` — returns a JSON map of job-kind to per-kind statistics.
+`GET /api/timeouts/stats`, returns a JSON map of job-kind to per-kind statistics.
 
 ```json
 {
@@ -1605,7 +1594,7 @@ println!("{:#?}", s.get("hash_mix"));
 
 The `retry` module wraps job execution with configurable retry logic, exponential
 backoff, and optional jitter. Uses a simple LCG PRNG for deterministic behaviour
-in tests — no additional dependencies required.
+in tests, no additional dependencies required.
 
 ### Architecture
 
