@@ -204,8 +204,47 @@ async fn run_offline_simulator(trace_path: &str, cfg: RouterConfig) {
     tracing::info!("offline simulation complete");
 }
 
+const HELP: &str = "helixrouter: adaptive async compute router with a live web dashboard
+
+Usage: helixrouter [OPTIONS]
+
+With no options it starts the dashboard on http://127.0.0.1:8080, runs a
+built-in job simulation so there is something to watch, and keeps serving
+until Ctrl+C (neural-router weights are saved on exit).
+
+Options:
+  --port <N>                 listen on 127.0.0.1:<N> (overrides HELIX_HTTP_ADDR)
+  --chaos                    enable the chaos layer (random delays, rejections, kills)
+  --warmup-steps <N>         neural router warm-up period
+  --simulate <trace.jsonl>   offline replay of a job trace, prints a report, no server
+  -h, --help                 print this help
+  -V, --version              print the version
+
+Environment:
+  HELIX_HTTP_ADDR     listen address (default 127.0.0.1:8080)
+  HELIX_SIM_JOBS      jobs in the built-in simulation (default 200, 0 to skip)
+  HELIX_SIM_SEED      simulation seed (default 7)
+  HELIX_CONFIG_PATH   JSON RouterConfig file, watched and applied every 5 s
+  HELIX_WEIGHTS_PATH  neural weights file (default helix_weights.json)
+  RUST_LOG            log filter (default info)
+
+Endpoints: /  /metrics  /api/stats  /api/config  /api/stream/decisions
+";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if has_flag(&args, "--help") || has_flag(&args, "-h") {
+            print!("{HELP}");
+            return Ok(());
+        }
+        if has_flag(&args, "--version") || has_flag(&args, "-V") {
+            println!("helixrouter {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive(

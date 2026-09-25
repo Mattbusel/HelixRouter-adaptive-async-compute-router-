@@ -30,6 +30,38 @@ Strategy selection (`choose_strategy`) is a pure, synchronous function; `benches
 
 ---
 
+## Install
+
+### Download (no Rust needed)
+
+The `helixrouter` binary runs the router with its live web dashboard. Grab the file for your system from the [latest release](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest):
+
+| System | File |
+|--------|------|
+| Windows | `helixrouter-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+| macOS (Apple Silicon) | `helixrouter-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `helixrouter-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| Linux (x86_64) | `helixrouter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+
+Unzip it, run `helixrouter` (`helixrouter.exe` on Windows) from a terminal, and open http://127.0.0.1:8080 to watch it route a simulated workload. `helixrouter --help` lists the options. `SHA256SUMS.txt` in the release lets you verify the download.
+
+The binaries are not code-signed. Windows SmartScreen may say "unknown publisher": click **More info**, then **Run anyway**. On macOS, if it is blocked, right-click the file and choose **Open** (or run `xattr -d com.apple.quarantine helixrouter`).
+
+### With Cargo
+
+```bash
+cargo install helixrouter      # the dashboard binary
+cargo add helixrouter          # the library, in your own project
+```
+
+### From source
+
+```bash
+git clone https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-.git
+cd HelixRouter-adaptive-async-compute-router-
+cargo run --release
+```
+
 ## Quick start
 
 ### Prerequisites
