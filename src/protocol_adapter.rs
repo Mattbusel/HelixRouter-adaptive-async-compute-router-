@@ -431,7 +431,7 @@ mod tests {
             path: "/".to_string(),
         };
         let result = adapter().to_normalized(raw, protocol);
-        assert_eq!(result, Err(AdapterError::MalformedInput("invalid UTF-8".to_string())));
+        assert_eq!(result.err(), Some(AdapterError::MalformedInput("invalid UTF-8".to_string())));
     }
 
     #[test]

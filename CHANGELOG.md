@@ -11,6 +11,23 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.0] - 2026-09-25
+
+### Added
+
+- Prebuilt `helixrouter` binaries for Windows, macOS (Apple Silicon and Intel) and Linux attached to every GitHub Release, with `SHA256SUMS.txt`.
+- `--help` and `--version` flags on the binary.
+
+### Fixed
+
+- Library tests compile again (`protocol_adapter` test compared a `Result` whose Ok type has no `PartialEq`).
+
+### Notes
+
+- 1.1.0 (the module rounds after 1.0.2) was never published to crates.io; 1.2.0 includes it.
+
+---
+
 ## [1.0.2] — 2026-03-18
 
 ### Summary
