@@ -405,34 +405,47 @@ impl ServiceBulkheadManager {
             Arc::clone(&*r)
         };
 
-        // Check queue depth.
-        let current_queue = handle.queue_depth.load(Ordering::Acquire);
-        if current_queue >= handle.config.max_queue_size {
-            handle.total_rejected.fetch_add(1, Ordering::Relaxed);
-            return Err(ServiceBulkheadError::QueueFull);
-        }
-
-        handle.queue_depth.fetch_add(1, Ordering::Relaxed);
-
-        let permit_result = tokio::time::timeout(
-            handle.config.timeout,
-            handle.semaphore.acquire(),
-        )
-        .await;
-
-        handle.queue_depth.fetch_sub(1, Ordering::Relaxed);
-
-        let _permit = match permit_result {
-            Ok(Ok(p)) => p,
-            Ok(Err(_)) => {
+        // Fast path: a free permit means the request never queues, so the
+        // queue limit does not apply (with max_queue_size = 0 the old check
+        // rejected every request, even on an idle bulkhead).
+        let _permit = match handle.semaphore.try_acquire() {
+            Ok(p) => p,
+            Err(tokio::sync::TryAcquireError::Closed) => {
                 handle.total_rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(ServiceBulkheadError::AcquireError);
             }
-            Err(_) => {
-                handle.total_rejected.fetch_add(1, Ordering::Relaxed);
-                return Err(ServiceBulkheadError::Timeout);
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                // Slow path: wait in the queue if there is room.
+                let current_queue = handle.queue_depth.load(Ordering::Acquire);
+                if current_queue >= handle.config.max_queue_size {
+                    handle.total_rejected.fetch_add(1, Ordering::Relaxed);
+                    return Err(ServiceBulkheadError::QueueFull);
+                }
+
+                handle.queue_depth.fetch_add(1, Ordering::Relaxed);
+
+                let permit_result = tokio::time::timeout(
+                    handle.config.timeout,
+                    handle.semaphore.acquire(),
+                )
+                .await;
+
+                handle.queue_depth.fetch_sub(1, Ordering::Relaxed);
+
+                match permit_result {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(_)) => {
+                        handle.total_rejected.fetch_add(1, Ordering::Relaxed);
+                        return Err(ServiceBulkheadError::AcquireError);
+                    }
+                    Err(_) => {
+                        handle.total_rejected.fetch_add(1, Ordering::Relaxed);
+                        return Err(ServiceBulkheadError::Timeout);
+                    }
+                }
             }
         };
+
 
         let output = f().await;
         handle.total_executed.fetch_add(1, Ordering::Relaxed);

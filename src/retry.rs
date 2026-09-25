@@ -12,7 +12,7 @@
 //! use std::sync::atomic::{AtomicU32, Ordering};
 //! use std::sync::Arc;
 //!
-//! # tokio_test::block_on(async {
+//! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let policy = RetryPolicy {
 //!     max_attempts: 3,
 //!     initial_backoff: Duration::from_millis(10),

@@ -76,9 +76,12 @@ impl SlidingWindowLimiter {
     }
 
     fn evict(&mut self, now_ms: u64) {
-        let cutoff = now_ms.saturating_sub(self.window_ms);
+        // An entry at time t covers [t, t + window_ms). Computing the cutoff
+        // as `now - window_ms` saturated to 0 wrongly expired entries at t=0
+        // while the window was still open.
         while let Some(front) = self.entries.front() {
-            if front.timestamp_ms <= cutoff {
+            if front.timestamp_ms.saturating_add(self.window_ms) <= now_ms {
+
                 self.entries.pop_front();
             } else {
                 break;

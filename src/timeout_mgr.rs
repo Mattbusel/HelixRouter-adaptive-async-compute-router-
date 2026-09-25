@@ -102,9 +102,12 @@ impl KindState {
         }
         let mut sorted: Vec<u64> = self.latencies.iter().copied().collect();
         sorted.sort_unstable();
-        let idx = ((pct / 100.0) * (sorted.len() - 1) as f64).round() as usize;
-        let clamped = idx.min(sorted.len() - 1);
-        sorted[clamped]
+        // Nearest-rank percentile: the smallest value with at least `pct`%
+        // of samples at or below it.
+        let n = sorted.len();
+        let rank = ((pct / 100.0) * n as f64).ceil() as usize;
+        sorted[rank.clamp(1, n) - 1]
+
     }
 }
 

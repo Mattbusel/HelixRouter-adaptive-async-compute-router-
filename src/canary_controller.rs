@@ -33,7 +33,7 @@
 //! ```rust
 //! use helixrouter::canary_controller::{CanaryConfig, CanaryController, CanaryRoute};
 //!
-//! # tokio_test::block_on(async {
+//! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let cfg = CanaryConfig {
 //!     canary_weight: 0.10,
 //!     stable_endpoint: "stable.svc".into(),

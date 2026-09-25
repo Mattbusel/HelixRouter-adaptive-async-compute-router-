@@ -213,8 +213,14 @@ impl RetryExecutor {
                     if !err.is_retryable() {
                         return Err(E::from(err));
                     }
+                    // `max_attempts` counts executions, not retries: stop
+                    // once that many calls have been made.
+                    if metrics.total_attempts >= self.config.max_attempts {
+                        return Err(E::from(err));
+                    }
                     // Advance retry state; if exhausted, bail out.
                     match state.next_delay_ms() {
+
                         None => {
                             return Err(E::from(err));
                         }

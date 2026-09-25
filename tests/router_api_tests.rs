@@ -63,12 +63,17 @@ async fn test_routing_log_capped_at_50() {
     cfg.spawn_threshold = u64::MAX;
     let router = Router::new(cfg);
 
+    // Distinct inputs per job: identical jobs are answered from the result
+    // cache before routing, and cache hits are not logged as decisions.
     for i in 0..75u64 {
-        router.submit(cheap_job(i)).await;
+        let mut job = cheap_job(i);
+        job.inputs = vec![i, i + 1, i + 2];
+        router.submit(job).await;
     }
 
     let log = router.routing_log().await;
     assert_eq!(log.len(), 50, "routing log must be capped at 50 entries");
+
 }
 
 // ── ema_latency ───────────────────────────────────────────────────────────────

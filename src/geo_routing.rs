@@ -425,7 +425,10 @@ mod tests {
         let client = loc(0.0, 0.0, "us-east");
         // Nearby but different region; farther but same region.
         router.register(ep("near-foreign", 1.0, 1.0, "eu-west", 0.1));
-        router.register(ep("far-local", 45.0, -75.0, "us-east", 0.1));
+        // ~1,570 km away: 7,850 ms estimated, still under the ~786 ms + 10,000 ms
+        // penalty of the nearby foreign endpoint.
+        router.register(ep("far-local", 10.0, -10.0, "us-east", 0.1));
+
         let chosen = router.route_request(&client).unwrap();
         assert_eq!(chosen, "far-local");
     }

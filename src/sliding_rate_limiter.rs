@@ -81,9 +81,11 @@ impl ClientWindow {
 
     /// Purge timestamps older than `now_ms - window_ms`.
     fn evict_old(&mut self, now_ms: u64, window_ms: u64) {
-        let cutoff = now_ms.saturating_sub(window_ms);
+        // A request at `ts` stays in the window while `ts + window_ms > now`.
+        // (`now - window_ms` saturates at 0 and wrongly evicted requests at
+        // ts = 0 before the first window had elapsed.)
         while let Some(&front) = self.timestamps.front() {
-            if front <= cutoff {
+            if front.saturating_add(window_ms) <= now_ms {
                 self.timestamps.pop_front();
             } else {
                 break;
@@ -93,20 +95,18 @@ impl ClientWindow {
 
     /// Number of requests recorded in the current window.
     fn count_in_window(&self, now_ms: u64, window_ms: u64) -> u32 {
-        let cutoff = now_ms.saturating_sub(window_ms);
         self.timestamps
             .iter()
-            .filter(|&&ts| ts > cutoff)
+            .filter(|&&ts| ts.saturating_add(window_ms) > now_ms)
             .count()
             .min(u32::MAX as usize) as u32
     }
 
     /// Number of requests in the burst sub-window `[now - burst_window_ms, now]`.
     fn count_in_burst_window(&self, now_ms: u64, burst_window_ms: u64) -> u32 {
-        let cutoff = now_ms.saturating_sub(burst_window_ms);
         self.timestamps
             .iter()
-            .filter(|&&ts| ts > cutoff)
+            .filter(|&&ts| ts.saturating_add(burst_window_ms) > now_ms)
             .count()
             .min(u32::MAX as usize) as u32
     }
@@ -296,13 +296,16 @@ impl SlidingWindowLimiter {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            // Read the newest timestamp before evicting: a client whose last
+            // request has left the window can still be "fresh".
+            let latest = window.timestamps.back().copied();
             window.evict_old(now_ms, self.config.window_ms);
-            // Keep if there are requests in the window OR if the client is
-            // "fresh" (its newest timestamp is >= stale_cutoff).
-            match window.timestamps.back() {
-                Some(&latest) => latest >= stale_cutoff,
+            // Keep if the client's newest timestamp is >= stale_cutoff.
+            match latest {
+                Some(latest) => latest >= stale_cutoff,
                 None => false,
             }
+
         });
     }
 

@@ -137,6 +137,11 @@ impl LoadTester {
     /// the profile.  The value represents requests that *arrive* in the 1 ms
     /// bucket at `elapsed_ms`.
     pub fn requests_at_time(profile: &LoadProfile, elapsed_ms: u64) -> u64 {
+        (Self::rate_per_ms(profile, elapsed_ms)).round() as u64
+    }
+
+    /// Fractional arrival rate (requests per 1 ms slot) at `elapsed_ms`.
+    fn rate_per_ms(profile: &LoadProfile, elapsed_ms: u64) -> f64 {
         let rps = match profile {
             LoadProfile::ConstantRate(r) => *r,
             LoadProfile::Ramp {
@@ -175,9 +180,8 @@ impl LoadTester {
                 }
             }
         };
-        // Convert per-second rate to requests arriving in this 1 ms slot.
-        // We accumulate fractionally, so round probabilistically.
-        (rps / 1_000.0).round() as u64
+        // Convert the per-second rate to requests arriving in one 1 ms slot.
+        rps / 1_000.0
     }
 
     /// Run a deterministic simulation of a load test.
@@ -194,9 +198,15 @@ impl LoadTester {
         let std_latency = config.timeout_ms as f64 / 6.0;
 
         let mut outcomes: Vec<RequestOutcome> = Vec::new();
+        // Carry the fractional part of the per-ms rate forward so that rates
+        // below 1000 rps (under one request per slot) still produce arrivals.
+        let mut carry = 0.0_f64;
 
         for elapsed_ms in 0..config.total_duration_ms {
-            let n_requests = Self::requests_at_time(&config.profile, elapsed_ms);
+            carry += Self::rate_per_ms(&config.profile, elapsed_ms).max(0.0);
+            let n_requests = carry.floor() as u64;
+            carry -= n_requests as f64;
+
             for _ in 0..n_requests {
                 let raw_latency = mean_latency + std_latency * rng.next_normal();
                 let latency_ms = (raw_latency.round() as i64)

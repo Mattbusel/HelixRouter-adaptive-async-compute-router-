@@ -81,9 +81,13 @@ impl EndpointProfile {
         latencies.sort_unstable();
 
         let n = latencies.len();
-        let p50 = latencies[n / 2];
-        let p95 = latencies[(n as f64 * 0.95) as usize].min(*latencies.last().unwrap_or(&0));
-        let p99 = latencies[(n as f64 * 0.99) as usize].min(*latencies.last().unwrap_or(&0));
+        // Nearest-rank percentile: the smallest value with at least p% of
+        // samples at or below it.
+        let rank = |p: f64| latencies[((p * n as f64).ceil() as usize).clamp(1, n) - 1];
+        let p50 = rank(0.50);
+        let p95 = rank(0.95);
+        let p99 = rank(0.99);
+
 
         let successes = self.samples.iter().filter(|s| s.success).count();
         let success_rate = successes as f64 / n as f64;

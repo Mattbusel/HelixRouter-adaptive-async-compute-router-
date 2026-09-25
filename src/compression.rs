@@ -218,14 +218,16 @@ pub fn lz77_compress(data: &[u8], window: usize, lookahead: usize) -> Vec<u8> {
             }
         }
 
+        // Every back-reference token carries a real `next_char`, so a match
+        // that would run to the end of the input gives up its last byte.
+        if pos + best_len >= data.len() {
+            best_len = best_len.saturating_sub(1);
+        }
+
         if best_len >= 2 {
-            let next = if pos + best_len < data.len() {
-                data[pos + best_len]
-            } else {
-                0
-            };
+            let next = data[pos + best_len];
             emit(&mut out, best_offset, best_len as u8, next, true);
-            pos += best_len + if pos + best_len < data.len() { 1 } else { 0 };
+            pos += best_len + 1;
         } else {
             emit(&mut out, 0, 0, data[pos], false);
             pos += 1;
@@ -392,11 +394,12 @@ mod tests {
 
     #[test]
     fn rle_roundtrip_simple() {
-        let original: Vec<u8> = vec![0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xCC];
+        let original: Vec<u8> = vec![0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xCC];
         let encoded = run_length_encode(&original);
         let decoded = run_length_decode(&encoded);
         assert_eq!(decoded, original);
-        // Should be shorter: 3 pairs instead of 6 bytes.
+        // Should be shorter: 3 (count, byte) pairs = 6 bytes instead of 8.
+
         assert!(encoded.len() < original.len());
     }
 

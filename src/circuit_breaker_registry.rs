@@ -138,9 +138,10 @@ impl CircuitBreaker {
             CircuitState::Closed { .. } => true,
             CircuitState::Open { opened_at } => {
                 if now >= opened_at.saturating_add(self.config.timeout_ms) {
-                    // Transition to HalfOpen.
+                    // Transition to HalfOpen; this call is the first probe.
                     self.half_open_successes = 0;
-                    self.state = CircuitState::HalfOpen { test_count: 0 };
+                    self.state = CircuitState::HalfOpen { test_count: 1 };
+
                     true
                 } else {
                     false
