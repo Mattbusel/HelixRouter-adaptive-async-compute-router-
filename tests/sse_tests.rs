@@ -20,7 +20,10 @@ fn make_job(id: u64, cost: u64) -> Job {
     Job {
         id,
         kind: JobKind::HashMix,
-        inputs: vec![1, 2, 3],
+        // Distinct inputs per job: identical jobs are served from the result
+        // cache before routing and emit no routing decision.
+        inputs: vec![id, id + 1, id + 2],
+
         compute_cost: cost,
         scaling_potential: 0.5,
         latency_budget_ms: 50,

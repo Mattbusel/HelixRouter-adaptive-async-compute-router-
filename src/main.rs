@@ -226,10 +226,44 @@ Environment:
   HELIX_SIM_SEED      simulation seed (default 7)
   HELIX_CONFIG_PATH   JSON RouterConfig file, watched and applied every 5 s
   HELIX_WEIGHTS_PATH  neural weights file (default helix_weights.json)
-  RUST_LOG            log filter (default info)
+  RUST_LOG            log filter (default: startup and summary lines only)
 
-Endpoints: /  /metrics  /api/stats  /api/config  /api/stream/decisions
+Endpoints: /  /metrics  /api/stats  /api/config  /api/stream/decisions  POST /api/simulate
+
+Examples:
+  helixrouter                          dashboard on http://127.0.0.1:8080
+  helixrouter --port 3000              same, on another port
+  HELIX_SIM_JOBS=0 helixrouter         start empty, no simulated jobs
+  curl -X POST 'localhost:8080/api/simulate?jobs=500&rate=100'
+                                       send 500 more simulated jobs over 5 s
 ";
+
+/// Flags that take a value, and flags that stand alone.
+const VALUE_FLAGS: [&str; 3] = ["--port", "--warmup-steps", "--simulate"];
+const BOOL_FLAGS: [&str; 5] = ["--chaos", "--help", "-h", "--version", "-V"];
+
+/// Return an error message for the first unknown flag or missing/invalid value.
+fn check_args(args: &[String]) -> Result<(), String> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if VALUE_FLAGS.contains(&a) {
+            let Some(v) = args.get(i + 1) else {
+                return Err(format!("{a} needs a value"));
+            };
+            if (a == "--port" || a == "--warmup-steps") && v.parse::<u64>().is_err() {
+                return Err(format!("{a} needs a number, got '{v}'"));
+            }
+            i += 2;
+            continue;
+        }
+        if !BOOL_FLAGS.contains(&a) {
+            return Err(format!("unknown option '{a}'"));
+        }
+        i += 1;
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -243,16 +277,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("helixrouter {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        if let Err(msg) = check_args(&args) {
+            eprintln!("helixrouter: {msg}");
+            eprintln!("Run 'helixrouter --help' to see the options.");
+            std::process::exit(2);
+        }
     }
 
+    // Colors only on a terminal, and never when NO_COLOR is set.
+    let use_ansi = {
+        use std::io::IsTerminal as _;
+        std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    };
+
+    // RUST_LOG wins when set. By default keep the terminal readable: startup
+    // and summary lines, but not one warning per shed job (the dashboard
+    // shows those).
+    let filter = if std::env::var_os("RUST_LOG").is_some() {
+        EnvFilter::from_default_env()
+    } else {
+        EnvFilter::new("warn,helixrouter=info,helixrouter::router=error,helixrouter::neural_router=warn")
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive(
-                "info"
-                    .parse()
-                    .map_err(|e: tracing_subscriber::filter::ParseError| e)?,
-            ),
-        )
+        .with_ansi(use_ansi)
+        .with_env_filter(filter)
         .init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -372,15 +420,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let r2 = router.clone();
     tokio::spawn(async move {
         if let Err(e) = web::serve(r2, addr).await {
-            tracing::error!(err = %e, "web server error");
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                eprintln!("\nhelixrouter: {addr} is already in use by another program.");
+                eprintln!("Pick a free port:  helixrouter --port 3000");
+            } else {
+                eprintln!("\nhelixrouter: the web server stopped: {e}");
+            }
+            std::process::exit(1);
         }
     });
 
-    tracing::info!("HelixRouter UI:  http://{}", addr);
-    tracing::info!("Metrics:         http://{}/metrics", addr);
-    tracing::info!("Stats JSON:      http://{}/api/stats", addr);
-    tracing::info!("Config API:      http://{}/api/config", addr);
-    tracing::info!("SSE decisions:   http://{}/api/stream/decisions", addr);
+    println!();
+    println!("  HelixRouter {}", env!("CARGO_PKG_VERSION"));
+    println!("  Dashboard   http://{addr}   <- open this in your browser");
+    println!("  Stats JSON  http://{addr}/api/stats");
+    println!("  Prometheus  http://{addr}/metrics");
+    if sim_jobs > 0 {
+        println!("  Routing {sim_jobs} simulated jobs now; press \"Run 200 jobs\" on the dashboard for more.");
+    } else {
+        println!("  No simulated jobs (HELIX_SIM_JOBS=0); press \"Run 200 jobs\" on the dashboard to send some.");
+    }
+    println!("  Ctrl+C to stop.");
+    println!();
+
 
     // Simulation
     if sim_jobs > 0 {

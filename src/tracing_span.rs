@@ -143,7 +143,10 @@ impl TraceStore {
             return None;
         }
         durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = ((durations.len() as f64 * 0.99) as usize).min(durations.len() - 1);
+        // Nearest-rank percentile: the smallest value with at least 99% of
+        // spans at or below it.
+        let n = durations.len();
+        let idx = ((n as f64 * 0.99).ceil() as usize).clamp(1, n) - 1;
         Some(durations[idx])
     }
 
@@ -512,7 +515,8 @@ mod tests {
             });
         }
         let p99 = store.p99_latency_ms("bench").unwrap();
-        // p99 index = floor(100 * 0.99) = 98, value = 99.0
+        // Nearest rank: ceil(100 * 0.99) = 99th value = 99.0
+
         assert!((p99 - 99.0).abs() < 1e-6, "p99={p99}");
     }
 

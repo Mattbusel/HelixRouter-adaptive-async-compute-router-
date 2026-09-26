@@ -197,7 +197,10 @@ impl ResponseCache {
     /// On a hit the entry's `hit_count` is incremented.
     pub fn get(&self, key: &CacheKey) -> Option<CacheEntry> {
         let hash = key.hash();
-        let mut entry_ref = self.map.get_mut(&hash)?;
+        let Some(mut entry_ref) = self.map.get_mut(&hash) else {
+            self.total_misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         if entry_ref.is_expired() {
             drop(entry_ref);
             self.map.remove(&hash);
@@ -388,7 +391,9 @@ mod tests {
         cache.get(&key("/d"));
         cache.get(&key("/d"));
         let entry = cache.get(&key("/d")).unwrap();
-        assert_eq!(entry.hit_count, 2);
+        // Three hits, and the returned snapshot includes the third.
+        assert_eq!(entry.hit_count, 3);
+
     }
 
     #[test]

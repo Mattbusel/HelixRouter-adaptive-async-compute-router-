@@ -1358,7 +1358,9 @@ impl DynamicAutoscaler {
         // Enforce cooldown.
         if let Some(last) = self.last_scaled_ms {
             if now_ms.saturating_sub(last) < policy.cooldown_ms {
-                return ScalingDecision::CooldownActive;
+                let decision = ScalingDecision::CooldownActive;
+                self.record_scaling_event(&decision, now_ms);
+                return decision;
             }
         }
 
@@ -1503,9 +1505,11 @@ mod dynamic_autoscaler_tests {
     }
 
     fn medium_metrics(instances: u32) -> ScalingMetrics {
+        // Composite signal: 0.4*(250/500) + 0.4*(500/1000) + 0.2*0.02 = 0.404,
+        // between the 0.30 scale-down and 0.70 scale-up thresholds.
         ScalingMetrics {
-            queue_depth: 100,
-            avg_latency_ms: 200,
+            queue_depth: 250,
+            avg_latency_ms: 500,
             error_rate: 0.02,
             cpu_utilization: 0.50,
             active_instances: instances,

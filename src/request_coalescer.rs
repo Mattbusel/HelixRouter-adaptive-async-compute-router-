@@ -143,9 +143,10 @@ impl RequestCoalescer {
                 // Lost the race — become a joiner.
                 self.counters.coalesced_requests.fetch_add(1, Ordering::Relaxed);
                 // undo the cache_miss we haven't counted yet
-                let sender = Arc::clone(e.get());
+                // Subscribe while still holding the entry so the leader cannot
+                // remove it and broadcast before we are listening.
+                let mut rx = e.get().subscribe();
                 drop(e);
-                let mut rx = sender.subscribe();
                 return match rx.recv().await {
                     Ok(Ok(v)) => Ok(v),
                     Ok(Err(e)) => Err(CoalesceError::FetchFailed(e)),
@@ -163,11 +164,14 @@ impl RequestCoalescer {
         // Run the fetch.
         let result = fetch_fn().await;
 
-        // Broadcast to all waiters (including any that subscribed after us).
-        let _ = tx.send(result.clone());
-
-        // Remove the in-flight entry so future requests start fresh.
+        // Remove the in-flight entry first: joiners subscribe while holding a
+        // map reference, so once removal returns every joiner is subscribed
+        // and will see the broadcast below. (Sending first let a late joiner
+        // subscribe after the send and get RecvError.)
         self.in_flight.remove(key);
+
+        // Broadcast to all waiters.
+        let _ = tx.send(result.clone());
 
         result.map_err(CoalesceError::FetchFailed)
     }
@@ -197,43 +201,39 @@ mod tests {
         assert_eq!(result.unwrap(), "value1");
     }
 
-    #[tokio::test]
+    // Paused time makes the interleaving deterministic: h1 becomes the leader
+    // at t=0 and fetches for 50 ms; h2 arrives at t=5 ms and must join it.
+    // (The old version made both fetch closures meet at a Barrier, which can
+    // never complete when coalescing works, since h2's closure never runs.)
+    #[tokio::test(start_paused = true)]
     async fn two_concurrent_requests_same_key_get_same_result() {
         let coalescer = Arc::new(RequestCoalescer::new());
         let c1 = Arc::clone(&coalescer);
         let c2 = Arc::clone(&coalescer);
 
-        // Use a barrier so both tasks are definitely concurrent.
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let b1 = Arc::clone(&barrier);
-        let b2 = Arc::clone(&barrier);
-
         let h1 = tokio::spawn(async move {
             c1.get_or_fetch("shared", || async move {
-                b1.wait().await;
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 Ok("shared-value".to_string())
             })
             .await
         });
 
         let h2 = tokio::spawn(async move {
-            // Small sleep to let h1 register first.
             tokio::time::sleep(Duration::from_millis(5)).await;
-            c2.get_or_fetch("shared", || async move {
-                b2.wait().await;
-                Ok("different-value".to_string())
-            })
-            .await
+            c2.get_or_fetch("shared", || async move { Ok("different-value".to_string()) })
+                .await
         });
 
         let (r1, r2) = tokio::join!(h1, h2);
-        let r1 = r1.unwrap().unwrap();
-        let r2 = r2.unwrap().unwrap();
-        // Both should have gotten a value (they may race, but each gets a result).
-        assert!(!r1.is_empty());
-        assert!(!r2.is_empty());
+        assert_eq!(r1.unwrap().unwrap(), "shared-value");
+        assert_eq!(r2.unwrap().unwrap(), "shared-value");
+        let stats = coalescer.stats();
+        assert_eq!(stats.cache_misses, 1, "only one fetch should run");
+        assert_eq!(stats.coalesced_requests, 1);
+        assert_eq!(coalescer.in_flight_count(), 0);
     }
+
 
     #[tokio::test]
     async fn independent_keys_fetch_separately() {
