@@ -1,18 +1,101 @@
 # HelixRouter
 
-[![CI](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/helixrouter.svg)](https://crates.io/crates/helixrouter)
-[![docs.rs](https://docs.rs/helixrouter/badge.svg)](https://docs.rs/helixrouter)
-[![Rust Version](https://img.shields.io/badge/rust-1.81%2B-orange.svg)](https://www.rust-lang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+**Decides, for every job your Rust service runs, whether to do it right away, give it its own task, queue it on a bounded CPU pool, batch it, or drop it, so cheap work stays fast and a flood of heavy work cannot take the service down.**
 
-An adaptive job router for Tokio: for every job it decides whether to run it inline, spawn it, send it to a bounded CPU pool, batch it, or drop it, based on the job's cost and latency budget and on live system pressure.
+<p>
+  <a href="https://crates.io/crates/helixrouter"><img alt="crates.io" src="https://img.shields.io/crates/v/helixrouter.svg"></a>
+  <a href="https://docs.rs/helixrouter"><img alt="docs.rs" src="https://img.shields.io/docsrs/helixrouter"></a>
+  <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/HelixRouter-adaptive-async-compute-router-"></a>
+  <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+</p>
 
-Most async services push all work through one executor, so under load cheap requests queue behind expensive ones and everything slows together. HelixRouter makes a per-job decision instead, learns from observed latencies (EMA and P50/P95/P99 per strategy, an epsilon-greedy `NeuralRouter`, an OLS autoscaler forecast) and sheds load before queues saturate. It ships as a library (`helixrouter` on crates.io) and as a binary with a live web dashboard, Prometheus metrics and an SSE feed of routing decisions.
+<img alt="Recording of the HelixRouter dashboard: it starts empty, Run 200 jobs sends a steady burst and the strategy mix fills in (mostly batch, some cpu_pool, inline and spawn), then Overload sends 2000 jobs at once, pressure jumps and the router starts dropping jobs, shown in red in the donut and the live decision feed." src="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard.gif" width="100%">
 
-![HelixRouter dashboard](dashboard.png)
+<sub>The built-in dashboard, recorded with Playwright against the release binary: <b>Run 200 jobs</b>, then <b>Overload</b> (2000 jobs at once). Nothing is mocked; the numbers are what the router did on that run.</sub>
 
-## What is adaptive async compute routing?
+It is a Rust library for Tokio services (`helixrouter` on crates.io) and a small program, `helixrouter`, that runs the router with that live dashboard so you can see how it behaves before you wire it into your own code.
+
+## Install
+
+| Where | Command |
+|---|---|
+| **Windows** (PowerShell) | `irm https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/install.ps1 \| iex` |
+| **macOS / Linux** | `curl -fsSL https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/install.sh \| sh` |
+| Homebrew (macOS, Linux) | `brew install mattbusel/tap/helixrouter` |
+| Scoop (Windows) | `scoop bucket add mattbusel https://github.com/Mattbusel/scoop-bucket; scoop install mattbusel/helixrouter` |
+| Rust, prebuilt | `cargo binstall helixrouter` |
+| Rust, from source | `cargo install helixrouter` |
+| As a library | `cargo add helixrouter` |
+| By hand | Download a zip or tarball from [Releases](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest) (Windows x64, macOS Apple Silicon and Intel, Linux x64) |
+
+The install scripts check the download against the release's `SHA256SUMS.txt`. The binaries are not code-signed: Windows SmartScreen may say "unknown publisher" (More info, then Run anyway); on macOS, right-click and choose Open.
+
+## Use it in 3 steps
+
+**1. Start it:**
+
+```bash
+helixrouter
+```
+
+```text
+  HelixRouter 1.2.1
+  Dashboard   http://127.0.0.1:8080   <- open this in your browser
+  Stats JSON  http://127.0.0.1:8080/api/stats
+  Prometheus  http://127.0.0.1:8080/metrics
+  Routing 200 simulated jobs now; press "Run 200 jobs" on the dashboard for more.
+  Ctrl+C to stop.
+```
+
+**2. Open http://127.0.0.1:8080.** Press **Run 200 jobs** for a steady burst, then **Overload** to send 2000 at once and watch pressure rise and jobs get batched and dropped.
+
+**3. Use it in your own service:**
+
+```rust
+use helixrouter::{config::RouterConfig, router::Router, types::{Job, JobKind}};
+
+#[tokio::main]
+async fn main() {
+    let router = Router::new(RouterConfig::default());
+    let job = Job {
+        id: 1,
+        kind: JobKind::HashMix,
+        inputs: vec![42, 7],
+        compute_cost: 1_000,       // how expensive you expect it to be
+        scaling_potential: 0.5,    // 0..1: how well it batches or parallelizes
+        latency_budget_ms: 50,
+        deadline_ms: 0,            // 0 = no hard deadline
+    };
+    let output = router.submit(job).await; // None if the job was dropped
+    println!("{output:?}");
+}
+```
+
+`helixrouter --help` lists every option; `--port 3000` picks another port, and `HELIX_SIM_JOBS=0 helixrouter` starts with no simulated jobs. The same bursts work from a script: `curl -X POST 'localhost:8080/api/simulate?jobs=2000&rate=100000'`.
+
+## Results
+
+One run of the release binary on this Windows PC (2026-09-25): the 200 startup jobs, then one **Overload** burst of 2000 jobs at once, read back from `GET /api/stats`:
+
+| Strategy | Jobs | p50 | p95 | p99 | What it means |
+|---|---:|---:|---:|---:|---|
+| batch | 1942 | 38 ms | 45 ms | 60 ms | Grouped with other jobs and run together |
+| cpu_pool | 56 | 0 ms | 2 ms | 2 ms | Heavy, did not batch well: bounded worker pool |
+| inline | 49 | 0 ms | 0 ms | 0 ms | Cheap: ran immediately on the caller |
+| spawn | 49 | 0 ms | 0 ms | 0 ms | Medium: its own Tokio task |
+| **drop** | **104** | | | | Shed because the CPU pool was saturated |
+
+2,096 completed and 104 dropped (4.7%); pressure read 52% three seconds after the burst. With a steady 40 jobs per second (**Run 200 jobs**) nothing is dropped. Exact numbers change from run to run and machine to machine.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard-light.png">
+  <img alt="The HelixRouter dashboard after a Run 200 jobs burst: jobs completed, system pressure, adaptive threshold, strategy mix donut, latency by strategy, per job kind table, SLA summary, epsilon chart and the live routing decisions feed" src="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard-dark.png" width="100%">
+</picture>
+
+The dashboard follows your system's light or dark setting and works on a phone. Everything it shows is also JSON at `/api/stats`, Prometheus text at `/metrics`, and a live Server-Sent Events stream of every routing decision at `/api/stream/decisions`.
+
+## How it decides
 
 Traditional async systems dispatch all work uniformly. Under load every task slows together and the only mitigation is application-layer shedding, long after queues have saturated.
 
@@ -28,97 +111,17 @@ HelixRouter asks, before executing any job: "what is the cheapest execution stra
 
 Strategy selection (`choose_strategy`) is a pure, synchronous function; `benches/routing.rs` benchmarks it. The `NeuralRouter` refines these heuristics over time from observed outcomes.
 
----
+## Dashboard
 
-## Install
+`helixrouter` serves the dashboard at `GET /`. It is one embedded HTML page with no external dependencies, refreshing every second and streaming decisions over SSE.
 
-### Download (no Rust needed)
-
-The `helixrouter` binary runs the router with its live web dashboard. Grab the file for your system from the [latest release](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest):
-
-| System | File |
-|--------|------|
-| Windows | `helixrouter-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
-| macOS (Apple Silicon) | `helixrouter-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
-| macOS (Intel) | `helixrouter-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
-| Linux (x86_64) | `helixrouter-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
-
-Unzip it, run `helixrouter` (`helixrouter.exe` on Windows) from a terminal, and open http://127.0.0.1:8080 to watch it route a simulated workload. `helixrouter --help` lists the options. `SHA256SUMS.txt` in the release lets you verify the download.
-
-The binaries are not code-signed. Windows SmartScreen may say "unknown publisher": click **More info**, then **Run anyway**. On macOS, if it is blocked, right-click the file and choose **Open** (or run `xattr -d com.apple.quarantine helixrouter`).
-
-### With Cargo
-
-```bash
-cargo install helixrouter      # the dashboard binary
-cargo add helixrouter          # the library, in your own project
-```
-
-### From source
-
-```bash
-git clone https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-.git
-cd HelixRouter-adaptive-async-compute-router-
-cargo run --release
-```
-
-## Quick start
-
-### Prerequisites
-
-- Rust 1.81+ (install via [rustup](https://rustup.rs))
-- No external system dependencies for the default build
-
-### Build and run
-
-```bash
-git clone https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-.git
-cd HelixRouter-adaptive-async-compute-router-
-
-# Add as a library
-cargo add helixrouter
-
-# Run all tests
-cargo test
-
-# Run benchmarks
-cargo bench
-```
-
-### Minimal library usage
-
-```rust
-use helixrouter::{config::RouterConfig, router::Router, types::{Job, JobKind}};
-
-#[tokio::main]
-async fn main() {
-    let router = Router::new(RouterConfig::default());
-    let job = Job {
-        id: 1,
-        kind: JobKind::HashMix,
-        inputs: vec![42],
-        compute_cost: 1_000,
-        scaling_potential: 0.5,
-        latency_budget_ms: 50,
-        ..Default::default()
-    };
-    let output = router.submit(job).await;
-    println!("{output:?}");
-}
-```
-
-### With the web dashboard
-
-```bash
-cargo run --release                  # serves on 127.0.0.1:8080 (or HELIX_HTTP_ADDR) and runs a job simulation
-cargo run --release -- --port 3000   # choose the port
-# Open http://localhost:3000 for the live dashboard
-# GET http://localhost:3000/metrics                -> Prometheus exposition
-# GET http://localhost:3000/api/stats              -> JSON stats
-# GET http://localhost:3000/api/stream/decisions   -> Server-Sent Events stream of routing decisions
-```
-
----
+- **Jobs completed / dropped**, **system pressure** (0 to 100%), and the current **adaptive threshold** (`spawn_threshold`).
+- **Strategy mix**: a donut of inline / spawn / cpu_pool / batch / drop with counts and shares.
+- **Latency by strategy**: count, average, EMA and p95 per strategy.
+- **Per job kind**: jobs routed and SLA misses for each kind, plus deadline and SLA totals.
+- **Neural router exploration**: the epsilon of the learned router as it decays.
+- **Live routing decisions**: the last 50 decisions, newest first.
+- **Run 200 jobs** and **Overload** buttons, which call `POST /api/simulate?jobs=N&rate=R` (feature `simulation`, on by default).
 
 ## Architecture
 
@@ -155,7 +158,45 @@ cargo run --release -- --port 3000   # choose the port
 
 Many of the modules described below (adaptive circuit breaker, priority load balancer, WFQ, DAG executor, deadline scheduler, cost router, bandit, dedup, retry, and others) are standalone building blocks in the same crate that you compose around `Router`; they are not all wired into `Router::submit` itself.
 
----
+<details>
+<summary><b>Configuration reference</b> (RouterConfig fields, environment variables, flags)</summary>
+
+`RouterConfig` (in `src/config.rs`) holds the routing thresholds. The main fields and their defaults:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `inline_threshold` | `8_000` | Jobs with `compute_cost` at or below this run inline |
+| `spawn_threshold` | `60_000` | Jobs at or below this are spawned as Tokio tasks; above go to the CPU pool |
+| `cpu_parallelism` | `8` | Concurrent CPU-pool workers |
+| `cpu_queue_cap` | `512` | CPU-pool queue depth |
+| `backpressure_busy_threshold` | `7` | Busy CPU workers above which jobs are batched or dropped |
+| `batch_max_size` / `batch_max_delay_ms` | `8` / `10` | Batch flush size and maximum wait |
+| `ema_alpha` | `0.15` | Latency EMA smoothing factor |
+| `adaptive_step`, `cpu_p95_budget_ms`, `adaptive_p95_threshold_factor` | `0.10`, `200`, `1.5` | Raise `spawn_threshold` when CpuPool P95 exceeds budget times factor |
+| `sla`, `warmup_steps` | | Per-job-kind latency SLAs and neural-router warm-up |
+
+At runtime the config can be read and changed over HTTP (`GET`, `POST` and `PATCH /api/config`), or hot-reloaded from a JSON file.
+
+The binary reads these environment variables and flags:
+
+| Setting | Purpose |
+|---|---|
+| `--port <N>` or `HELIX_HTTP_ADDR` | Listen address (default `127.0.0.1:8080`) |
+| `HELIX_CONFIG_PATH` | JSON `RouterConfig` file, watched and applied every 5 s |
+| `HELIX_WEIGHTS_PATH` | Where neural-router weights are saved and loaded (default `helix_weights.json`) |
+| `HELIX_SIM_JOBS`, `HELIX_SIM_SEED` | Size and seed of the built-in job simulation (defaults 200 and 7) |
+| `--chaos` | Enable the chaos layer (random delays, rejections, kills) |
+| `--simulate <trace.jsonl>` | Offline simulator over a recorded trace, no HTTP server (`--warmup-steps` to tune) |
+| `RUST_LOG` | Log filter |
+
+</details>
+
+## Module guides
+
+The crate has many more building blocks than `Router` itself. Each guide below is collapsed; [docs.rs](https://docs.rs/helixrouter) is the API reference.
+
+<details>
+<summary><b>Show all module guides</b> (22 sections)</summary>
 
 ## Weighted Fair Queuing
 
@@ -186,8 +227,6 @@ let batch = sched.drain_round(); // returns jobs proportional to weights
 let stats = sched.stats();
 println!("total dequeued: {}", stats.total_dequeued);
 ```
-
----
 
 ## Health Dashboard
 
@@ -221,8 +260,6 @@ println!("overall: {:?}", report.overall);
 let shared = Arc::new(tokio::sync::RwLock::new(dashboard));
 let app = health_routes(shared);
 ```
-
----
 
 ## Adaptive Circuit Breaker Guide
 
@@ -268,8 +305,6 @@ println!("state: {:?}", cb.state());
 | `Open` | cooldown elapsed (checked on `permit()`) | `HalfOpen` (load 10%) |
 | `HalfOpen` | success rate >= 80% AND load_pct >= 90% | `Closed` |
 | `HalfOpen` | `record_failure()` | `Open` (timeout × 1.5) |
-
----
 
 ## Priority Load Balancer Guide
 
@@ -338,8 +373,6 @@ lb.update_worker("worker-gpu-1", updated);
 | `Normal` | 1 | Standard request handling |
 | `High` | 2 | User-facing latency-sensitive work |
 | `Critical` | 3 | Health checks, circuit-breaker probes, SLO-critical paths |
-
----
 
 ## Predictive Autoscaler v2 (Holt-Winters)
 
@@ -416,8 +449,6 @@ let rec = scaler.recommend(8 /* current pool size */);
 println!("Action: {:?}, target: {}", rec.action, rec.target_pool_size);
 ```
 
----
-
 ## Job Affinity Routing
 
 The `affinity` module adds **stateful sticky routing**: jobs from the same logical group are steered toward the same execution strategy, leveraging warm CPU caches and branch predictor state from prior runs.
@@ -479,8 +510,6 @@ if let Some(strategy) = affinity.lookup(gid) {
 }
 ```
 
----
-
 ## Performance Tuning Guide
 
 ### Strategy thresholds
@@ -503,40 +532,6 @@ Enable affinity routing when you have long-running sessions that submit the same
 - **gamma (seasonality)**: raise when you have very regular per-minute cycles (e.g. cron-driven work).
 - **jobs_per_worker**: calibrate empirically by measuring steady-state throughput per worker.
 
----
-
-## Configuration Reference
-
-`RouterConfig` (in `src/config.rs`) holds the routing thresholds. The main fields and their defaults:
-
-| Field | Default | Meaning |
-|---|---|---|
-| `inline_threshold` | `8_000` | Jobs with `compute_cost` at or below this run inline |
-| `spawn_threshold` | `60_000` | Jobs at or below this are spawned as Tokio tasks; above go to the CPU pool |
-| `cpu_parallelism` | `8` | Concurrent CPU-pool workers |
-| `cpu_queue_cap` | `512` | CPU-pool queue depth |
-| `backpressure_busy_threshold` | `7` | Busy CPU workers above which jobs are batched or dropped |
-| `batch_max_size` / `batch_max_delay_ms` | `8` / `10` | Batch flush size and maximum wait |
-| `ema_alpha` | `0.15` | Latency EMA smoothing factor |
-| `adaptive_step`, `cpu_p95_budget_ms`, `adaptive_p95_threshold_factor` | `0.10`, `200`, `1.5` | Raise `spawn_threshold` when CpuPool P95 exceeds budget times factor |
-| `sla`, `warmup_steps` | | Per-job-kind latency SLAs and neural-router warm-up |
-
-At runtime the config can be read and changed over HTTP (`GET`, `POST` and `PATCH /api/config`), or hot-reloaded from a JSON file.
-
-The binary reads these environment variables and flags:
-
-| Setting | Purpose |
-|---|---|
-| `--port <N>` or `HELIX_HTTP_ADDR` | Listen address (default `127.0.0.1:8080`) |
-| `HELIX_CONFIG_PATH` | JSON `RouterConfig` file, watched and applied every 5 s |
-| `HELIX_WEIGHTS_PATH` | Where neural-router weights are saved and loaded (default `helix_weights.json`) |
-| `HELIX_SIM_JOBS`, `HELIX_SIM_SEED` | Size and seed of the built-in job simulation (defaults 200 and 7) |
-| `--chaos` | Enable the chaos layer (random delays, rejections, kills) |
-| `--simulate <trace.jsonl>` | Offline simulator over a recorded trace, no HTTP server (`--warmup-steps` to tune) |
-| `RUST_LOG` | Log filter |
-
----
-
 ## Why HelixRouter?
 
 Most async Rust services dispatch all work through a single executor queue. This is simple but has critical failure modes under load:
@@ -557,8 +552,6 @@ Most async Rust services dispatch all work through a single executor queue. This
 - **DAG-native workloads**: complex pipelines where job B depends on job A's output are expressed as a `JobDag` and executed with automatic topological parallelism. No custom DAG scheduler required.
 - **Hard deadline enforcement**: `DeadlineScheduler` ensures time-sensitive work is never silently delayed; missed deadlines emit observable `DeadlineMissed` SSE events rather than completing late and silently blowing SLOs.
 - **Cost-aware budget control**: `CostRouter` prevents expensive `MonteCarloRisk` jobs from exhausting CPU budget during peak hours while cheap `HashMix` jobs always get inline treatment.
-
----
 
 ## Job DAG Execution
 
@@ -656,8 +649,6 @@ const { nodes, edges } = await (await fetch("/api/dag")).json();
 // nodes: [{ id, job_id, kind, compute_cost, dep_count, is_leaf, status }, ...]
 // edges: [{ source, target }, ...]
 ```
-
----
 
 ## Deadline-Aware Scheduling
 
@@ -777,8 +768,6 @@ helix_deadline_miss_rate 0.150000
 
 Use `deadline::deadline_prometheus_text(&scheduler)` to generate this and append
 it to your `/metrics` response.
-
----
 
 ## Cost-Based Routing
 
@@ -909,8 +898,6 @@ helix_cost_submitted_total 1024
 
 Use `cost_router::cost_prometheus_text(&cost_router).await` and append to `/metrics`.
 
----
-
 ## Per-Job Cost Model
 
 The `cost_model` module tracks observed execution latency per `(job_kind, strategy)` pair and
@@ -966,8 +953,6 @@ println!("predicted latency: {predicted_ns} ns");
 let best = model.cost_adjusted_strategy("hash_mix", 0.3);
 println!("best strategy: {best:?}");
 ```
-
----
 
 ## Predictive Downstream Backpressure
 
@@ -1048,8 +1033,6 @@ if monitor.should_shed() {
 }
 ```
 
----
-
 ## Distributed Mode (NATS)
 
 The `distributed_router` module wraps the local `Router` with NATS-based coordination so
@@ -1127,43 +1110,6 @@ async fn example() {
 | Variable | Default | Description |
 |----------|---------|-------------|
 | NATS connection URL | `nats://127.0.0.1:4222` | Set in `DistributedRouterConfig::nats_url` |
-
----
-
-## Dashboard
-
-The live dark dashboard is served at `GET /` and auto-updates every second via SSE.
-
-### What it shows
-
-- **Strategy donut chart**: real-time distribution of Inline / Spawn / CpuPool / Batch / Drop decisions
-- **Latency table**: P50 / P95 / P99 / EMA per strategy, updated as jobs complete
-- **Pressure gauge**: composite score (0–1) including CPU saturation, queue fill, drop-rate EMA, and downstream telemetry
-- **Neural router panel**: epsilon (exploration rate), sample count, average reward, per-strategy weight heatmap
-- **Routing decision feed**: last 50 decisions streamed in real time via SSE
-- **Autoscaler recommendations**: OLS forecast of load 30 s ahead; suggested `cpu_parallelism` / `cpu_queue_cap` adjustments
-
-The dashboard uses zero external JavaScript dependencies, just vanilla JS and CSS, embedded directly in the binary.
-
----
-
-## Contributing
-
-1. Fork the repository and create a feature branch from `main`.
-2. Follow the existing module structure: one `pub mod` per file, doc-comment every public item.
-3. All `clippy::unwrap_used` and `clippy::expect_used` are denied in library code, use `?` and `Result`/`Option` propagation. Test modules are exempted via `#[allow]`.
-4. Run the full test + lint suite before opening a PR:
-   ```bash
-   cargo test --all-features
-   cargo clippy --all-features -- -D warnings
-   cargo fmt --check
-   ```
-5. Add or update tests in the `#[cfg(test)]` block of the relevant module. Integration tests go in `tests/`.
-6. Open a pull request with a clear title and a description of the change and its motivation.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
-
----
 
 ## UCB1 Bandit Routing
 
@@ -1247,8 +1193,6 @@ let reward = compute_reward(&result);
 bandit.lock().await.update(strategy, reward);
 ```
 
----
-
 ## Distributed Tracing
 
 `tracing_span` provides lightweight in-process tracing without external dependencies.
@@ -1328,8 +1272,6 @@ drop(child);
 drop(root);
 ```
 
----
-
 ## Job Deduplication
 
 HelixRouter includes hash-based in-flight job deduplication in `src/dedup.rs`.
@@ -1382,8 +1324,6 @@ match dedup.submit(job) {
     }
 }
 ```
-
----
 
 ## SLA Priority Queue
 
@@ -1447,8 +1387,6 @@ if let Some(sla_job) = queue.pop() {
 let expired = queue.expired();
 ```
 
----
-
 ## Flow Control
 
 The `flow_control` module provides a token-bucket admission gate at the router level, operating independently of per-model rate limits.
@@ -1496,8 +1434,6 @@ println!("admitted={} throttled={} rejected={}", stats.admitted, stats.throttled
 
 Stats are also available via `GET /api/flow/stats`.
 
----
-
 ## Result Cache
 
 The `result_cache` module caches completed job results so identical re-submitted jobs get instant responses without re-executing the compute kernel.
@@ -1536,8 +1472,6 @@ let mut cache = ResultCache::new(CacheConfig {
   "hit_rate": 0.6
 }
 ```
-
----
 
 ## Adaptive Timeouts
 
@@ -1619,8 +1553,6 @@ println!("{:#?}", s.get("hash_mix"));
   }
 }
 ```
-
----
 
 ## Retry with Backoff
 
@@ -1714,3 +1646,25 @@ println!("Failures:  {}", stats.total_failures);
 println!("Avg attempts per job: {:.2}", stats.avg_attempts_per_job);
 # });
 ```
+
+</details>
+
+## Contributing
+
+1. Fork the repository and create a feature branch from `main`.
+2. Follow the existing module structure: one `pub mod` per file, doc-comment every public item.
+3. All `clippy::unwrap_used` and `clippy::expect_used` are denied in library code, use `?` and `Result`/`Option` propagation. Test modules are exempted via `#[allow]`.
+4. Run the full test + lint suite before opening a PR:
+   ```bash
+   cargo test --all-features
+   cargo clippy --all-features -- -D warnings
+   cargo fmt --check
+   ```
+5. Add or update tests in the `#[cfg(test)]` block of the relevant module. Integration tests go in `tests/`.
+6. Open a pull request with a clear title and a description of the change and its motivation.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
+
+## License
+
+MIT. See [LICENSE](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/LICENSE).

@@ -128,7 +128,10 @@ pub async fn serve_with_all_traced(
         .route("/api/sla/stats", get(get_sla_stats))
         .route("/api/result-cache/stats", get(get_result_cache_stats))
         .route("/api/flow/stats", get(get_flow_stats))
-        .route("/api/timeouts/stats", get(get_timeout_stats))
+        .route("/api/timeouts/stats", get(get_timeout_stats));
+    #[cfg(feature = "simulation")]
+    let app = app.route("/api/simulate", post(post_simulate));
+    let app = app
         .with_state(shared)
         .layer(axum::Extension(downstream))
         .layer(axum::Extension(explainer))
@@ -142,290 +145,326 @@ pub async fn serve_with_all_traced(
 
 // ===== UI =====
 
-/// Embedded HTML source for the dark live-routing dashboard served at `GET /`.
+/// Embedded HTML source for the live-routing dashboard served at `GET /`.
 ///
-/// Single-file, no external dependencies. Vanilla JS SSE client polls
-/// `/api/stream/decisions` and renders a strategy donut, latency table, and
-/// pressure gauge in real time.
-pub const INDEX_HTML: &str = r#"<!doctype html>
+/// Single-file, no external dependencies, dark and light themes (follows the
+/// system setting). Vanilla JS: an SSE client on `/api/stream/decisions`, a
+/// 1 s poll of `/api/stats`, and a "Run 200 jobs" button that calls
+/// `POST /api/simulate`.
+pub const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>HelixRouter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="dark light"/>
+  <title>HelixRouter dashboard</title>
   <style>
+    :root{
+      --bg:#0b0f14;--card:#0f1720;--line:#1f2a37;--ink:#e6edf3;--muted:#9aa4b2;--sunk:#060a0f;--accent:#7dd3fc;
+      --inline:#34d399;--spawn:#60a5fa;--cpu_pool:#a78bfa;--batch:#fbbf24;--drop:#f87171;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;
+      --btn:#7dd3fc;--btn-ink:#06121c;
+    }
+    @media (prefers-color-scheme: light){
+      :root{
+        --bg:#f6f7f9;--card:#ffffff;--line:#dfe3e8;--ink:#101419;--muted:#5b6573;--sunk:#f0f2f5;--accent:#0369a1;
+        --inline:#059669;--spawn:#2563eb;--cpu_pool:#7c3aed;--batch:#b45309;--drop:#dc2626;--ok:#059669;--warn:#b45309;--bad:#dc2626;
+        --btn:#0369a1;--btn-ink:#ffffff;
+      }
+    }
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b0f14;color:#e6edf3;padding:16px}
-    h1{font-size:1.2rem;color:#7dd3fc;margin-bottom:12px}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px}
-    .card{background:#0f1720;border:1px solid #1f2a37;border-radius:10px;padding:14px}
-    .card h3{font-size:.8rem;color:#9aa4b2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
-    .big{font-size:2rem;font-weight:700;color:#e6edf3}
-    .muted{color:#9aa4b2;font-size:.8rem}
+    body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg);color:var(--ink);padding:16px;max-width:1280px;margin:0 auto}
+    header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-bottom:6px}
+    h1{font-size:1.2rem;color:var(--accent)}
+    h1 span{color:var(--muted);font-weight:400}
+    .pill{display:inline-flex;align-items:center;gap:6px;font-size:.72rem;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+    .pill i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+    .pill.live i{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+    .pill.down i{background:var(--bad)}
+    .spacer{flex:1}
+    button.run{font:600 .8rem ui-monospace,monospace;background:var(--btn);color:var(--btn-ink);border:0;border-radius:8px;padding:8px 14px;cursor:pointer}
+    button.run.alt{background:transparent;color:var(--bad);border:1px solid var(--bad)}
+    button.run:disabled{opacity:.6;cursor:progress}
+    button.run:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+    .intro{color:var(--muted);font-size:.8rem;line-height:1.5;margin-bottom:14px;max-width:900px}
+    .intro b{font-weight:600}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-bottom:12px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+    .card h3{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;font-weight:600}
+    .big{font-size:2rem;font-weight:700;color:var(--ink)}
+    .muted{color:var(--muted);font-size:.8rem}
+    .hint{color:var(--muted);font-size:.72rem;margin-top:6px;line-height:1.4}
+    .scroll{overflow-x:auto}
     table{width:100%;border-collapse:collapse;font-size:.8rem}
-    th{color:#9aa4b2;text-align:left;padding:4px 6px;border-bottom:1px solid #1f2a37}
-    td{padding:4px 6px;border-bottom:1px solid #0f1720}
-    .bar-wrap{background:#1f2a37;border-radius:4px;height:8px;overflow:hidden;margin-top:2px}
+    th{color:var(--muted);text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap}
+    td{padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+    td.empty{color:var(--muted);white-space:normal;padding:10px 6px}
+    .bar-wrap{background:var(--line);border-radius:4px;height:8px;overflow:hidden;margin-top:2px;min-width:60px}
     .bar{height:100%;border-radius:4px;transition:width .4s}
-    .strategy-inline{background:#34d399}
-    .strategy-spawn{background:#60a5fa}
-    .strategy-cpu_pool{background:#a78bfa}
-    .strategy-batch{background:#fbbf24}
-    .strategy-drop{background:#f87171}
-    #decisions{height:180px;overflow-y:auto;font-size:.75rem;background:#060a0f;border-radius:6px;padding:8px}
-    .dec{padding:2px 0;border-bottom:1px solid #0f1720;display:flex;gap:8px}
-    .dec .strat{min-width:70px;font-weight:600}
-    .gauge-wrap{position:relative;height:80px;display:flex;align-items:flex-end;justify-content:center}
-    .gauge-label{font-size:1.4rem;font-weight:700;color:#e6edf3}
-    .gauge-bar{position:absolute;bottom:0;left:0;right:0;height:8px;background:#1f2a37;border-radius:4px;overflow:hidden}
+    .strategy-inline{background:var(--inline)}
+    .strategy-spawn{background:var(--spawn)}
+    .strategy-cpu_pool{background:var(--cpu_pool)}
+    .strategy-batch{background:var(--batch)}
+    .strategy-drop{background:var(--drop)}
+    #decisions{height:220px;overflow-y:auto;font-size:.75rem;background:var(--sunk);border-radius:6px;padding:8px}
+    #decisions .empty{color:var(--muted);padding:6px 2px}
+    .dec{padding:2px 0;border-bottom:1px solid var(--line);display:flex;gap:10px;white-space:nowrap}
+    .dec .strat{min-width:72px;font-weight:600}
+    .gauge-wrap{position:relative;height:64px;display:flex;align-items:flex-end;justify-content:center}
+    .gauge-label{font-size:1.6rem;font-weight:700;color:var(--ink)}
+    .gauge-bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:8px}
     .gauge-fill{height:100%;border-radius:4px;transition:width .5s,background .5s}
     .donut-wrap{display:flex;align-items:center;gap:16px}
-    #donut{width:90px;height:90px}
+    #donut{width:90px;height:90px;flex:none;transform:rotate(-90deg)}
     .legend{flex:1;display:flex;flex-direction:column;gap:4px;font-size:.75rem}
     .legend-item{display:flex;align-items:center;gap:6px}
+    .legend-item .n{margin-left:auto;color:var(--muted)}
     .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-    a{color:#7dd3fc;text-decoration:none}
+    .toast{font-size:.75rem;color:var(--muted)}
+    a{color:var(--accent);text-decoration:none}
     a:hover{text-decoration:underline}
+    footer{margin-top:12px;font-size:.72rem;color:var(--muted)}
   </style>
 </head>
 <body>
-<h1>HelixRouter — Live Dashboard</h1>
+<header>
+  <h1>HelixRouter <span>live dashboard</span></h1>
+  <span class="pill" id="conn"><i></i><span id="conn-text">connecting...</span></span>
+  <span class="spacer"></span>
+  <span class="toast" id="run-msg" aria-live="polite"></span>
+  <button class="run" id="run" type="button" data-jobs="200" data-rate="40" title="Submit 200 simulated jobs over 5 seconds">Run 200 jobs</button>
+  <button class="run alt" id="overload" type="button" data-jobs="2000" data-rate="100000" title="Submit 2000 simulated jobs at once">Overload</button>
+</header>
+<p class="intro">Every job gets one of five strategies, picked from its compute cost, how well it parallelizes and how busy the CPU pool is:
+  <b style="color:var(--inline)">inline</b> (run now), <b style="color:var(--spawn)">spawn</b> (own task),
+  <b style="color:var(--cpu_pool)">cpu_pool</b> (bounded worker pool), <b style="color:var(--batch)">batch</b> (grouped), or
+  <b style="color:var(--drop)">drop</b> (shed under overload). Press <b>Run 200 jobs</b> to send a steady burst, or <b>Overload</b> to send 2000 at once and watch it batch and shed.</p>
 
 <div class="grid">
-
-  <!-- Throughput -->
   <div class="card">
-    <h3>Throughput</h3>
-    <div class="big" id="completed">—</div>
-    <div class="muted">completed &nbsp;|&nbsp; <span id="dropped">—</span> dropped</div>
+    <h3>Jobs completed</h3>
+    <div class="big" id="completed">...</div>
+    <div class="muted"><span id="dropped">...</span> dropped</div>
   </div>
-
-  <!-- Pressure gauge -->
   <div class="card">
-    <h3>System Pressure</h3>
-    <div class="gauge-wrap">
-      <span class="gauge-label" id="pressure-val">—</span>
-    </div>
+    <h3>System pressure</h3>
+    <div class="gauge-wrap"><span class="gauge-label" id="pressure-val">...</span></div>
     <div class="gauge-bar"><div class="gauge-fill" id="pressure-fill" style="width:0%"></div></div>
+    <div class="hint">0% is idle. When the CPU pool is saturated, new jobs are batched or dropped.</div>
   </div>
-
-  <!-- Adaptive threshold -->
   <div class="card">
-    <h3>Adaptive Threshold</h3>
-    <div class="big" id="threshold">—</div>
-    <div class="muted">spawn_threshold (auto-adapts)</div>
+    <h3>Adaptive threshold</h3>
+    <div class="big" id="threshold">...</div>
+    <div class="hint">spawn_threshold: jobs cheaper than this run as their own task; costlier ones go to the CPU pool or a batch. It adapts to load.</div>
   </div>
-
-  <!-- Strategy donut -->
   <div class="card">
-    <h3>Strategy Distribution</h3>
+    <h3>Strategy mix</h3>
     <div class="donut-wrap">
-      <svg id="donut" viewBox="0 0 36 36"></svg>
-      <div class="legend" id="legend"></div>
+      <svg id="donut" viewBox="0 0 36 36" role="img" aria-label="Share of jobs per strategy"></svg>
+      <div class="legend" id="legend"><span class="muted">No jobs yet</span></div>
     </div>
   </div>
-
 </div>
 
-<!-- Latency table -->
 <div class="card" style="margin-bottom:12px">
-  <h3>Latency by Strategy</h3>
+  <h3>Latency by strategy</h3>
+  <div class="scroll">
   <table>
-    <thead><tr><th>Strategy</th><th>Count</th><th>Avg ms</th><th>EMA ms</th><th>p95 ms</th><th>Bar</th></tr></thead>
-    <tbody id="lat-body"></tbody>
+    <thead><tr><th>Strategy</th><th>Count</th><th>Avg ms</th><th>EMA ms</th><th>p95 ms</th><th style="width:30%">p95</th></tr></thead>
+    <tbody id="lat-body"><tr><td class="empty" colspan="6">Loading...</td></tr></tbody>
   </table>
+  </div>
 </div>
 
-<!-- Per-kind routing & SLA -->
-<div class="grid" style="margin-bottom:12px">
+<div class="grid">
   <div class="card">
-    <h3>Per-Kind Routing</h3>
+    <h3>Per job kind</h3>
+    <div class="scroll">
     <table>
-      <thead><tr><th>Kind</th><th>Routed</th><th>SLA Violations</th><th>Violation Rate</th></tr></thead>
-      <tbody id="kind-body"></tbody>
+      <thead><tr><th>Kind</th><th>Routed</th><th>Misses</th><th>Rate</th></tr></thead>
+      <tbody id="kind-body"><tr><td class="empty" colspan="4">Loading...</td></tr></tbody>
     </table>
-  </div>
-  <div class="card">
-    <h3>Deadline & SLA Summary</h3>
-    <div style="font-size:.85rem;margin-top:4px">
-      <div>Deadline exceeded: <span id="deadline-exceeded" style="color:#f87171;font-weight:700">—</span></div>
-      <div style="margin-top:6px">Total SLA violations:
-        <span id="sla-total" style="color:#fbbf24;font-weight:700">—</span>
-      </div>
     </div>
   </div>
   <div class="card">
-    <h3>Neural Router &epsilon; Decay</h3>
-    <canvas id="eps-canvas" width="240" height="80" style="width:100%;height:80px;display:block"></canvas>
-    <div class="muted" style="font-size:.72rem;margin-top:4px">Epsilon (exploration rate) over last 6 s</div>
+    <h3>Deadlines and SLA</h3>
+    <div style="font-size:.85rem;line-height:1.9">
+      <div>Deadline exceeded: <b id="deadline-exceeded" style="color:var(--bad)">...</b></div>
+      <div>SLA violations: <b id="sla-total" style="color:var(--warn)">...</b></div>
+    </div>
+    <div class="hint">An SLA violation is a job that finished later than its latency budget.</div>
+  </div>
+  <div class="card">
+    <h3>Neural router exploration (<span style="text-transform:none">&epsilon;</span>)</h3>
+    <canvas id="eps-canvas" style="width:100%;height:80px;display:block"></canvas>
+    <div class="hint" id="eps-hint">How often the learned router tries a non-best strategy. It decays as it learns.</div>
   </div>
 </div>
 
-<!-- Routing decisions feed -->
 <div class="card">
-  <h3>Live Routing Decisions <span class="muted" style="font-size:.7rem">(last 50)</span>
-    &nbsp;<a href="/api/stats">/api/stats</a> &nbsp;<a href="/metrics">/metrics</a>
-  </h3>
-  <div id="decisions"></div>
+  <h3>Live routing decisions <span class="muted" style="font-size:.7rem;text-transform:none;letter-spacing:0">(newest first, last 50)</span></h3>
+  <div id="decisions"><div class="empty" id="dec-empty">Waiting for new routing decisions. Press Run 200 jobs, or submit jobs to the router from your code.</div></div>
 </div>
+
+<footer>JSON: <a href="/api/stats">/api/stats</a> &middot; Prometheus: <a href="/metrics">/metrics</a> &middot; Stream: <a href="/api/stream/decisions">/api/stream/decisions</a> &middot; <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-">GitHub</a></footer>
 
 <script>
-const COLORS = {
-  inline:'#34d399', spawn:'#60a5fa', cpu_pool:'#a78bfa', batch:'#fbbf24', drop:'#f87171'
-};
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const STRATS = ['inline','spawn','cpu_pool','batch','drop'];
+const COLORS = {};
+function loadColors(){ STRATS.forEach(s => COLORS[s] = css('--'+s)); }
+loadColors();
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { loadColors(); tick(); });
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+/* ---- connection status ---- */
+const conn = document.getElementById('conn'), connText = document.getElementById('conn-text');
+function setConn(ok, text){ conn.className = 'pill ' + (ok ? 'live' : 'down'); connText.textContent = text; }
 
 /* ---- SSE live decisions ---- */
 const decBox = document.getElementById('decisions');
 const maxDec = 50;
 const es = new EventSource('/api/stream/decisions');
+es.onopen = () => setConn(true, 'live');
+es.onerror = () => setConn(false, 'reconnecting...');
 es.onmessage = ev => {
   try {
     const d = JSON.parse(ev.data);
+    const empty = document.getElementById('dec-empty');
+    if (empty) empty.remove();
     const div = document.createElement('div');
     div.className = 'dec';
-    const col = COLORS[d.strategy] || '#e6edf3';
-    div.innerHTML = `<span class="strat" style="color:${col}">${d.strategy}</span>` +
-      `<span class="muted">job#${d.job_id}</span>` +
-      `<span>cost=${d.compute_cost}</span>` +
-      `<span class="muted">cpu_busy=${d.cpu_busy}</span>` +
-      `<span class="muted">p=${(d.pressure*100).toFixed(0)}%</span>`;
+    const col = COLORS[d.strategy] || css('--ink');
+    div.innerHTML = `<span class="strat" style="color:${col}">${esc(d.strategy)}</span>` +
+      `<span class="muted">job ${esc(d.job_id)}</span>` +
+      `<span>cost ${esc(d.compute_cost)}</span>` +
+      `<span class="muted">cpu_busy ${esc(d.cpu_busy)}</span>` +
+      `<span class="muted">pressure ${(d.pressure*100).toFixed(0)}%</span>`;
     decBox.prepend(div);
-    while(decBox.children.length > maxDec) decBox.removeChild(decBox.lastChild);
+    while (decBox.children.length > maxDec) decBox.removeChild(decBox.lastChild);
   } catch(_){}
 };
 
+/* ---- Run a simulated burst ---- */
+const runMsg = document.getElementById('run-msg');
+const buttons = [document.getElementById('run'), document.getElementById('overload')];
+buttons.forEach(btn => btn.addEventListener('click', async () => {
+  buttons.forEach(x => x.disabled = true);
+  const label = btn.textContent;
+  try {
+    const r = await fetch(`/api/simulate?jobs=${btn.dataset.jobs}&rate=${btn.dataset.rate}`, {method:'POST'});
+    if (!r.ok) throw new Error(r.status === 404 ? 'this build has no simulator' : 'HTTP ' + r.status);
+    const j = await r.json();
+    runMsg.textContent = `sending ${j.started} jobs over ${Math.max(1, Math.round(j.seconds))} s...`;
+    btn.textContent = 'Running...';
+    setTimeout(() => { buttons.forEach(x => x.disabled = false); btn.textContent = label; runMsg.textContent = ''; }, j.seconds * 1000 + 500);
+  } catch (e) {
+    runMsg.textContent = 'Could not start: ' + e.message;
+    buttons.forEach(x => x.disabled = false);
+  }
+}));
+
 /* ---- Stats polling ---- */
 async function tick() {
+  let j;
   try {
     const r = await fetch('/api/stats', {cache:'no-store'});
-    const j = await r.json();
-    document.getElementById('completed').textContent = j.completed ?? '—';
-    document.getElementById('dropped').textContent = j.dropped ?? '—';
-    document.getElementById('threshold').textContent = j.adaptive_spawn_threshold ?? '—';
+    j = await r.json();
+  } catch (e) { setConn(false, 'cannot reach the router'); return; }
 
-    // Pressure gauge
-    const p = j.pressure_score ?? 0;
-    document.getElementById('pressure-val').textContent = (p*100).toFixed(0)+'%';
-    const fill = document.getElementById('pressure-fill');
-    fill.style.width = (p*100).toFixed(1)+'%';
-    fill.style.background = p > 0.7 ? '#f87171' : p > 0.4 ? '#fbbf24' : '#34d399';
+  document.getElementById('completed').textContent = (j.completed ?? 0).toLocaleString();
+  document.getElementById('dropped').textContent = (j.dropped ?? 0).toLocaleString();
+  document.getElementById('threshold').textContent = (j.adaptive_spawn_threshold ?? 0).toLocaleString();
 
-    // Latency table
-    const rows = j.latency_by_strategy ?? [];
-    const tbody = document.getElementById('lat-body');
-    tbody.innerHTML = '';
-    const maxP95 = Math.max(1, ...rows.map(r=>r.p95_ms||0));
-    rows.forEach(r => {
-      const tr = document.createElement('tr');
-      const col = COLORS[r.strategy] || '#e6edf3';
-      tr.innerHTML = `<td style="color:${col}">${r.strategy}</td>` +
-        `<td>${r.count}</td>` +
-        `<td>${(r.avg_ms||0).toFixed(2)}</td>` +
-        `<td>${(r.ema_ms||0).toFixed(2)}</td>` +
-        `<td>${r.p95_ms||0}</td>` +
-        `<td><div class="bar-wrap"><div class="bar strategy-${r.strategy}" style="width:${((r.p95_ms||0)/maxP95*100).toFixed(1)}%"></div></div></td>`;
-      tbody.appendChild(tr);
-    });
+  const p = j.pressure_score ?? 0;
+  document.getElementById('pressure-val').textContent = (p*100).toFixed(0)+'%';
+  const fill = document.getElementById('pressure-fill');
+  fill.style.width = (p*100).toFixed(1)+'%';
+  fill.style.background = p > 0.7 ? css('--bad') : p > 0.4 ? css('--warn') : css('--ok');
 
-    // Donut chart
-    const routed = j.routed_by_strategy ?? [];
-    const total = routed.reduce((s,r)=>s+r.count,0) || 1;
-    drawDonut(routed, total);
+  const rows = j.latency_by_strategy ?? [];
+  const tbody = document.getElementById('lat-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td class="empty" colspan="6">No jobs routed yet.</td></tr>';
+  } else {
+    const maxP95 = Math.max(1, ...rows.map(r => r.p95_ms || 0));
+    tbody.innerHTML = rows.map(r => {
+      const col = COLORS[r.strategy] || css('--ink');
+      return `<tr><td style="color:${col};font-weight:600">${esc(r.strategy)}</td><td>${r.count}</td>` +
+        `<td>${(r.avg_ms||0).toFixed(2)}</td><td>${(r.ema_ms||0).toFixed(2)}</td><td>${r.p95_ms||0}</td>` +
+        `<td><div class="bar-wrap"><div class="bar strategy-${esc(r.strategy)}" style="width:${((r.p95_ms||0)/maxP95*100).toFixed(1)}%"></div></div></td></tr>`;
+    }).join('');
+  }
 
-    // Per-kind routing & SLA table
-    const kr = j.kind_routing ?? {};
-    const sv = j.sla_violations ?? {};
-    const kinds = [
-      {key:'hash_mix',     label:'hash_mix',         routed: kr.hash_mix??0,         violations: sv.hash_mix??0},
-      {key:'prime_count',  label:'prime_count',       routed: kr.prime_count??0,      violations: sv.prime_count??0},
-      {key:'monte_carlo',  label:'monte_carlo_risk',  routed: kr.monte_carlo_risk??0, violations: sv.monte_carlo_risk??0},
-    ];
-    const kbody = document.getElementById('kind-body');
-    kbody.innerHTML = '';
-    kinds.forEach(k => {
-      const rate = k.routed > 0 ? ((k.violations / k.routed)*100).toFixed(1)+'%' : '—';
-      const tr = document.createElement('tr');
-      const vcolor = k.violations > 0 ? '#f87171' : '#34d399';
-      tr.innerHTML = `<td>${k.label}</td><td>${k.routed}</td>` +
-        `<td style="color:${vcolor}">${k.violations}</td><td>${rate}</td>`;
-      kbody.appendChild(tr);
-    });
+  const routed = j.routed_by_strategy ?? [];
+  const total = routed.reduce((s, r) => s + r.count, 0);
+  drawDonut(routed, total);
 
-    // Deadline & SLA summary cards
-    document.getElementById('deadline-exceeded').textContent = j.deadline_exceeded ?? 0;
-    const slaTotal = (sv.hash_mix??0) + (sv.prime_count??0) + (sv.monte_carlo_risk??0);
-    document.getElementById('sla-total').textContent = slaTotal;
+  const kr = j.kind_routing ?? {};
+  const sv = j.sla_violations ?? {};
+  const kinds = [
+    ['hash_mix', kr.hash_mix ?? 0, sv.hash_mix ?? 0],
+    ['prime_count', kr.prime_count ?? 0, sv.prime_count ?? 0],
+    ['monte_carlo_risk', kr.monte_carlo_risk ?? 0, sv.monte_carlo_risk ?? 0],
+  ];
+  document.getElementById('kind-body').innerHTML = kinds.map(([label, n, v]) => {
+    const rate = n > 0 ? ((v / n) * 100).toFixed(1) + '%' : '-';
+    return `<tr><td>${label}</td><td>${n}</td><td style="color:${v > 0 ? css('--bad') : css('--ok')}">${v}</td><td>${rate}</td></tr>`;
+  }).join('');
 
-    // Epsilon decay sparkline
-    drawEpsilonCurve(j.epsilon_history ?? []);
+  document.getElementById('deadline-exceeded').textContent = j.deadline_exceeded ?? 0;
+  document.getElementById('sla-total').textContent = (sv.hash_mix ?? 0) + (sv.prime_count ?? 0) + (sv.monte_carlo_risk ?? 0);
 
-  } catch(e) { console.warn('stats fetch failed', e); }
+  drawEpsilonCurve(j.epsilon_history ?? []);
+  if (!conn.classList.contains('live') && es.readyState === 1) setConn(true, 'live');
 }
 
 function drawEpsilonCurve(history) {
   const canvas = document.getElementById('eps-canvas');
-  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(canvas.clientWidth * dpr), H = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
   const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  if (history.length < 2) { return; }
+  ctx.font = (11 * dpr) + 'px ui-monospace,monospace';
+  ctx.fillStyle = css('--muted');
+  if (history.length < 2) { ctx.fillText('collecting samples...', 4 * dpr, 14 * dpr); return; }
   const max = Math.max(...history, 0.01);
-  ctx.strokeStyle = '#60a5fa';
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = css('--spawn');
+  ctx.lineWidth = 1.5 * dpr;
   ctx.beginPath();
   history.forEach((v, i) => {
     const x = (i / (history.length - 1)) * W;
-    const y = H - (v / max) * (H - 4) - 2;
+    const y = H - (v / max) * (H - 20 * dpr) - 2 * dpr;
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
   ctx.stroke();
-  // Label current epsilon
-  const last = history[history.length - 1];
-  ctx.fillStyle = '#9aa4b2';
-  ctx.font = '10px ui-monospace,monospace';
-  ctx.fillText('ε='+last.toFixed(4), 4, 12);
+  ctx.fillText('ε = ' + history[history.length - 1].toFixed(4), 4 * dpr, 12 * dpr);
 }
 
 function drawDonut(routed, total) {
   const svg = document.getElementById('donut');
   const legend = document.getElementById('legend');
-  svg.innerHTML = '';
-  legend.innerHTML = '';
-
-  const R = 15.9, cx = 18, cy = 18, r = R;
-  const circ = 2 * Math.PI * r;
-  let offset = 0;
-
-  routed.forEach(item => {
-    const frac = item.count / total;
-    const len = frac * circ;
-    const col = COLORS[item.strategy] || '#9aa4b2';
-
-    const circle = document.createElementNS('http://www.w3.org/2000/svg','circle');
-    circle.setAttribute('cx', cx);
-    circle.setAttribute('cy', cy);
-    circle.setAttribute('r', r);
-    circle.setAttribute('fill', 'none');
-    circle.setAttribute('stroke', col);
-    circle.setAttribute('stroke-width', '5');
-    circle.setAttribute('stroke-dasharray', `${len.toFixed(2)} ${(circ-len).toFixed(2)}`);
-    circle.setAttribute('stroke-dashoffset', (-offset).toFixed(2));
-    svg.appendChild(circle);
+  const r = 15.9, circ = 2 * Math.PI * r;
+  let offset = 0, circles = `<circle cx="18" cy="18" r="${r}" fill="none" stroke="${css('--line')}" stroke-width="5"/>`;
+  const byName = Object.fromEntries(routed.map(x => [x.strategy, x.count]));
+  if (!total) { svg.innerHTML = circles; legend.innerHTML = '<span class="muted">No jobs yet</span>'; return; }
+  let items = '';
+  STRATS.forEach(s => {
+    const count = byName[s] || 0;
+    const len = count / total * circ;
+    if (len > 0) circles += `<circle cx="18" cy="18" r="${r}" fill="none" stroke="${COLORS[s]}" stroke-width="5" stroke-dasharray="${len.toFixed(2)} ${(circ-len).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"/>`;
     offset += len;
-
-    const li = document.createElement('div');
-    li.className = 'legend-item';
-    li.innerHTML = `<span class="legend-dot" style="background:${col}"></span>` +
-      `<span style="color:${col}">${item.strategy}</span>` +
-      `<span class="muted">${item.count}</span>`;
-    legend.appendChild(li);
+    items += `<div class="legend-item"><span class="legend-dot" style="background:${COLORS[s]}"></span><span style="color:${COLORS[s]}">${s}</span><span class="n">${count} (${(count/total*100).toFixed(0)}%)</span></div>`;
   });
+  svg.innerHTML = circles;
+  legend.innerHTML = items;
 }
 
 tick();
-setInterval(tick, 1500);
+setInterval(tick, 1000);
 </script>
 </body>
-</html>"#;
+</html>"##;
 
 // ===== Health check =====
 
@@ -449,6 +488,77 @@ async fn health(State(router): State<AppState>) -> Json<HealthResponse> {
 
 async fn ui() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+// ===== Simulated burst (dashboard "Run 200 jobs" button) =====
+
+/// Query parameters for `POST /api/simulate`.
+#[cfg(feature = "simulation")]
+#[derive(Debug, Deserialize)]
+struct SimulateParams {
+    /// Number of jobs to submit (default 200, clamped to 1..=5000).
+    jobs: Option<u64>,
+    /// Submission rate in jobs per second (default 40, clamped to 1..=100000).
+    rate: Option<u64>,
+}
+
+/// Response body of `POST /api/simulate`.
+#[cfg(feature = "simulation")]
+#[derive(Debug, Serialize)]
+struct SimulateResponse {
+    started: u64,
+    rate: u64,
+    seconds: f64,
+}
+
+/// Clamp the simulate parameters to safe bounds: (jobs, rate).
+#[cfg(feature = "simulation")]
+fn simulate_bounds(p: &SimulateParams) -> (u64, u64) {
+    (
+        p.jobs.unwrap_or(200).clamp(1, 5_000),
+        p.rate.unwrap_or(40).clamp(1, 100_000),
+    )
+}
+
+/// `POST /api/simulate?jobs=200&rate=40`: submit a burst of synthetic jobs at a
+/// steady rate in the background so the dashboard has something to show.
+///
+/// Every call uses a fresh seed and fresh job ids, so repeated bursts are real
+/// new work rather than result-cache hits. Returns `202 Accepted` at once.
+#[cfg(feature = "simulation")]
+async fn post_simulate(
+    State(router): State<AppState>,
+    Query(params): Query<SimulateParams>,
+) -> impl IntoResponse {
+    use crate::simulator::{Simulator, SimulatorConfig};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static BURSTS: AtomicU64 = AtomicU64::new(1);
+    let (jobs, rate) = simulate_bounds(&params);
+    let burst = BURSTS.fetch_add(1, Ordering::Relaxed);
+    let mut sim = Simulator::new(SimulatorConfig {
+        seed: 7 + burst * 7_919,
+        total_jobs: jobs,
+        ..Default::default()
+    });
+    let interval = std::time::Duration::from_micros(1_000_000 / rate);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        while let Some(mut job) = sim.next_job() {
+            tick.tick().await;
+            job.id += burst * 1_000_000;
+            let r = Arc::clone(&router);
+            tokio::spawn(async move { r.submit(job).await });
+        }
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(SimulateResponse {
+            started: jobs,
+            rate,
+            seconds: jobs as f64 / rate as f64,
+        }),
+    )
 }
 
 // ===== SSE feed =====
@@ -1192,6 +1302,51 @@ async fn get_timeout_stats(State(router): State<AppState>) -> impl IntoResponse 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // ── Simulate endpoint tests ───────────────────────────────────────────
+
+    #[cfg(feature = "simulation")]
+    #[test]
+    fn test_simulate_bounds_defaults_and_clamps() {
+        let d = SimulateParams { jobs: None, rate: None };
+        assert_eq!(simulate_bounds(&d), (200, 40));
+        let big = SimulateParams { jobs: Some(1_000_000), rate: Some(0) };
+        assert_eq!(simulate_bounds(&big), (5_000, 1));
+    }
+
+    #[cfg(feature = "simulation")]
+    #[tokio::test]
+    async fn test_post_simulate_runs_new_jobs_each_burst() {
+        let router: AppState = Arc::new(Router::new(RouterConfig::default()));
+        for _ in 0..2 {
+            let resp = post_simulate(
+                State(Arc::clone(&router)),
+                Query(SimulateParams { jobs: Some(20), rate: Some(2_000) }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        }
+        // Both bursts use fresh seeds, so all 40 jobs are routed (none are
+        // answered from the result cache of the first burst).
+        let mut routed = 0;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let s = router.stats_snapshot().await;
+            routed = s.routed.values().sum::<u64>();
+            if routed >= 40 {
+                break;
+            }
+        }
+        assert_eq!(routed, 40);
+    }
+
+    #[test]
+    fn test_index_html_has_run_button_and_light_theme() {
+        assert!(INDEX_HTML.contains("/api/simulate"));
+        assert!(INDEX_HTML.contains("prefers-color-scheme: light"));
+        assert!(!INDEX_HTML.contains('\u{2014}'), "no em dashes in the dashboard");
+    }
 
     // ── Health endpoint tests ─────────────────────────────────────────────
 

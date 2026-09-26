@@ -11,6 +11,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.1] - 2026-09-25
+
+### Added
+
+- One-line installs: `install.sh` (Linux, macOS) and `install.ps1` (Windows) download the release, verify it against `SHA256SUMS.txt` and put `helixrouter` on your PATH. Also Homebrew (`mattbusel/tap`), Scoop (`mattbusel` bucket) and `cargo binstall` metadata.
+- Dashboard: **Run 200 jobs** and **Overload** buttons, backed by a new `POST /api/simulate?jobs=N&rate=R` endpoint (feature `simulation`); a live/reconnecting status pill; empty and loading states; a light theme that follows the system setting; tables that scroll instead of overflowing on phones; a short explanation of the five strategies.
+- `--help` has an Examples section. Unknown options and bad values now stop with a clear message instead of being ignored.
+- CI runs the unit, integration and doc tests, not only `cargo check`.
+
+### Changed
+
+- The binary prints a short start-up box with the dashboard URL. The terminal log is quiet by default (startup and summary lines, no warning per shed job); `RUST_LOG` still overrides it. Colors are off when output is not a terminal or `NO_COLOR` is set.
+- A port that is already in use now exits with a message saying how to pick another one, instead of keeping the process alive with no server.
+
+### Fixed
+
+- 22 failing and 2 hanging unit tests. Code bugs fixed along the way: the retry executor made one call more than `max_attempts`; sliding-window rate limiters expired requests made at time 0; the LZ77 compressor emitted a spurious trailing byte; percentile math in three modules now uses nearest-rank; the load tester generated no requests below 1000 requests per second; the circuit-breaker registry under-counted the half-open probe; the response cache did not count misses for unknown keys; the autoscaler did not record requests refused during cooldown; a bulkhead with `max_queue_size: 0` rejected every request even when idle; the request coalescer could lose a broadcast to a late joiner.
+
 ## [1.2.0] - 2026-09-25
 
 ### Added

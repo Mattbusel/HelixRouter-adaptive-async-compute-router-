@@ -1,37 +1,20 @@
-//! # HelixRouter
+//! Decide, per job, how it should run: inline, as its own task, on a bounded
+//! CPU pool, in a batch, or not at all, based on the job's cost and on live
+//! load, so cheap work stays fast while heavy work is contained.
 //!
-//! Adaptive async compute routing engine for Rust.
-//!
-//! HelixRouter decides *how* work runs — inline, spawned, pooled, batched, or
-//! dropped — on a per-job basis in sub-microsecond time, using live system
-//! pressure, EMA latency history, and an online-learned quality model
-//! ([`neural_router`]).
-//!
-//! ## Modules
-//!
-//! | Module | Purpose |
-//! |---|---|
-//! | [`router`] | Core strategy selection and execution dispatch |
-//! | [`neural_router`] | Online-learning per-job-kind routing quality model |
-//! | [`autoscaler`] | Predictive demand forecasting and capacity recommendations |
-//! | [`config`] | Validated [`RouterConfig`](config::RouterConfig), hot-reload, watch channel |
-//! | [`metrics`] | EMA latency, percentiles, pressure scoring, Prometheus export |
-//! | [`strategies`] | Deterministic CPU-bound compute kernels |
-//! | [`simulator`] | Seeded synthetic workload generation |
-//! | [`web`] | Axum HTTP server, SSE feed, embedded dark dashboard |
-//! | [`types`] | Shared data types: [`Job`](types::Job), [`Strategy`](types::Strategy), [`Output`](types::Output) |
-//! | [`cost_model`] | Per-job-kind execution cost model with EMA sliding window |
-//! | [`downstream_pressure`] | Predictive backpressure aggregation from downstream service telemetry |
-//! | [`distributed_router`] | NATS-based distributed coordination (feature-gated: `distributed`) |
-//! | [`admission`] | Pre-router admission gate: load ceiling, priority fast-lane, per-caller token bucket |
-//! | [`streaming`] | Streaming partial-result channels per job (broadcast fan-out) |
-//! | [`canary`] | Canary deployment: N% traffic split, auto-promote/rollback on quality metrics |
-//! | [`adaptive_circuit_breaker`] | Adaptive circuit breaker: time-of-day thresholds, graduated half-open recovery, history-driven timeout |
-//! | [`priority_balancer`] | Priority-aware load balancer: routes tasks by capacity, priority, affinity, and health |
+//! ![dashboard](https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard.gif)
 //!
 //! ## Quick start
 //!
-//! ```no_run
+//! ```toml
+//! [dependencies]
+//! helixrouter = "1.2"
+//! tokio = { version = "1", features = ["full"] }
+//! ```
+//!
+//! Submit a job and see which strategy the router picked:
+//!
+//! ```
 //! use helixrouter::{config::RouterConfig, router::Router, types::{Job, JobKind}};
 //!
 //! #[tokio::main]
@@ -40,16 +23,59 @@
 //!     let job = Job {
 //!         id: 1,
 //!         kind: JobKind::HashMix,
-//!         inputs: vec![42],
-//!         compute_cost: 1_000,
-//!         scaling_potential: 0.5,
+//!         inputs: vec![42, 7],
+//!         compute_cost: 1_000,       // how expensive you expect it to be
+//!         scaling_potential: 0.5,    // 0..1: how well it batches or parallelizes
 //!         latency_budget_ms: 50,
-//!         deadline_ms: 0,
+//!         deadline_ms: 0,            // 0 = no hard deadline
 //!     };
-//!     let output = router.submit(job).await;
-//!     println!("{output:?}");
+//!     let output = router.submit(job).await; // None if the job was dropped
+//!     assert!(output.is_some());
+//!
+//!     let stats = router.stats_snapshot().await;
+//!     for (strategy, count) in &stats.routed {
+//!         println!("{strategy}: {count}");
+//!     }
 //! }
 //! ```
+//!
+//! ## Main types
+//!
+//! - [`Router`](router::Router): [`submit`](router::Router::submit) a job, read [`stats_snapshot`](router::Router::stats_snapshot) and [`latency_report`](router::Router::latency_report).
+//! - [`Job`](types::Job), [`JobKind`](types::JobKind) and [`Strategy`](types::Strategy): what goes in and how it was run.
+//! - [`RouterConfig`](config::RouterConfig): the thresholds (`inline_threshold`, `spawn_threshold`, `backpressure_busy_threshold`, batch size and delay), hot-reloadable.
+//! - [`choose_strategy`](router::choose_strategy): the pure heuristic, handy for testing your own thresholds.
+//! - [`web`]: the Axum dashboard, JSON stats, Prometheus `/metrics` and the SSE decision stream.
+//!
+//! The `helixrouter` binary (prebuilt on the
+//! [releases page](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest),
+//! or `cargo binstall helixrouter`) runs the router with that dashboard on
+//! <http://127.0.0.1:8080> and a simulated workload to watch.
+//!
+//! ## Modules
+//!
+//! | Module | Purpose |
+//! |---|---|
+//! | [`router`] | Core strategy selection and execution dispatch |
+//! | [`neural_router`] | Online-learning per-job-kind routing quality model |
+//! | [`autoscaler`] | Demand forecasting and capacity recommendations |
+//! | [`config`] | Validated [`RouterConfig`](config::RouterConfig), hot-reload, watch channel |
+//! | [`metrics`] | EMA latency, percentiles, pressure scoring, Prometheus export |
+//! | [`strategies`] | Deterministic CPU-bound compute kernels |
+//! | `simulator` | Seeded synthetic workload generation (feature `simulation`, on by default) |
+//! | [`web`] | Axum HTTP server, SSE feed, embedded dashboard |
+//! | [`types`] | Shared data types: [`Job`](types::Job), [`Strategy`](types::Strategy), [`Output`](types::Output) |
+//! | [`cost_model`] | Per-job-kind execution cost model with EMA sliding window |
+//! | [`downstream_pressure`] | Predictive backpressure from downstream service telemetry |
+//! | `distributed_router` | NATS-based distributed coordination (feature `distributed`) |
+//! | [`admission`] | Pre-router admission gate: load ceiling, priority fast-lane, per-caller token bucket |
+//! | [`streaming`] | Streaming partial-result channels per job (broadcast fan-out) |
+//! | [`canary`] | Canary deployment: N% traffic split, auto-promote or rollback on quality metrics |
+//! | [`adaptive_circuit_breaker`] | Adaptive circuit breaker: time-of-day thresholds, graduated half-open recovery |
+//! | [`priority_balancer`] | Priority-aware load balancer: routes tasks by capacity, priority, affinity and health |
+//!
+//! Many other modules in this crate are standalone building blocks you compose
+//! around [`Router`](router::Router); they are not all wired into `submit`.
 
 /// Job affinity routing: stateful sticky-strategy routing via FNV-1a consistent hashing.
 pub mod affinity;
