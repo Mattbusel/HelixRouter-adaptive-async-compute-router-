@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: Mattbusel.HelixRouter
+PackageVersion: 1.2.1
+PackageLocale: en-US
+Publisher: Matt Busel
+PublisherUrl: https://github.com/Mattbusel
+PublisherSupportUrl: https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/issues
+PackageName: HelixRouter
+PackageUrl: https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-
+License: MIT
+LicenseUrl: https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/LICENSE
+ShortDescription: Adaptive job router for Tokio with a live web dashboard.
+Description: |-
+  HelixRouter decides, per job, whether to run it inline, spawn it, queue it on a bounded CPU pool, batch it or drop it, based on its cost and live load. The helixrouter program runs the router with a simulated workload and a live dashboard at http://127.0.0.1:8080.
+Moniker: helixrouter
+Tags:
+  - tokio
+  - scheduler
+  - backpressure
+  - dashboard
+  - rust
+ReleaseNotesUrl: https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/tag/v1.2.1
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

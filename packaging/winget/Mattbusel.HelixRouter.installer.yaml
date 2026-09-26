@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: Mattbusel.HelixRouter
+PackageVersion: 1.2.1
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: helixrouter-v1.2.1-x86_64-pc-windows-msvc\helixrouter.exe
+    PortableCommandAlias: helixrouter
+ReleaseDate: 2026-09-26
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/download/v1.2.1/helixrouter-v1.2.1-x86_64-pc-windows-msvc.zip
+    InstallerSha256: EAF0D70C1FCDFCEECB29341F461D4AEC237AAE3D130B63635E80D79D122E5356
+ManifestType: installer
+ManifestVersion: 1.6.0
