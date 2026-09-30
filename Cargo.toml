@@ -1,6 +1,6 @@
 [package]
 name = "helixrouter"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 rust-version = "1.81"
 description = "Decides, per job, whether to run it inline, spawn it, queue it on a CPU pool, batch it or drop it, based on its cost and live load. Tokio library plus a live web dashboard."

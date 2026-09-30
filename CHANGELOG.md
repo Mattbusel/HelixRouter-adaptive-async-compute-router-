@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.2] - 2026-09-30
+
+- Links point at GitLab and the Vercel site.
+- Linux x86_64 release builds from GitLab CI; downloads and links now point at GitLab.
+
 ## [Unreleased]
 
 ---
