@@ -5,7 +5,7 @@
 <p>
   <a href="https://crates.io/crates/helixrouter"><img alt="crates.io" src="https://img.shields.io/crates/v/helixrouter.svg"></a>
   <a href="https://docs.rs/helixrouter"><img alt="docs.rs" src="https://img.shields.io/docsrs/helixrouter"></a>
-  <a href="https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/HelixRouter-adaptive-async-compute-router-"></a>
+  <a href="https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases"><img alt="release" src="https://img.shields.io/gitlab/v/release/mattbusel%2FHelixRouter-adaptive-async-compute-router-"></a>
   <a href="https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/blob/main/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
@@ -17,18 +17,18 @@ It is a Rust library for Tokio services (`helixrouter` on crates.io) and a small
 
 ## Install
 
-| Where | Command |
-|---|---|
-| **Windows** (PowerShell) | `irm https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.ps1 \| iex` |
-| **macOS / Linux** | `curl -fsSL https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.sh \| sh` |
-| Homebrew (macOS, Linux) | `brew install mattbusel/tap/helixrouter` |
-| Scoop (Windows) | `scoop bucket add mattbusel https://gitlab.com/mattbusel/scoop-bucket; scoop install mattbusel/helixrouter` |
-| Rust, prebuilt | `cargo binstall helixrouter` |
-| Rust, from source | `cargo install helixrouter` |
-| As a library | `cargo add helixrouter` |
-| By hand | Download a zip or tarball from [Releases](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases) (Windows x64, macOS Apple Silicon and Intel, Linux x64) |
+**Linux** (x86_64, Ubuntu 20.04+ / Debian 11+). One line, no dependencies, installs to `~/.local/bin`:
 
-The install scripts check the download against the release's `SHA256SUMS.txt`. The binaries are not code-signed: Windows SmartScreen may say "unknown publisher" (More info, then Run anyway); on macOS, right-click and choose Open.
+```sh
+mkdir -p ~/.local/bin && curl -fsSL https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases/permalink/latest/downloads/helixrouter-linux-x86_64.tar.gz | tar xz --strip-components=1 -C ~/.local/bin --wildcards '*/helixrouter'
+```
+
+| Other systems | |
+|---|---|
+| **Windows** | [Download helixrouter-windows-x86_64.exe](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases/permalink/latest/downloads/helixrouter-windows-x86_64.exe) and run it. (Unsigned, so SmartScreen may ask: *More info*, then *Run anyway*.) |
+| **macOS, or from source** | `cargo install --locked helixrouter` |
+
+`helixrouter` starts the router with its live dashboard. Every release, with SHA-256 checksums: [Releases](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases).
 
 ## Use it in 3 steps
 
