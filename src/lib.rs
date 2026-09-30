@@ -2,7 +2,7 @@
 //! CPU pool, in a batch, or not at all, based on the job's cost and on live
 //! load, so cheap work stays fast while heavy work is contained.
 //!
-//! ![dashboard](https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard.gif)
+//! ![dashboard](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/assets/dashboard.gif)
 //!
 //! ## Quick start
 //!
@@ -48,7 +48,7 @@
 //! - [`web`]: the Axum dashboard, JSON stats, Prometheus `/metrics` and the SSE decision stream.
 //!
 //! The `helixrouter` binary (prebuilt on the
-//! [releases page](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest),
+//! [releases page](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases),
 //! or `cargo binstall helixrouter`) runs the router with that dashboard on
 //! <http://127.0.0.1:8080> and a simulated workload to watch.
 //!

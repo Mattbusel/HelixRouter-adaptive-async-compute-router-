@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the latest `helixrouter` release on Linux or macOS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/install.sh | sh
+#   curl -fsSL https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.sh | sh
 #
 # Downloads the archive for this OS and CPU from GitHub Releases, checks it
 # against SHA256SUMS.txt, and copies the binaries into ~/.local/bin (override

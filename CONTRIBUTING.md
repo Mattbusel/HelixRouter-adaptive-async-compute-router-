@@ -22,7 +22,7 @@ Thank you for your interest in HelixRouter. This document explains how to set up
 
 3. **Clone the repo**:
    ```bash
-   git clone https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-
+   git clone https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router
    cd HelixRouter-adaptive-async-compute-router-
    ```
 
@@ -203,4 +203,4 @@ Body explaining the motivation and any tradeoffs.
 
 ## Questions
 
-Open a [Discussion](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/discussions) for design questions or "would you accept a PR for X?" conversations.
+Open a [Discussion](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/discussions) for design questions or "would you accept a PR for X?" conversations.

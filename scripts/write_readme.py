@@ -3,7 +3,7 @@
 content = """\
 # HelixRouter
 
-[![CI](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml)
+[![CI](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router)](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 HelixRouter is an adaptive async compute routing engine written in Rust. It decides how each

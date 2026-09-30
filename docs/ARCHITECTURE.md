@@ -166,7 +166,7 @@ lower-latency strategies for each (job_kind, pressure) context
 
 ## Cross-repo integration
 
-HelixRouter integrates with [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) via the `HelixBridge`:
+HelixRouter integrates with [Every-Other-Token](https://gitlab.com/mattbusel/Every-Other-Token) via the `HelixBridge`:
 
 - `GET /api/stats` — EOT polls this to read queue depth, drop rate, and latency. It converts these into its own `RouterStats` type for the self-tune loop.
 - `PATCH /api/config` — EOT's PID controller writes config adjustments (e.g. raising `spawn_threshold` under sustained latency pressure).

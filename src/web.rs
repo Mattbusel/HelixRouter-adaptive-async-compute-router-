@@ -305,7 +305,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   <div id="decisions"><div class="empty" id="dec-empty">Waiting for new routing decisions. Press Run 200 jobs, or submit jobs to the router from your code.</div></div>
 </div>
 
-<footer>JSON: <a href="/api/stats">/api/stats</a> &middot; Prometheus: <a href="/metrics">/metrics</a> &middot; Stream: <a href="/api/stream/decisions">/api/stream/decisions</a> &middot; <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-">GitHub</a></footer>
+<footer>JSON: <a href="/api/stats">/api/stats</a> &middot; Prometheus: <a href="/metrics">/metrics</a> &middot; Stream: <a href="/api/stream/decisions">/api/stream/decisions</a> &middot; <a href="https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router">GitHub</a></footer>
 
 <script>
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();

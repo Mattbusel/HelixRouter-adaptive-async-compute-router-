@@ -5,8 +5,8 @@
 <p>
   <a href="https://crates.io/crates/helixrouter"><img alt="crates.io" src="https://img.shields.io/crates/v/helixrouter.svg"></a>
   <a href="https://docs.rs/helixrouter"><img alt="docs.rs" src="https://img.shields.io/docsrs/helixrouter"></a>
-  <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/HelixRouter-adaptive-async-compute-router-"></a>
-  <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/HelixRouter-adaptive-async-compute-router-"></a>
+  <a href="https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/blob/main/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
 <img alt="Recording of the HelixRouter dashboard: it starts empty, Run 200 jobs sends a steady burst and the strategy mix fills in (mostly batch, some cpu_pool, inline and spawn), then Overload sends 2000 jobs at once, pressure jumps and the router starts dropping jobs, shown in red in the donut and the live decision feed." src="assets/dashboard.gif" width="100%">
@@ -22,11 +22,11 @@ It is a Rust library for Tokio services (`helixrouter` on crates.io) and a small
 | **Windows** (PowerShell) | `irm https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.ps1 \| iex` |
 | **macOS / Linux** | `curl -fsSL https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.sh \| sh` |
 | Homebrew (macOS, Linux) | `brew install mattbusel/tap/helixrouter` |
-| Scoop (Windows) | `scoop bucket add mattbusel https://github.com/Mattbusel/scoop-bucket; scoop install mattbusel/helixrouter` |
+| Scoop (Windows) | `scoop bucket add mattbusel https://gitlab.com/mattbusel/scoop-bucket; scoop install mattbusel/helixrouter` |
 | Rust, prebuilt | `cargo binstall helixrouter` |
 | Rust, from source | `cargo install helixrouter` |
 | As a library | `cargo add helixrouter` |
-| By hand | Download a zip or tarball from [Releases](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest) (Windows x64, macOS Apple Silicon and Intel, Linux x64) |
+| By hand | Download a zip or tarball from [Releases](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/releases) (Windows x64, macOS Apple Silicon and Intel, Linux x64) |
 
 The install scripts check the download against the release's `SHA256SUMS.txt`. The binaries are not code-signed: Windows SmartScreen may say "unknown publisher" (More info, then Run anyway); on macOS, right-click and choose Open.
 
@@ -1666,4 +1666,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/LICENSE).
+MIT. See [LICENSE](https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/blob/main/LICENSE).
