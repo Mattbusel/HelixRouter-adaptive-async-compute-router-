@@ -5,12 +5,11 @@
 <p>
   <a href="https://crates.io/crates/helixrouter"><img alt="crates.io" src="https://img.shields.io/crates/v/helixrouter.svg"></a>
   <a href="https://docs.rs/helixrouter"><img alt="docs.rs" src="https://img.shields.io/docsrs/helixrouter"></a>
-  <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/HelixRouter-adaptive-async-compute-router-"></a>
   <a href="https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/blob/main/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-<img alt="Recording of the HelixRouter dashboard: it starts empty, Run 200 jobs sends a steady burst and the strategy mix fills in (mostly batch, some cpu_pool, inline and spawn), then Overload sends 2000 jobs at once, pressure jumps and the router starts dropping jobs, shown in red in the donut and the live decision feed." src="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard.gif" width="100%">
+<img alt="Recording of the HelixRouter dashboard: it starts empty, Run 200 jobs sends a steady burst and the strategy mix fills in (mostly batch, some cpu_pool, inline and spawn), then Overload sends 2000 jobs at once, pressure jumps and the router starts dropping jobs, shown in red in the donut and the live decision feed." src="assets/dashboard.gif" width="100%">
 
 <sub>The built-in dashboard, recorded with Playwright against the release binary: <b>Run 200 jobs</b>, then <b>Overload</b> (2000 jobs at once). Nothing is mocked; the numbers are what the router did on that run.</sub>
 
@@ -20,8 +19,8 @@ It is a Rust library for Tokio services (`helixrouter` on crates.io) and a small
 
 | Where | Command |
 |---|---|
-| **Windows** (PowerShell) | `irm https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/install.ps1 \| iex` |
-| **macOS / Linux** | `curl -fsSL https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/install.sh \| sh` |
+| **Windows** (PowerShell) | `irm https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.ps1 \| iex` |
+| **macOS / Linux** | `curl -fsSL https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router/-/raw/main/install.sh \| sh` |
 | Homebrew (macOS, Linux) | `brew install mattbusel/tap/helixrouter` |
 | Scoop (Windows) | `scoop bucket add mattbusel https://github.com/Mattbusel/scoop-bucket; scoop install mattbusel/helixrouter` |
 | Rust, prebuilt | `cargo binstall helixrouter` |
@@ -89,8 +88,8 @@ One run of the release binary on this Windows PC (2026-09-25): the 200 startup j
 2,096 completed and 104 dropped (4.7%); pressure read 52% three seconds after the burst. With a steady 40 jobs per second (**Run 200 jobs**) nothing is dropped. Exact numbers change from run to run and machine to machine.
 
 <picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard-light.png">
-  <img alt="The HelixRouter dashboard after a Run 200 jobs burst: jobs completed, system pressure, adaptive threshold, strategy mix donut, latency by strategy, per job kind table, SLA summary, epsilon chart and the live routing decisions feed" src="https://raw.githubusercontent.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/main/assets/dashboard-dark.png" width="100%">
+  <source media="(prefers-color-scheme: light)" srcset="assets/dashboard-light.png">
+  <img alt="The HelixRouter dashboard after a Run 200 jobs burst: jobs completed, system pressure, adaptive threshold, strategy mix donut, latency by strategy, per job kind table, SLA summary, epsilon chart and the live routing decisions feed" src="assets/dashboard-dark.png" width="100%">
 </picture>
 
 The dashboard follows your system's light or dark setting and works on a phone. Everything it shows is also JSON at `/api/stats`, Prometheus text at `/metrics`, and a live Server-Sent Events stream of every routing decision at `/api/stream/decisions`.
