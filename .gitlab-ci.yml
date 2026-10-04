@@ -77,6 +77,9 @@ test:
   variables:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+    CARGO_INCREMENTAL: "0"
   cache:
     key: cargo-test
     paths: [target/, .cargo-home/]

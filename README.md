@@ -49,27 +49,34 @@ helixrouter
 
 **2. Open http://127.0.0.1:8080.** Press **Run 200 jobs** for a steady burst, then **Overload** to send 2000 at once and watch pressure rise and jobs get batched and dropped.
 
-**3. Use it in your own service:**
+**3. Route your own work.** `Router::run` takes a closure and a cost hint, and decides where it runs: inline, on its own task, on the bounded CPU pool, or not at all when the service is overloaded. From [`examples/own_work.rs`](examples/own_work.rs) (`cargo run --example own_work`):
 
 ```rust
-use helixrouter::{config::RouterConfig, router::Router, types::{Job, JobKind}};
+use helixrouter::{config::RouterConfig, router::{Rejected, Router, WorkHint}};
 
-#[tokio::main]
-async fn main() {
-    let router = Router::new(RouterConfig::default());
-    let job = Job {
-        id: 1,
-        kind: JobKind::HashMix,
-        inputs: vec![42, 7],
-        compute_cost: 1_000,       // how expensive you expect it to be
-        scaling_potential: 0.5,    // 0..1: how well it batches or parallelizes
-        latency_budget_ms: 50,
-        deadline_ms: 0,            // 0 = no hard deadline
-    };
-    let output = router.submit(job).await; // None if the job was dropped
-    println!("{output:?}");
+let router = Router::new(RouterConfig { cpu_parallelism: 4, backpressure_busy_threshold: 3, ..RouterConfig::default() });
+
+// Cheap work runs right where it is called.
+let answer = router.run(WorkHint { compute_cost: 10, ..WorkHint::default() }, || 6 * 7).await;
+
+// Heavy work goes to the bounded CPU pool (Tokio's blocking pool, behind the
+// router's permits). Under pressure it is shed instead of queueing forever.
+match router.run(WorkHint { compute_cost: 200_000, ..WorkHint::default() }, || count_primes(200_000)).await {
+    Ok(n) => println!("{n} primes"),
+    Err(Rejected::Overloaded) => println!("busy, try later"),
+    Err(e) => println!("{e}"),
 }
 ```
+
+Real output, including a flood of 200 heavy jobs at once:
+
+```text
+cheap work: Ok(42)
+heavy work: Ok(17984) primes below 200,000
+flood of 200: 40 ran, 160 shed under pressure
+```
+
+The pool never ran more than `cpu_parallelism` jobs at once (a test checks this). `Router::submit` still runs the three built-in demo kernels the dashboard uses.
 
 `helixrouter --help` lists every option; `--port 3000` picks another port, and `HELIX_SIM_JOBS=0 helixrouter` starts with no simulated jobs. The same bursts work from a script: `curl -X POST 'localhost:8080/api/simulate?jobs=2000&rate=100000'`.
 

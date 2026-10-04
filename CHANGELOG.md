@@ -7,6 +7,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] - 2026-10-04
+
+### Added
+- **Route your own work: `Router::run(WorkHint, closure)`.** Until now the router could only execute its three built-in demo kernels, so a service could not route its own jobs through it. `run` applies the same strategy decision (inline, spawned task, bounded CPU pool, or shed under pressure) to any `FnOnce() -> T`, with `Rejected::{Overloaded, DeadlineExceeded, Panicked}` instead of `None`. Tested: 8 heavy jobs with `cpu_parallelism = 2` never ran more than 2 at once; a saturated pool sheds; a passed deadline never runs the work; a panic is reported, not propagated. New example `own_work`.
+- `HealthCheckRunner::probe` / `run_all`: real TCP connects and HTTP status checks with timeouts and measured latency; `record_custom` for checks the application runs itself.
+
+### Fixed (security)
+- **Request signing replay protection actually blocks replays.** The docs promised replay protection but `verify` only checked the timestamp window, so a captured signed request could be resent any number of times for 5 minutes. Accepted `(key_id, nonce)` pairs are now remembered until they leave the window; replays fail. Nonces are recorded only after the signature checks out, and a full cache fails closed.
+- **Expired keys no longer verify.** `verify` ignored `SigningKey::expires_at`, so rotated-out keys kept authenticating.
+- SHA-256 and HMAC now come from the RustCrypto `sha2` and `hmac` crates instead of a hand-written implementation (RFC 4231 test vector added).
+
+### Deprecated
+- `HealthCheckRunner::run_check` / `run_all_once`: they never contacted the target and reported every HTTP and TCP check as healthy with made-up latencies. Use `probe` / `run_all`.
+
+### Fixed
+- `cargo binstall helixrouter` used GitHub-style URLs that redirect to a sign-in page on GitLab; it now downloads the GitLab release assets.
+- `rust-version` is 1.85: the declared 1.81 no longer built with the locked dependencies (`getrandom` 0.4 needs edition 2024).
+
 ## [1.2.2] - 2026-09-30
 
 - Links point at GitLab and the Vercel site.

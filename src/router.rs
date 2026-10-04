@@ -307,6 +307,62 @@ struct Inner {
 
 // ===== Router =====
 
+/// Describes your work to [`Router::run`]: how expensive it is and how it
+/// scales, so the router can pick where to run it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkHint {
+    /// Identifier shown in the decision log and dashboard.
+    pub id: u64,
+    /// Abstract cost, on the same scale as the router's `inline_threshold`
+    /// and `spawn_threshold` (below the first runs inline, below the second
+    /// gets its own task, above it goes to the CPU pool).
+    pub compute_cost: u64,
+    /// How well the work parallelises, `0.0..=1.0`. Under load, work with a
+    /// high value is pooled instead of dropped.
+    pub scaling_potential: f32,
+    /// Soft latency budget in milliseconds, used for the pressure signal.
+    pub latency_budget_ms: u64,
+    /// Hard deadline as a Unix time in milliseconds; `0` for none. Past it,
+    /// the work is rejected without running.
+    pub deadline_ms: u64,
+}
+
+impl Default for WorkHint {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            compute_cost: 1,
+            scaling_potential: 0.0,
+            latency_budget_ms: 100,
+            deadline_ms: 0,
+        }
+    }
+}
+
+/// Why [`Router::run`] did not return a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Rejected {
+    /// The router chose to shed this work because the CPU pool is saturated.
+    Overloaded,
+    /// The hint's deadline had already passed.
+    DeadlineExceeded,
+    /// The work panicked.
+    Panicked,
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Overloaded => "rejected: the router is overloaded",
+            Self::DeadlineExceeded => "rejected: the deadline passed before the work started",
+            Self::Panicked => "the work panicked",
+        })
+    }
+}
+
+impl std::error::Error for Rejected {}
+
 #[derive(Clone)]
 pub struct Router {
     inner: Arc<Inner>,
@@ -860,6 +916,125 @@ impl Router {
     }
 
     // ===== Submit =====
+    /// Route your own work: the router decides, from `hint` and the current
+    /// load, whether to run `work` right here, on its own task, on the
+    /// bounded CPU pool, or not at all.
+    ///
+    /// | Strategy | What happens to `work` |
+    /// |---|---|
+    /// | Inline | called on the current task (cheap work) |
+    /// | Spawn | called on a new Tokio task |
+    /// | CpuPool, Batch | called on Tokio's blocking pool, behind the router's `cpu_parallelism` permits, so a flood of heavy work cannot exhaust threads (batching is for the built-in kernels; custom work goes to the pool) |
+    /// | Drop | not called: `Err(Rejected::Overloaded)` |
+    ///
+    /// Decisions, counters, latency histograms and the dashboard's decision
+    /// stream all include this work, the same as [`submit`](Self::submit).
+    ///
+    /// ```no_run
+    /// # async fn demo(router: &helixrouter::router::Router) {
+    /// use helixrouter::router::{Rejected, WorkHint};
+    ///
+    /// let hint = WorkHint { compute_cost: 50_000, ..WorkHint::default() };
+    /// match router.run(hint, || expensive_report()).await {
+    ///     Ok(report) => println!("{report}"),
+    ///     Err(Rejected::Overloaded) => eprintln!("busy, try later"),
+    ///     Err(e) => eprintln!("{e}"),
+    /// }
+    /// # }
+    /// # fn expensive_report() -> String { String::new() }
+    /// ```
+    pub async fn run<T, F>(&self, hint: WorkHint, work: F) -> Result<T, Rejected>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if hint.deadline_ms > 0 && now_ms >= hint.deadline_ms {
+            self.inner.deadline_exceeded.fetch_add(1, Ordering::Relaxed);
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+            self.bump_route(Strategy::Drop).await;
+            return Err(Rejected::DeadlineExceeded);
+        }
+
+        let cfg: Arc<RouterConfig> = self.inner.cfg_arc.read().await.clone();
+        let adaptive_threshold = *self.inner.adaptive_spawn_threshold.lock().await;
+        let cpu_busy = cfg
+            .cpu_parallelism
+            .saturating_sub(self.inner.cpu_slots.available_permits());
+        let queue_frac =
+            1.0 - (self.inner.cpu_slots.available_permits() as f64 / cfg.cpu_parallelism.max(1) as f64);
+        let effective_cfg = RouterConfig {
+            spawn_threshold: adaptive_threshold,
+            ..(*cfg).clone()
+        };
+        // The heuristic needs only cost and scaling; the job kind is unused.
+        let probe = Job {
+            compute_cost: hint.compute_cost,
+            scaling_potential: hint.scaling_potential,
+            ..Job::default()
+        };
+        let strategy = choose_strategy(&effective_cfg, &probe, cpu_busy);
+        let decision = RoutingDecision {
+            job_id: hint.id,
+            strategy,
+            compute_cost: hint.compute_cost,
+            cpu_busy,
+            pressure: queue_frac,
+            decision_source: "run",
+        };
+        {
+            let mut log = self.inner.routing_log.lock().await;
+            let _ = self.inner.decision_tx.send(decision.clone());
+            log.push_back(decision);
+            if log.len() > 50 {
+                log.pop_front();
+            }
+        }
+        self.bump_route(strategy).await;
+
+        let t0 = Instant::now();
+        let result = match strategy {
+            Strategy::Drop => {
+                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                self.record_pressure(queue_frac, true, 1.0).await;
+                return Err(Rejected::Overloaded);
+            }
+            Strategy::Inline => Ok(work()),
+            Strategy::Spawn => tokio::spawn(async move { work() })
+                .await
+                .map_err(|_| Rejected::Panicked),
+            Strategy::CpuPool | Strategy::Batch => {
+                let Ok(permit) = self.inner.cpu_slots.clone().acquire_owned().await else {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    return Err(Rejected::Overloaded);
+                };
+                tokio::task::spawn_blocking(move || {
+                    let out = work();
+                    drop(permit);
+                    out
+                })
+                .await
+                .map_err(|_| Rejected::Panicked)
+            }
+        };
+        let ms = t0.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => {
+                self.inner.completed.fetch_add(1, Ordering::Relaxed);
+                self.record_latency(strategy, ms).await;
+                self.record_pressure(queue_frac, false, ms as f64 / hint.latency_budget_ms.max(1) as f64)
+                    .await;
+            }
+            Err(_) => {
+                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
 
     /// Submit a job for execution, selecting an appropriate strategy automatically.
     ///
@@ -1875,6 +2050,87 @@ mod tests {
             choose_strategy(&cfg, &job, cfg.backpressure_busy_threshold),
             Strategy::Drop
         );
+    }
+
+    // ===== Router::run (your own work) =====
+
+    fn heavy() -> WorkHint {
+        WorkHint { compute_cost: 1_000_000, ..WorkHint::default() }
+    }
+
+    #[tokio::test]
+    async fn test_run_cheap_work_runs_inline_and_returns_its_value() {
+        let router = Router::new(RouterConfig::default());
+        let out = router.run(WorkHint { compute_cost: 10, ..WorkHint::default() }, || 6 * 7).await;
+        assert_eq!(out, Ok(42));
+        assert_eq!(router.stats_snapshot().await.completed, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_run_heavy_work_never_exceeds_cpu_parallelism() {
+        let cfg = RouterConfig { cpu_parallelism: 2, backpressure_busy_threshold: 1000, ..RouterConfig::default() };
+        let router = Router::new(cfg);
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (r, live, peak) = (router.clone(), Arc::clone(&live), Arc::clone(&peak));
+            tasks.push(tokio::spawn(async move {
+                r.run(heavy(), move || {
+                    let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    live.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await
+            }));
+        }
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), Ok(()));
+        }
+        assert!(peak.load(Ordering::SeqCst) <= 2, "peak {}", peak.load(Ordering::SeqCst));
+        assert_eq!(router.stats_snapshot().await.completed, 8);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_sheds_work_when_saturated() {
+        let cfg = RouterConfig { cpu_parallelism: 2, backpressure_busy_threshold: 1, ..RouterConfig::default() };
+        let router = Router::new(cfg);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let r = router.clone();
+        let holder = tokio::spawn(async move {
+            r.run(heavy(), move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        // One permit is held, which meets the busy threshold of 1.
+        let shed = router.run(heavy(), || ()).await;
+        assert_eq!(shed, Err(Rejected::Overloaded));
+        release_tx.send(()).unwrap();
+        assert_eq!(holder.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn test_run_rejects_a_passed_deadline_without_running() {
+        let router = Router::new(RouterConfig::default());
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let out = router
+            .run(WorkHint { deadline_ms: 1, ..WorkHint::default() }, move || flag.store(true, Ordering::SeqCst))
+            .await;
+        assert_eq!(out, Err(Rejected::DeadlineExceeded));
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_reports_a_panic_instead_of_propagating_it() {
+        let router = Router::new(RouterConfig::default());
+        let out: Result<(), Rejected> = router.run(heavy(), || panic!("boom")).await;
+        assert_eq!(out, Err(Rejected::Panicked));
     }
 
     // ===== Router integration (async) =====

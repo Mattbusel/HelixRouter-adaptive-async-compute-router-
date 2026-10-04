@@ -1,8 +1,8 @@
 [package]
 name = "helixrouter"
-version = "1.2.2"
+version = "1.3.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.85"
 description = "Decides, per job, whether to run it inline, spawn it, queue it on a CPU pool, batch it or drop it, based on its cost and live load. Tokio library plus a live web dashboard."
 repository = "https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router"
 homepage = "https://gitlab.com/mattbusel/HelixRouter-adaptive-async-compute-router"
@@ -17,13 +17,17 @@ exclude = ["dashboard.png", "Screenshot*", "Doc.txt", "Expand Doc.txt", "yaml", 
 # `cargo binstall helixrouter` downloads the release archive instead of
 # compiling. Asset names come from .github/workflows/release.yml.
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/helixrouter-v{ version }-{ target }{ archive-suffix }"
-bin-dir = "helixrouter-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-url = "{ repo }/-/releases/v{ version }/downloads/helixrouter-{ target }.tar.gz"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/-/releases/v{ version }/downloads/helixrouter-linux-x86_64.tar.gz"
+bin-dir = "helixrouter-v{ version }-x86_64-unknown-linux-gnu/{ bin }"
+
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-fmt = "zip"
+pkg-url = "{ repo }/-/releases/v{ version }/downloads/helixrouter-windows-x86_64.exe"
+pkg-fmt = "bin"
 
 [[bin]]
 name = "helixrouter"
@@ -42,6 +46,9 @@ simulation = ["dep:rand"]
 distributed = ["dep:async-nats"]
 
 [dependencies]
+# HMAC-SHA256 request signing (RustCrypto; replaces a hand-written SHA-256/HMAC)
+hmac = "0.12"
+sha2 = "0.10"
 # async runtime — core, never remove
 tokio = { version = "1.37", features = ["full"] }
 # web framework
