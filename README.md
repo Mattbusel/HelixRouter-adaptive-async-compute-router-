@@ -1,5 +1,13 @@
 # HelixRouter
 
+<!-- outcome-block -->
+**Keep your Rust service fast under a flood of heavy work: every job is run inline, spawned, queued, batched or dropped, so cheap work stays fast and overload can't take the service down.**
+
+**Why this over the alternatives:** `tokio::spawn` for everything lets one burst exhaust the runtime. The built-in dashboard shows the router handling 2,000 jobs at once, live, nothing mocked.
+
+**Guarantee:** if it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/HelixRouter-adaptive-async-compute-router-/issues) and I'll fix it.
+<!-- outcome-block -->
+
 **Decides, for every job your Rust service runs, whether to do it right away, give it its own task, queue it on a bounded CPU pool, batch it, or drop it, so cheap work stays fast and a flood of heavy work cannot take the service down.**
 
 <p>
