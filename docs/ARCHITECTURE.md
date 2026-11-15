@@ -172,3 +172,53 @@ HelixRouter integrates with [Every-Other-Token](https://gitlab.com/mattbusel/Eve
 - `PATCH /api/config` — EOT's PID controller writes config adjustments (e.g. raising `spawn_threshold` under sustained latency pressure).
 - `POST /api/telemetry` — EOT reports its token-stream backpressure; HelixRouter blends it into the composite pressure score so routing decisions reflect upstream load.
 - `GET /api/neural` — EOT can read the weight matrix to observe learning convergence.
+
+---
+
+## `HelixRouter::route` and its loom-checked core
+
+`HelixRouter` (`src/helix.rs`) is a small, stable front end for routing your
+own closures, separate from the full `Router` engine above.
+
+```
+route(Job { load, work })
+   |
+   v
+RouteCore::admit(load)          lock-free, src/route_core.rs
+   |  Cpu(cost <= inline_max)   -> Inline    (call here)
+   |  Cpu(cost <  spawn_max)    -> Spawn     (tokio::spawn)
+   |  Cpu(otherwise)            -> Pool      slot free?   CAS pool_running < pool_slots
+   |                                         else queue?  CAS pool_queued  < max_queued
+   |                                         else         Shed
+   |  BlockingIo                -> Blocking  CAS blocking_running < max_blocking, else Shed
+   v
+run work; the permit or ticket is an RAII guard that gives the capacity back
+(slots: Release on drop, Acquire on take; a freed slot wakes one waiter via Notify)
+```
+
+Queued jobs wait asynchronously: register on a `Notify`, retry
+`QueueTicket::try_start`, sleep. Newcomers may take a free slot ahead of a
+waiter; every release wakes another waiter, so no waiter is stranded.
+
+Because the core is plain atomics, it is model-checked with loom. `loom/` is a
+separate package that compiles `src/route_core.rs` unchanged with
+`--cfg helixrouter_loom`:
+
+```
+cd loom
+RUSTFLAGS="--cfg helixrouter_loom" cargo test --release
+```
+
+The cfg is named `helixrouter_loom`, not plain `loom`: plain `loom` is the
+name every crate uses for its own loom runs (Tokio switches to loom internals
+under it), so a crate-specific name keeps this crate's model checks from ever
+colliding with a downstream crate's. The harness is a separate package so loom
+never enters the main crate's dependency graph.
+
+Counting: `routed(lane)` is counted at admission. `completed` and `panicked`
+are counted inside the task (or inline call) where the work runs, at the moment
+it finishes, so a job still counts if the caller drops the `route` future after
+it started. A job whose work never ran (a queued pool waiter whose future was
+dropped, or a task the runtime cancelled at shutdown, reported as
+`RouteError::Cancelled`) is in neither.
+

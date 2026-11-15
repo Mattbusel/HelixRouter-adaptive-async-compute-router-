@@ -73,7 +73,7 @@ test:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "web"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      changes: ["src/**/*", "tests/**/*", "examples/**/*", "crates/**/*", "Cargo.toml", "Cargo.lock", ".gitlab-ci.yml"]
+      changes: ["src/**/*", "tests/**/*", "examples/**/*", "crates/**/*", "loom/**/*", "Cargo.toml", "Cargo.lock", ".gitlab-ci.yml"]
   variables:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
@@ -85,3 +85,4 @@ test:
     paths: [target/, .cargo-home/]
   script:
     - cargo test --locked
+    - (cd loom && RUSTFLAGS="--cfg helixrouter_loom" cargo test --release)

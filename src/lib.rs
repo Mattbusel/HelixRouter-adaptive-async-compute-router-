@@ -8,7 +8,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! helixrouter = "1.2"
+//! helixrouter = "1.4"
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //!
@@ -39,8 +39,26 @@
 //! }
 //! ```
 //!
+//! ## Route your own work
+//!
+//! [`HelixRouter::route`] is the small, stable API: give it a closure and
+//! what kind of work it is, and it runs it inline, on a task, on a bounded
+//! CPU pool or in a bounded blocking-I/O lane, shedding when full. Its shared
+//! state is model-checked with loom. See [`helix`] for the full table.
+//!
+//! ```
+//! use helixrouter::helix::{HelixRouter, Job, Lane};
+//!
+//! # #[tokio::main] async fn main() {
+//! let router = HelixRouter::default();
+//! let out = router.route(Job::cpu(5, || 6 * 7)).await.unwrap();
+//! assert_eq!((out.lane, out.value), (Lane::Inline, 42));
+//! # }
+//! ```
+//!
 //! ## Main types
 //!
+//! - [`HelixRouter`]: [`route`](HelixRouter::route) a [`Job`](helix::Job), read [`stats`](HelixRouter::stats).
 //! - [`Router`](router::Router): [`submit`](router::Router::submit) a job, read [`stats_snapshot`](router::Router::stats_snapshot) and [`latency_report`](router::Router::latency_report).
 //! - [`Job`](types::Job), [`JobKind`](types::JobKind) and [`Strategy`](types::Strategy): what goes in and how it was run.
 //! - [`RouterConfig`](config::RouterConfig): the thresholds (`inline_threshold`, `spawn_threshold`, `backpressure_busy_threshold`, batch size and delay), hot-reloadable.
@@ -76,6 +94,11 @@
 //!
 //! Many other modules in this crate are standalone building blocks you compose
 //! around [`Router`](router::Router); they are not all wired into `submit`.
+
+pub mod helix;
+pub use helix::HelixRouter;
+/// Lock-free admission state behind [`HelixRouter`]; model-checked with loom.
+mod route_core;
 
 /// Job affinity routing: stateful sticky-strategy routing via FNV-1a consistent hashing.
 pub mod affinity;

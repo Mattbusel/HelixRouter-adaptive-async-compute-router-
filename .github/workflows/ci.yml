@@ -27,3 +27,15 @@ jobs:
       - name: Doctests
         run: cargo test --doc
         timeout-minutes: 15
+
+  loom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Model-check the HelixRouter admission core
+        working-directory: loom
+        run: cargo test --release
+        env:
+          RUSTFLAGS: --cfg helixrouter_loom
+        timeout-minutes: 15
